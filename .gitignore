@@ -1,0 +1,10 @@
+# The SQLite file, its WAL, and anything generated into the data directory on
+# first run (D10).
+/data/
+
+# Local build output.
+/navi
+/navi.exe
+
+# Secrets.
+.env

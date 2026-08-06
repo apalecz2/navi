@@ -1,0 +1,16 @@
+# Scrapes the container network only. /metrics is deliberately absent from the
+# tunnel ingress table: it carries no secrets, but it describes usage patterns in
+# detail and has no reason to leave the host.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: navi
+    static_configs:
+      - targets: ["navi:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

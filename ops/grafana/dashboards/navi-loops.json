@@ -1,0 +1,126 @@
+{
+  "uid": "navi-loops",
+  "title": "Navi — loops",
+  "description": "Are the five background loops ticking, and are they ticking on time? A loop that slows before it stalls is the signal /healthz gives too late.",
+  "tags": ["navi"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Tick rate by loop",
+      "description": "Ticks per second, per loop, over a 15m window. A loop whose goroutine has died goes flat here first. Expected: scheduler 0.033, materializer/copywriter/reconciler 0.017. The sweeper ticks hourly, so it reads near zero here by design — its liveness is the p95 panel and /healthz, not this one. Note the first tick of a loop's life records no interval, so a loop that ticked once and died reads as zero here.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (loop) (rate(navi_loop_tick_interval_seconds_count[15m]))",
+          "legendFormat": "{{loop}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tick interval p95 by loop",
+      "description": "Observed seconds between consecutive tick starts. Should sit just above each loop's configured interval; a rising line is a loop falling behind before it stops. The rate window is 2h because the sweeper ticks hourly: a shorter one would drop its line between samples, which reads as a stalled loop and is not.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, loop) (rate(navi_loop_tick_interval_seconds_bucket[2h])))",
+          "legendFormat": "{{loop}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Tick errors by loop",
+      "description": "Failed and panicking ticks in the last hour. Distinguishes erroring from stalled: a loop can be flat here and healthy on the tick rate panel, or the reverse, and they are different problems with different fixes.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "auto" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (loop) (increase(navi_loop_errors_total[1h]))",
+          "legendFormat": "{{loop}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Goroutines",
+      "description": "Process goroutine count. Included because a loop restarting in a tight cycle, or a shutdown that leaks, shows up here and nowhere else yet.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "go_goroutines{job=\"navi\"}",
+          "legendFormat": "goroutines"
+        }
+      ]
+    }
+  ]
+}

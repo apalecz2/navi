@@ -1,0 +1,78 @@
+# navi plus its two sidecars. Prometheus and Grafana are not components: nothing
+# in the fire path reads them, scraping is pull-based so a dead Prometheus cannot
+# block the app, and if both die every reminder still fires (D-023).
+#
+# cloudflared already runs on this host and is not defined here. See
+# ops/cloudflared-ingress.md for the ingress rule and the network it needs to
+# share.
+
+services:
+  navi:
+    build: .
+    image: navi:latest
+    container_name: navi
+    restart: unless-stopped
+    environment:
+      HTTP_ADDR: ":8000"
+      DATA_DIR: /data
+      # No default, here or in the code: the schedule machinery resolves against
+      # this zone and a wrong guess is invisible until a DST boundary.
+      DEFAULT_TZ: ${DEFAULT_TZ:?DEFAULT_TZ must be set, e.g. America/Toronto}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # Local disk only. SQLite locking is unreliable over NFS and SMB (D3).
+      # The container runs as uid 65532, so: mkdir -p data && sudo chown 65532:65532 data
+      - ./data:/data
+    ports:
+      # Loopback only. Everything reachable from outside this host arrives
+      # through the tunnel.
+      - "127.0.0.1:8000:8000"
+    networks:
+      - navi
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: navi-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - navi
+    depends_on:
+      - navi
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: navi-grafana
+    restart: unless-stopped
+    environment:
+      # Same rule as the application's own secrets: nothing that authorizes gets
+      # a default value (D9).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - navi
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  navi:
+    name: navi

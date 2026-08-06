@@ -1,0 +1,25 @@
+# Minimal on purpose. The default linters plus the few that catch things this
+# codebase actually cares about: unwrapped errors crossing package boundaries,
+# ignored context arguments, and unchecked returns.
+#
+# golangci-lint is not vendored. Install it or skip it; go build and go vet are
+# the checks that gate a commit.
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - errorlint    # %v where %w was meant, errors compared with ==
+    - contextcheck # a context that should have been passed through and was not
+    - bodyclose
+    - unconvert
+    - misspell
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

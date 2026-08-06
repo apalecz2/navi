@@ -1,0 +1,17 @@
+# Dashboards are files in this repository, provisioned read-only. Edits made in
+# the Grafana UI are not persisted, on purpose: the dashboard is part of the
+# system (D-023), so it belongs in version control with everything else.
+
+apiVersion: 1
+
+providers:
+  - name: navi
+    orgId: 1
+    folder: Navi
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

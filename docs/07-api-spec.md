@@ -36,6 +36,11 @@ Properties that matter:
 Tokens appear in the notification payload, which transits ntfy's push
 infrastructure. The scoping is what makes that acceptable.
 
+The signing secret and the calendar path token are both generated into the data
+directory on first run when absent (D10). Neither has a default. Regenerating the
+signing secret invalidates outstanding action tokens, which is bounded by their
+24-hour expiry and is the intended way to revoke.
+
 ## Idempotency
 
 Not a separate mechanism. It falls out of the status state machine in

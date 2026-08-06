@@ -181,6 +181,11 @@ Keys in use:
 | `proactive_count:{date}` | Daily cap on unprompted agent messages |
 | `global_pause_until` | Vacation mode |
 
+Every key in that table except `last_materialized_through` is *per-person* state
+stored as a singleton, which is correct under S1 and is the assumption that would
+have to move first if S1 ever did. Noted here rather than designed around: the fix
+is a composite primary key, not a different table.
+
 ## Status state machines
 
 Kept in one module and enforced by every surface. This is what makes idempotency

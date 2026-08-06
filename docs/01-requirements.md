@@ -14,7 +14,7 @@ Priority levels:
 
 | ID | Pri | Requirement |
 |---|---|---|
-| S1 | M | Single user. No multi-tenancy, no user table, no per-user configuration. |
+| S1 | M | Single user. No multi-tenancy, no user table, no per-user configuration. Deferred rather than rejected: the product today is single-tenant and the commercialization shape, if any, is undecided. See [10-open-questions.md](10-open-questions.md#q-13-commercialization-shape). |
 | S2 | M | No automated test suite required. Rough edges are acceptable; unreliable reminder delivery is not. |
 | S3 | M | Scope is reminders and, later, calendar events. Not a general-purpose assistant. |
 | S4 | L | Calendar events supported as a first-class item kind with duration, sharing all conversational actions with reminders. |
@@ -32,6 +32,7 @@ Priority levels:
 | D7 | M | Cloudflare Access in front of the dashboard and web app, one-time PIN to email. |
 | D8 | M | Inbound conversation restricted to a single allowlisted sender ID. Everything else is dropped silently. |
 | D9 | S | All secrets supplied by environment variable. No credentials in the image or repository. |
+| D10 | S | Secrets the deployment owns rather than borrows — the action-token signing key, the calendar path token — are generated into the data directory on first run when absent. Never a compiled-in or committed default. |
 
 ## T. Transport
 

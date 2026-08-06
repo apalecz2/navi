@@ -233,6 +233,12 @@ services:
 Litestream runs as the container entrypoint wrapping the app process, which is
 the standard pattern and avoids a second service.
 
+`ACTION_TOKEN_SECRET` is shown above for completeness, but per D10 it and the
+calendar path token are generated into `/data` on first run when unset. Nothing
+that signs or authorizes may have a compiled-in or committed default value: a
+default signing key is indistinguishable from no signing key, and it is the
+failure that survives being copied to a second machine.
+
 Cloudflare Tunnel ingress:
 
 | Path | Protection |
@@ -257,6 +263,19 @@ Concurrency is a single writer (the background loops and API share one process)
 with concurrent readers. WAL handles readers during writes without blocking. The
 scheduler's claim uses `BEGIN IMMEDIATE` to take the write lock up front rather
 than risking a mid-transaction upgrade failure.
+
+**All database access goes through a single repository module.** No SQL in loop
+bodies, endpoint handlers, or agent tools — they call named functions that return
+models.
+
+This is ordinary structure, and it is also the only hedge this design makes
+against a change it has not committed to. If the scope assumption in S1 ever
+moves, the migration itself is cheap — `ALTER TABLE ADD COLUMN … DEFAULT` does
+not rewrite a table in SQLite. The expensive part of retrofitting any
+cross-cutting column is *finding every query*, where a miss is silent and looks
+like working code. Confined to one module that is a bounded, reviewable edit.
+Scattered across five loops and a dozen handlers it is an audit. The boundary
+costs nothing to hold from the first commit and cannot be reconstructed later.
 
 Backup is Litestream replicating to R2 continuously. Recovery is
 `litestream restore` plus a container start.

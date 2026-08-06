@@ -43,6 +43,13 @@ does.
 rework. The database file must stay off network mounts, since SQLite locking is
 unreliable over NFS and SMB. Neither constraint binds at this scale.
 
+The scheduler's `BEGIN IMMEDIATE` claim is the only construct in the design with
+no portable equivalent; the Postgres form is `SELECT … FOR UPDATE SKIP LOCKED`
+over the same query. Recorded so that a database swap, if one is ever wanted, is
+a known quantity rather than a discovery. Everything else is ordinary SQL behind
+the repository module described in
+[03-architecture.md](03-architecture.md#storage).
+
 ---
 
 ## D-003: Two tables, definition and materialized occurrence

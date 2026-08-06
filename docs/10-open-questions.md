@@ -134,6 +134,51 @@ integration instead of two.
 
 ---
 
+## Needs an answer only if commercialization happens
+
+### Q-13: Commercialization shape
+
+Undecided, and quite possibly never decided. The product being built is the
+single-user one in S1, and it is finished and worth having whether or not anything
+follows it. This entry exists so that a later reader does not mistake "we built one
+thing" for "we ruled out the others."
+
+Two shapes are plausible and they want nearly opposite things:
+
+| | Sell-and-self-host | Multi-tenant SaaS |
+|---|---|---|
+| Owner column on every table | never needed | required |
+| Caller-identity resolution, identity mapping | never needed | required |
+| Per-person config and secrets | never needed | required |
+| Loop partitioning, incremental materialization | never needed | eventually |
+| Nothing personal compiled in | **required** | **required** |
+| Secrets generated per install | **required** | required |
+| All SQL behind one module | useful | **required** |
+
+Only the last three rows are shared, and all three were adopted because they are
+worth having for a single user on their own merits — D9/D10, the config resolvers
+in [06-agent-spec.md](06-agent-spec.md#system-prompt-structure), and the
+repository module in [03-architecture.md](03-architecture.md#storage). Nothing in
+this repository has been built *toward* multi-tenancy, and nothing should be.
+
+If the question ever becomes live, the surfaces that move are: the repository
+module, the singleton keys in [`kv`](04-data-model.md#kv), and config resolution.
+That list is short because those three things are the only places the assumption
+is expressed. Keeping it short is the entire hedge.
+
+**Resolve by:** using the thing for six months first. The shape of the answer
+depends on facts not yet in evidence, and the cost of leaving it open is now
+approximately zero.
+
+**One note if it does go multi-tenant:** cross-tenant isolation is the single
+property in this system that cannot be verified by hand, because a leak looks
+exactly like correct behaviour until it does not. That is not an argument against
+S2 today — it is the specific condition under which S2 would need revisiting, and
+what it would need is one test asserting that a query for one owner never returns
+another owner's rows. One test, not a suite.
+
+---
+
 ## Known unknowns
 
 Things that will only become clear through use.
@@ -168,13 +213,14 @@ Things that will only become clear through use.
 
 Recorded so they do not get relitigated without new information.
 
-- **Multi-user, sharing, delegation.** Out of scope, and the schema choices assume
-  it stays that way.
+- **Multi-user, sharing, delegation.** Out of scope for the product being built.
+  Not the same claim as "impossible later" — see Q-13 for what the design does
+  and does not foreclose.
 - **A native iOS app.** APNs with notification categories is the only fully
   reliable path to native actions, and it costs a developer account and a build
   pipeline. ntfy gets close enough.
 - **A test suite.** Explicitly declined. `/healthz` covers the failure that
   actually matters, which is a stalled loop.
 - **Postgres.** Decided in D-002 and superseding an earlier decision. Only revisit
-  if multi-replica ever becomes necessary, which would require multi-user, which
-  is out of scope.
+  if multi-replica ever becomes necessary. D-002 now records the one construct
+  that would not port.

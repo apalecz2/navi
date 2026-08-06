@@ -130,10 +130,18 @@ Assembled from parts rather than being one string, so each can be tuned
 independently:
 
 1. **Role and scope.** What the system is, what it manages, what it does not do.
-2. **Persona.** Loaded from `/config/persona.md`, shared with the copywriter so
-   the voice is consistent across chat and notifications.
-3. **Vocabulary defaults.** Rendered from `defaults.yaml`, so the model reads the
+2. **Persona.** From `get_persona()`, shared with the copywriter so the voice is
+   consistent across chat and notifications.
+3. **Vocabulary defaults.** Rendered from `get_defaults()`, so the model reads the
    same resolution table the validator enforces.
+
+Both are function calls rather than inline file reads. `get_persona()` reads
+`/config/persona.md` and `get_defaults()` reads `/config/defaults.yaml`, and that
+is the whole implementation today. The indirection earns its keep immediately —
+hot-editing the persona without a rebuild is a P5 exit criterion, so the read
+needs a single home with the caching decision in it either way — and it is also
+the seam where those values would stop being files if they ever needed to differ
+per person. Callers should not know which it is.
 4. **Behavioural rules.** The list below.
 5. **Injected context.** As above.
 

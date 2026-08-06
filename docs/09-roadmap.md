@@ -21,6 +21,8 @@ to be useful.
 - Scheduler loop with `BEGIN IMMEDIATE` claiming and restart recovery
 - ntfy outbound adapter
 - Docker Compose, Cloudflare Tunnel ingress, Litestream to R2
+- Repository module: all SQL behind it from the first query
+- First-run secret generation into `/data` (D10)
 - `/healthz`
 
 **Exit criteria**

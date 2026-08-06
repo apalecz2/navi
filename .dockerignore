@@ -4,3 +4,9 @@ data
 docs
 ops
 *.md
+
+# config/ is COPYed into the image so a forgotten mount is a stale table rather
+# than a process that will not start. The *.md rule above would quietly drop
+# persona.md out of it in P5, and the symptom would be a voice that ignores
+# every edit — so it is excepted here, now, rather than found later.
+!config/persona.md

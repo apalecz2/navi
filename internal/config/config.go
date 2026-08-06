@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -28,6 +29,7 @@ type Config struct {
 	HTTP     HTTP
 	Log      Log
 	Data     Data
+	Files    Files
 	Schedule Schedule
 	Telegram Telegram
 	Backup   Backup
@@ -52,10 +54,48 @@ type Data struct {
 	// (D3).
 	Dir string
 
-	// DatabasePath is parsed now and consumed when the store lands. Empty means
-	// "DATABASE_PATH was not set"; the store session decides whether to default
-	// it under Dir or to require it.
+	// DatabasePath overrides where the SQLite file lives. Empty means
+	// "DATABASE_PATH was not set", which is the normal case; see DBPath.
 	DatabasePath string
+}
+
+// DBPath is where the SQLite file lives: DATABASE_PATH when set, otherwise
+// navi.db under Dir.
+//
+// Defaulting rather than requiring it means the deployment names one directory
+// and gets a database, a WAL, and any generated secret in the same place, which
+// is the same place Litestream replicates and the volume mounts. Setting both
+// variables to disagreeing directories is the failure this avoids.
+func (d Data) DBPath() string {
+	if d.DatabasePath != "" {
+		return d.DatabasePath
+	}
+	return filepath.Join(d.Dir, "navi.db")
+}
+
+// Files locates the read-only configuration mounted into the container: the
+// vocabulary table and, from P5, the persona.
+//
+// They are files rather than environment variables because both are edited
+// rather than set. Retuning the vocabulary or the voice should be a text edit
+// and a restart, not a rebuild (D-016, G5), and neither is a credential.
+type Files struct {
+	// ConfigDir defaults to /config, which is where the compose file mounts
+	// them and where the image carries its own copies, so a missing mount is a
+	// stale table rather than a process that will not start.
+	ConfigDir string
+}
+
+// DefaultsPath is the vocabulary table (D-016).
+func (f Files) DefaultsPath() string {
+	return filepath.Join(f.ConfigDir, "defaults.yaml")
+}
+
+// PersonaPath is the voice definition (G5). Nothing reads it until P5; the
+// helper is here so that when something does, it does not invent a second way
+// to spell the path.
+func (f Files) PersonaPath() string {
+	return filepath.Join(f.ConfigDir, "persona.md")
 }
 
 // Schedule holds the timezone settings the scheduling machinery resolves
@@ -109,6 +149,10 @@ func Load() (Config, error) {
 	}
 	cfg.Data.DatabasePath = envString("DATABASE_PATH", "")
 
+	if cfg.Files.ConfigDir, err = envRequiredString("CONFIG_DIR", "/config"); err != nil {
+		return Config{}, err
+	}
+
 	if cfg.Schedule.DefaultTZ, err = envLocation("DEFAULT_TZ"); err != nil {
 		return Config{}, err
 	}
@@ -135,6 +179,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("http_addr", c.HTTP.Addr),
 		slog.String("log_level", c.Log.Level.String()),
 		slog.String("data_dir", c.Data.Dir),
+		slog.String("config_dir", c.Files.ConfigDir),
 		slog.String("default_tz", c.Schedule.DefaultTZ.String()),
 	)
 }

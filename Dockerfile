@@ -1,11 +1,15 @@
 # One static binary in one image. CGO_ENABLED=0 with no cgo dependencies (D11)
 # means the runtime stage needs nothing underneath the binary, so it is scratch.
 #
-# When SQLite lands the driver stays pure Go (modernc.org/sqlite), so this stays
-# scratch. Litestream becomes the entrypoint wrapping the binary at that point;
-# it is a static Go binary too and copies into this image the same way.
+# SQLite is here now and the driver is pure Go (modernc.org/sqlite), so this is
+# still scratch and the binary is still static. Litestream becomes the entrypoint
+# wrapping the binary later; it is a static Go binary too and copies in the same
+# way.
+#
+# The builder tracks the go directive in go.mod, which modernc.org/sqlite raised
+# to 1.25.
 
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS build
 
 RUN apk add --no-cache ca-certificates
 
@@ -31,6 +35,12 @@ FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 COPY --from=build /out/navi /navi
+
+# The vocabulary table, and later the persona, travel in the image so a
+# forgotten mount is a stale table rather than a process that will not start.
+# The compose file bind-mounts ./config over this, which is what makes retuning
+# an edit and a restart instead of a rebuild (D-016, G5).
+COPY --from=build /src/config /config
 
 # Numeric because scratch has no /etc/passwd. The bind-mounted data directory
 # must be writable by this uid — see the note in docker-compose.yml.

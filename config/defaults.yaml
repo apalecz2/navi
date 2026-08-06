@@ -1,0 +1,50 @@
+# Vocabulary defaults. Transcribed from docs/05-schedule-spec.md#vocabulary-defaults,
+# which is the source of truth for the values; this file is the source of truth
+# for the running process.
+#
+# One table, two readers (D-016). The validator resolves an under-specified
+# schedule through it, and the system prompt renders it so the model resolves
+# the same phrasing the same way. They agree because they read the same loaded
+# value, not because two implementations were kept in step.
+#
+# Retuning is an edit here. The file is mounted read-only at /config in the
+# container, so a change needs a restart but not a rebuild.
+
+# Phrase to schedule shape. Consulted by the model when it reads a request; a
+# partial entry (just a count) leaves the rest to the model and to the blocks
+# below.
+frequency:
+  "periodically":       { kind: fuzzy, period: week, count: 3 }
+  "now and then":       { kind: fuzzy, period: week, count: 2 }
+  "every so often":     { kind: fuzzy, period: week, count: 2 }
+  "a couple of times":  { count: 2 }
+  "a few times":        { count: 3 }
+  "regularly":          { kind: fixed, rrule: "FREQ=DAILY" }
+  "often":              { kind: fuzzy, period: week, count: 5 }
+
+# Named times of day, plus the window used when a windowed or fuzzy schedule
+# names none. Each is a [start, end] pair of local HH:MM times.
+windows:
+  "morning":            ["07:00", "11:00"]
+  "afternoon":          ["12:00", "17:00"]
+  "evening":            ["17:00", "22:00"]
+  "during the day":     ["09:00", "18:00"]
+  default:              ["09:00", "21:00"]
+
+# Minimum hours between two occurrences of the same fuzzy item, by period. This
+# is what stops "three times this week" from drawing three slots in one morning
+# (C3), and it is the value the gap-satisfiable check tests against the count.
+min_gap_hours:
+  day:                  3
+  week:                 20
+  month:                48
+
+# Item-level defaults. days_allowed is the fuzzy placement set; the rest must
+# match the DDL defaults and the constants in internal/domain, and Table.Validate
+# fails at startup if they ever disagree.
+defaults:
+  days_allowed:         ["MO","TU","WE","TH","FR","SA","SU"]
+  priority:             3
+  notify_policy:        at_time
+  tz_mode:              floating
+  snooze_cap:           3

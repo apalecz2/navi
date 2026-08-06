@@ -18,11 +18,16 @@ services:
       # No default, here or in the code: the schedule machinery resolves against
       # this zone and a wrong guess is invisible until a DST boundary.
       DEFAULT_TZ: ${DEFAULT_TZ:?DEFAULT_TZ must be set, e.g. America/Toronto}
+      CONFIG_DIR: /config
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       # Local disk only. SQLite locking is unreliable over NFS and SMB (D3).
       # The container runs as uid 65532, so: mkdir -p data && sudo chown 65532:65532 data
       - ./data:/data
+      # Read-only, and it shadows the copy baked into the image. Editing the
+      # vocabulary table needs a restart but not a rebuild (D-016); persona.md
+      # lands beside it in P5 and needs neither (G5).
+      - ./config:/config:ro
     ports:
       # Loopback only. Everything reachable from outside this host arrives
       # through the tunnel.

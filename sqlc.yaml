@@ -1,0 +1,47 @@
+# sqlc compiles the DDL in internal/store/migrations plus the hand-written
+# queries into typed Go. The DDL stays the source of truth and there is no ORM
+# and no model layer that could drift from it — which is the whole reason to
+# prefer this: the partial indexes, the recursive-CTE chains view, and the
+# BEGIN IMMEDIATE claim are the load-bearing parts of the design, and they are
+# precisely what an ORM abstracts badly or cannot express (docs/04-data-model.md).
+#
+# The generated package is committed. `go build ./...` and `go vet ./...` are
+# what gate a commit, and sqlc is not vendored any more than golangci-lint is;
+# a tree that needs an uninstalled tool before it compiles would break that.
+# Run `sqlc generate` after editing anything under migrations/ or queries/.
+version: "2"
+sql:
+  - engine: "sqlite"
+    # Enumerated rather than pointed at the directory, because sqlc's SQLite
+    # analyzer cannot resolve the column list of a recursive CTE and rejects
+    # 0002_chains_view.sql outright:
+    #
+    #   0002_chains_view.sql:31:10: column reference "root_id" not found
+    #
+    # Omitting that one file is the cheap fix and the correct one. The view is
+    # an object no generated query references, the migrator still applies it,
+    # and the alternative — a second copy of the DDL written for sqlc to read —
+    # is the schema drift this whole arrangement exists to prevent. When P2
+    # queries chains, the query is hand-written with database/sql inside this
+    # package, which is still no SQL outside the repository module.
+    #
+    # A new migration that adds a table must be added to this list.
+    schema:
+      - "internal/store/migrations/0001_init.sql"
+    queries: "internal/store/queries"
+    gen:
+      go:
+        package: "sqlc"
+        out: "internal/store/sqlc"
+        output_files_suffix: ".gen"
+
+        # Nullable columns become *string / *int64 rather than sql.NullString,
+        # which maps straight onto the domain's pointer fields. Optional values
+        # are pointers throughout this codebase for the same reason: 0 and
+        # omitted are the same value for a plain int, and priority has a
+        # non-zero default.
+        emit_pointers_for_null_types: true
+
+        # A :many query with no rows returns an empty slice, not nil, so a
+        # caller ranging over the result does not have to care which it got.
+        emit_empty_slices: true

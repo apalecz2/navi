@@ -7,6 +7,7 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -16,19 +17,30 @@ import (
 	"github.com/aidenpaleczny/navi/internal/metrics"
 )
 
-// Server holds what the handlers read. Later sessions add the repository here;
-// nothing in this struct is written after New returns.
+// Store is the slice of the repository the handlers in this package use. It is
+// declared here, by the consumer, rather than exported by internal/store: this
+// package depends on three methods, and saying so is what keeps a handler from
+// reaching a query it has no business with as the repository grows.
+type Store interface {
+	Ping(ctx context.Context) error
+	PendingOverdue(ctx context.Context) (int, error)
+	LastMaterializedThrough(ctx context.Context) (time.Time, bool, error)
+}
+
+// Server holds what the handlers read. Nothing in this struct is written after
+// New returns.
 type Server struct {
 	log     *slog.Logger
 	health  *health.Registry
 	metrics *metrics.Metrics
+	store   Store
 }
 
 // New builds the http.Server. It takes the HTTP config group rather than the
 // whole configuration, so a handler cannot reach a credential it has no
 // business with.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics) *http.Server {
-	s := &Server{log: log, health: h, metrics: m}
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store) *http.Server {
+	s := &Server{log: log, health: h, metrics: m, store: st}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

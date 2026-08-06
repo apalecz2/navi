@@ -78,6 +78,25 @@ func (m *Metrics) IncLoopError(loop string) {
 	m.loopErrors.WithLabelValues(loop).Inc()
 }
 
+// RegisterPendingOverdue publishes navi_pending_overdue, backed by a function
+// this package calls at scrape time.
+//
+// A callback rather than a setter, because this package is a leaf and has to
+// stay one: the supervisor writes to it and a handler reads it, so a database
+// import here would put a dependency on the store underneath everything. The
+// caller supplies a closure over the repository, and the count is a single
+// partial-index lookup.
+//
+// f should return NaN when it cannot answer. Prometheus renders that as a gap
+// in the series, which is what an unreachable database should look like — zero
+// would look like a healthy scheduler.
+func (m *Metrics) RegisterPendingOverdue(f func() float64) {
+	m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "navi_pending_overdue",
+		Help: "Pending occurrences past their start time that the scheduler has not claimed.",
+	}, f))
+}
+
 // Handler serves the exposition format for this registry.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{

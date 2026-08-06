@@ -15,7 +15,7 @@ Priority levels:
 | ID | Pri | Requirement |
 |---|---|---|
 | S1 | M | Single user. No multi-tenancy, no user table, no per-user configuration. Deferred rather than rejected: the product today is single-tenant and the commercialization shape, if any, is undecided. See [10-open-questions.md](10-open-questions.md#q-13-commercialization-shape). |
-| S2 | M | No automated test suite required. Rough edges are acceptable; unreliable reminder delivery is not. |
+| S2 | M | No automated test suite required. Rough edges are acceptable; unreliable reminder delivery is not. One carve-out is under discussion, in [Q-14](10-open-questions.md#q-14-rrule-and-dst-expansion-correctness). |
 | S3 | M | Scope is reminders and, later, calendar events. Not a general-purpose assistant. |
 | S4 | L | Calendar events supported as a first-class item kind with duration, sharing all conversational actions with reminders. |
 
@@ -28,11 +28,13 @@ Priority levels:
 | D3 | M | SQLite as the datastore, in WAL mode, on a local volume rather than a network mount. |
 | D4 | M | Continuous backup of the SQLite file to Cloudflare R2 via Litestream. |
 | D5 | M | Services: `navi` (API plus background loops), `cloudflared` (existing). Optionally `litestream` if not run as the container entrypoint. |
-| D6 | M | Single application replica. Background loops run as asyncio tasks in the API process. |
+| D6 | M | Single application replica. Background loops run as goroutines in the API process, under a supervisor that restarts any that exit. |
 | D7 | M | Cloudflare Access in front of the dashboard and web app, one-time PIN to email. |
 | D8 | M | Inbound conversation restricted to a single allowlisted sender ID. Everything else is dropped silently. |
 | D9 | S | All secrets supplied by environment variable. No credentials in the image or repository. |
 | D10 | S | Secrets the deployment owns rather than borrows — the action-token signing key, the calendar path token — are generated into the data directory on first run when absent. Never a compiled-in or committed default. |
+| D11 | S | Ships as a single statically linked binary with no runtime dependencies, built `CGO_ENABLED=0` so the image can be `scratch` or distroless. The SQLite driver must therefore be pure Go. |
+| D12 | M | Graceful shutdown: on `SIGTERM` the HTTP server drains, every loop is cancelled through its context, and any in-flight claim transaction commits or rolls back before exit. |
 
 ## T. Transport
 
@@ -186,6 +188,8 @@ Priority levels:
 | Q4 | M | The system survives a model provider outage with degraded messaging but intact delivery. |
 | Q5 | S | Recovery from total host loss is restoring the Litestream replica and starting the container. |
 | Q6 | S | Action tokens embedded in notifications are scoped to a single occurrence and action and expire. |
+| Q7 | S | Metrics exported in Prometheus format on a scrape endpoint, covering at minimum: delivery latency (scheduled time to send), per-loop tick interval, occurrence status transitions, model tier success and escalation rate, and copywriter fallback rate. |
+| Q8 | S | A dashboard renders Q7. `pending_overdue > 0` is the one condition that alerts; everything else in this system degrades visibly on its own. |
 
 ---
 

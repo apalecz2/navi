@@ -57,7 +57,7 @@ It cannot stop a reminder from firing.
 
 ## Processes
 
-One container, one process, several asyncio tasks. There is no queue, no worker
+One container, one static binary, several goroutines. There is no queue, no worker
 pool, and no second replica, because a single user generates a few hundred writes
 a day and every added moving part is another thing that can silently stop.
 
@@ -75,9 +75,48 @@ Running these in-process rather than as separate containers is deliberate. They
 share the SQLite connection pool, they are all trivially small, and a single
 process is one thing to restart and one place to read logs.
 
-The tradeoff is that a crash in one task must not take down the others. Each loop
-wraps its body in a try/except that logs and continues, and the loop supervisor
-restarts any task that exits.
+The tradeoff is that a crash in one loop must not take down the others:
+
+```go
+type Loop struct {
+    Name     string
+    Interval time.Duration
+    Tick     func(context.Context) error
+}
+
+func (s *Supervisor) run(ctx context.Context, l Loop) {
+    for ctx.Err() == nil {
+        if err := s.tickOnce(ctx, l); err != nil {
+            s.log.Error("tick failed", "loop", l.Name, "err", err)
+        }
+        select {
+        case <-ctx.Done():
+        case <-time.After(l.Interval):
+        }
+    }
+}
+
+// tickOnce recovers panics so one bad occurrence cannot kill the loop,
+// and records last_tick for /healthz whether or not the body succeeded.
+func (s *Supervisor) tickOnce(ctx context.Context, l Loop) (err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            err = fmt.Errorf("panic in %s: %v", l.Name, r)
+        }
+        s.health.Observe(l.Name, time.Now())
+    }()
+    return l.Tick(ctx)
+}
+```
+
+Two details are load-bearing. The `recover` is per tick rather than per loop, so a
+single malformed row costs one interval instead of the loop. And `last_tick` is
+recorded in the deferred function, so a loop that is running but failing still
+reports as ticking — `/healthz` distinguishes "stalled" from "erroring", which are
+different problems with different fixes.
+
+Cancellation is uniform: every loop takes a `context.Context`, and `SIGTERM`
+cancels the root (D12).
 
 ## Data flow
 
@@ -135,49 +174,56 @@ bolted on per surface.
 Two roles, one interface. Both are configured by environment variable and can be
 pointed at different adapters.
 
-```python
-class Transport(Protocol):
-    name: str
-    capabilities: Capabilities
+```go
+type Transport interface {
+    Name() string
+    Capabilities() Capabilities
 
-    async def send(
-        self,
-        recipient: str,
-        body: str,
-        actions: list[Action] = (),
-        priority: Priority = Priority.NORMAL,
-        thread_ref: str | None = None,
-    ) -> str: ...          # returns external message id
+    // Send returns the transport's own message id.
+    Send(ctx context.Context, msg Outbound) (externalID string, err error)
 
-    async def receive(self) -> AsyncIterator[IncomingMessage]: ...
+    // Receive streams inbound messages until ctx is cancelled. Transports that
+    // poll and transports that are fed by a webhook both satisfy this; the
+    // difference is confined to the adapter.
+    Receive(ctx context.Context) (<-chan IncomingMessage, error)
+}
 
+type Outbound struct {
+    Recipient string
+    Body      string
+    Actions   []Action
+    Priority  Priority
+    ThreadRef string
+}
 
-@dataclass
-class Capabilities:
-    supports_actions: bool
-    supports_native_notification_actions: bool
-    supports_rich_text: bool
-    max_body_length: int
+type Capabilities struct {
+    SupportsActions                   bool
+    SupportsNativeNotificationActions bool
+    SupportsRichText                  bool
+    MaxBodyLength                     int
+}
 
+type Action struct {
+    ID      string // "complete" | "snooze" | "skip"
+    Label   string
+    URL     string
+    Method  string
+    Headers map[string]string
+}
 
-@dataclass
-class Action:
-    id: str                # "complete" | "snooze" | "skip"
-    label: str
-    url: str
-    method: str = "POST"
-    headers: dict = field(default_factory=dict)
-
-
-@dataclass
-class IncomingMessage:
-    sender_id: str
-    text: str
-    transport: str
-    external_id: str
-    reply_to: str | None
-    received_at: datetime
+type IncomingMessage struct {
+    SenderID   string
+    Text       string
+    Transport  string
+    ExternalID string
+    ReplyTo    string
+    ReceivedAt time.Time
+}
 ```
+
+`Send` takes a struct rather than a parameter list because Go has no default
+arguments and most calls set two of the five fields. The zero values are the
+defaults.
 
 Callers branch on `capabilities`, never on `name`. A transport without action
 support renders a numbered plain-text list that the agent parses from the reply,
@@ -197,15 +243,26 @@ conversation, where a real chat UI matters.
 ## Model access
 
 All providers behind one OpenAI-compatible client with a per-tier `base_url` and
-key. A single module exposes:
+key. A single package exposes:
 
-```python
-async def complete(task: Task, messages, tools=None) -> Result
+```go
+func (c *Client) Complete(
+    ctx context.Context,
+    task Task,
+    messages []Message,
+    tools []Tool,
+) (Result, error)
 ```
 
-with a configuration dict mapping each `Task` to an ordered tier list. Swapping a
-model is a config edit. See [06-agent-spec.md](06-agent-spec.md) for the routing
-table and escalation ladder.
+with configuration mapping each `Task` to an ordered tier list. Swapping a model
+is a config edit. See [06-agent-spec.md](06-agent-spec.md) for the routing table
+and escalation ladder.
+
+**No LLM SDK and no agent framework.** L5 asks for exactly one thing — an
+OpenAI-compatible request with a configurable `base_url` — which is `net/http`
+and `encoding/json` in about 150 lines. A framework would add a dependency in
+order to hide the tiering and escalation logic, which is the part of this system
+worth owning outright.
 
 ## Deployment
 
@@ -228,7 +285,19 @@ services:
 
   cloudflared:
     # existing service, add an ingress rule for navi:8000
+
+  prometheus:
+    # scrapes navi:8000/metrics, 15s interval, 90d retention
+  grafana:
+    # dashboards in ./grafana/dashboards, provisioned from the repo
 ```
+
+The image is built from `scratch`, since a `CGO_ENABLED=0` binary needs nothing
+underneath it but CA certificates and zoneinfo, and both are embedded — the
+latter by importing `time/tzdata`, which matters because a `scratch` image has no
+`/usr/share/zoneinfo` and every schedule in this system resolves against an IANA
+zone. A missing tzdb would look like correct behaviour until the first DST
+boundary.
 
 Litestream runs as the container entrypoint wrapping the app process, which is
 the standard pattern and avoids a second service.
@@ -255,14 +324,31 @@ one occurrence and one action, and short-lived.
 
 ## Storage
 
-SQLite in WAL mode. The file must live on local disk; SQLite locking is unreliable
-over NFS and SMB, and a corrupted database is a worse outcome than any convenience
-gained.
+SQLite in WAL mode, through `modernc.org/sqlite` — a pure-Go transpilation of
+SQLite rather than a cgo binding. That choice is what satisfies D11: `mattn/go-
+sqlite3` is the more common driver and requires cgo, which means a C toolchain in
+the build and a dynamically linked binary. The pure-Go driver is measurably
+slower under heavy concurrent write load, which is a benchmark this workload never
+runs.
+
+The file must live on local disk; SQLite locking is unreliable over NFS and SMB,
+and a corrupted database is a worse outcome than any convenience gained.
 
 Concurrency is a single writer (the background loops and API share one process)
 with concurrent readers. WAL handles readers during writes without blocking. The
 scheduler's claim uses `BEGIN IMMEDIATE` to take the write lock up front rather
 than risking a mid-transaction upgrade failure.
+
+Two pools, because Go's `database/sql` will otherwise open several connections and
+let two writers collide: one writer handle with `SetMaxOpenConns(1)`, and a
+separate read-only pool. Pragmas on open: `journal_mode=WAL`, `busy_timeout=5000`,
+`foreign_keys=ON`, `synchronous=NORMAL`.
+
+Queries are hand-written SQL compiled by **sqlc** into typed Go. The DDL in
+[04-data-model.md](04-data-model.md) stays the source of truth, which is the whole
+reason to prefer this over an ORM: the partial indexes, the recursive-CTE `chains`
+view, and `BEGIN IMMEDIATE` are the parts that matter, and all three are things an
+ORM abstracts badly or not at all.
 
 **All database access goes through a single repository module.** No SQL in loop
 bodies, endpoint handlers, or agent tools — they call named functions that return
@@ -279,6 +365,39 @@ costs nothing to hold from the first commit and cannot be reconstructed later.
 
 Backup is Litestream replicating to R2 continuously. Recovery is
 `litestream restore` plus a container start.
+
+## Observability
+
+`/healthz` answers "is it running". Metrics answer "is it working", which is a
+different question and the one this system is actually bad at failing loudly
+about. Almost everything here degrades silently by design: a plain-title
+notification looks fine, a stalled copywriter looks fine, and a model tier that
+has started failing every call looks fine right up until the escalation bill
+arrives.
+
+Exported on `/metrics` in Prometheus format, scraped locally, rendered in Grafana:
+
+| Metric | Type | Why it earns its place |
+|---|---|---|
+| `navi_delivery_latency_seconds` | histogram | Scheduled time to send. Q1 says one minute; this is the only thing that proves it |
+| `navi_loop_tick_interval_seconds{loop}` | histogram | A loop that slows before it stalls is the signal `/healthz` gives too late |
+| `navi_loop_errors_total{loop}` | counter | Distinguishes erroring from stalled |
+| `navi_pending_overdue` | gauge | The one alerting condition |
+| `navi_occurrence_transitions_total{from,to,source}` | counter | Completion rate and `resolution_source` as a live series rather than a query |
+| `navi_llm_calls_total{task,tier,outcome}` | counter | Tier-one success rate, which the routing table is supposed to be rewritten from |
+| `navi_llm_latency_seconds{task,tier}` | histogram | |
+| `navi_copywriter_fallback_total` | counter | How often reminders actually go out as plain titles |
+| `navi_materializer_horizon_days` | gauge | Catches a thinning horizon before the sweeper does |
+
+The `llm_calls` table and the model metrics overlap deliberately. The table is the
+90-day analytical record you write SQL against; the metrics are the live series
+you look at. Neither replaces the other, and the table's retention policy is why
+the counters exist.
+
+Structured logging via `log/slog` to stdout, JSON in the container. No log
+aggregation stack — `docker logs` and a Grafana dashboard is the correct amount of
+machinery for one user on one box, and adding Loki here would contradict D-019 for
+no benefit.
 
 ## Failure modes
 

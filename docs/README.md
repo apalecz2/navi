@@ -10,6 +10,17 @@ The system is built so that calendar events can be added later without restructu
 
 Pre-development. No code written. These documents are the agreed specification.
 
+## Stack
+
+Go, SQLite in WAL mode, and server-rendered HTML. One static binary running an
+HTTP API and five supervised background loops, behind a Cloudflare Tunnel, with
+Litestream replicating to R2 and Prometheus and Grafana alongside.
+
+No web framework, no ORM, no LLM SDK, no SPA. Each of those omissions is a
+decision record rather than an oversight: [D-021](08-decisions.md#d-021-go-rather-than-python),
+[D-022](08-decisions.md#d-022-server-rendered-html-with-htmx-not-a-single-page-application),
+and [D-023](08-decisions.md#d-023-metrics-and-dashboards-are-part-of-the-system-not-an-add-on).
+
 ## Documents
 
 | Doc | Contents |

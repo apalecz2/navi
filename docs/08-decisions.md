@@ -28,6 +28,8 @@ minutes.
 ## D-002: SQLite rather than the existing Postgres
 
 **Decision.** SQLite in WAL mode on local disk, with Litestream replicating to R2.
+Accessed through `modernc.org/sqlite`, the pure-Go implementation, rather than a
+cgo binding — see D-021 and D11.
 
 **Forced by.** One user, one writer process, a few hundred writes a day. Postgres
 buys concurrency control this workload never exercises. SQLite makes backup a file
@@ -77,7 +79,7 @@ be monitored. The hourly sweeper watches for a horizon under 25 days.
 
 **Forced by.** Google Calendar and CalDAV both consume RRULE, so any other choice
 means writing a translation layer the day calendar sync starts. Models emit RRULE
-reliably because it is well represented in training data. `dateutil` expands it,
+reliably because it is well represented in training data. `rrule-go` expands it,
 so no date arithmetic gets hand-written.
 
 **Cost.** RRULE cannot express "three times a week, distributed", which forced the
@@ -310,15 +312,15 @@ lag by hours.
 ## D-019: Background loops in-process, not separate containers
 
 **Decision.** Scheduler, copywriter, reconciler, materializer, and sweeper run as
-asyncio tasks in the API process.
+goroutines in the API process, under a supervisor.
 
 **Forced by.** One user. Each loop is small. A single process is one thing to
 restart, one place to read logs, and one SQLite connection pool. Separate
 containers would add orchestration for a workload that does not need it.
 
-**Cost.** A crash in one loop must not take the others down, so each wraps its
-body in try/except and a supervisor restarts any task that exits. Scaling out
-would require pulling them apart.
+**Cost.** A crash in one loop must not take the others down, so each tick runs
+under a `recover` and a supervisor restarts any goroutine that returns. Scaling
+out would require pulling them apart.
 
 ---
 
@@ -334,3 +336,97 @@ condition that warrants an alert.
 
 **Cost.** Regressions get found in production, which for a personal reminder app
 means a missed reminder. Accepted trade.
+
+---
+
+## D-021: Go rather than Python
+
+**Decision.** Go 1.23+, stdlib `net/http`, `modernc.org/sqlite`, `sqlc` over
+hand-written SQL. No web framework, no ORM, no LLM SDK.
+
+**Forced by.** Three things, in order of weight.
+
+The concurrency model in D-019 is the language's central abstraction rather than
+something bolted on. Five supervised loops with independent intervals, a
+cancellable shutdown, and a crash in one that must not touch the others is a
+`context.Context`, a `time.Ticker`, and a `recover` per tick. The Python version
+of the same design is hand-written asyncio task supervision, and the copywriter's
+concurrent model calls contend on the GIL for no reason.
+
+D11 falls out for free. `CGO_ENABLED=0` with a pure-Go SQLite driver produces one
+static binary in a `scratch` image, which is the difference between deploying a
+file and deploying an interpreter plus a dependency tree plus a lockfile onto a
+home server.
+
+Third, and stated plainly because a decision record that hides its motives is
+worth less than one that does not: this is a portfolio project as well as a tool,
+and Go is deliberate breadth rather than a fourth variation on languages already
+demonstrated elsewhere. That reason is real, it is secondary, and it would not
+have been sufficient on its own — it happens to point the same direction as the
+first two.
+
+**Cost.** Four, none fatal.
+
+`teambition/rrule-go` is not `python-dateutil`; see [Q-14](10-open-questions.md#q-14-rrule-and-dst-expansion-correctness).
+Go's `time` package resolves DST-ambiguous and nonexistent local times silently
+and not always the way [05-schedule-spec.md](05-schedule-spec.md#dst) requires, so
+that handling is written explicitly instead of inherited. Tool-argument structs
+need pointers for every optional field because Go cannot distinguish `0` from
+absent, which is more ceremony than Pydantic for the same schema. And the
+ecosystem for LLM tooling is thinner — irrelevant here, since L5 asks for one
+OpenAI-compatible HTTP client and this design would have hand-rolled that anyway.
+
+---
+
+## D-022: Server-rendered HTML with HTMX, not a single-page application
+
+**Decision.** `a-h/templ` templates rendered server-side, HTMX for interaction,
+Alpine.js for local state, uPlot for charts. The PWA manifest and service worker
+are hand-written. No React, no build step beyond `templ generate`.
+
+**Forced by.** The actual interaction surface. V1 is a list with checkboxes, V4 is
+a month grid backed by one date-range query, and V5 is four charts. Every
+resolution already round-trips to the server, because D-014 puts one endpoint and
+one state machine behind all three surfaces — so the client holds almost no state
+worth managing, and a framework whose value proposition is client state management
+is being paid for and not used.
+
+There is also a consistency argument. This repository argues at length for one
+process, one database file, and no queue. Serving a React build from it would be
+the one place the implementation stopped agreeing with its own reasoning.
+
+**Cost.** V3's optimistic updates are deliberate work — an Alpine directive that
+flips the row locally while HTMX reconciles the swap — rather than something a
+reactive framework provides by default. Charts need a small library since there is
+no charting layer. And offline behaviour beyond the service worker's cache is
+genuinely harder than it would be in a SPA, which is acceptable because the day
+view is one request and the notification path does not depend on the web app at
+all.
+
+---
+
+## D-023: Metrics and dashboards are part of the system, not an add-on
+
+**Decision.** Prometheus metrics on `/metrics`, scraped locally, rendered in
+Grafana. The series are specified in
+[03-architecture.md](03-architecture.md#observability). `pending_overdue > 0` is
+the only alert.
+
+**Forced by.** Every degradation path in this design is deliberately silent. That
+is the right behaviour — D-001 and the failure-mode table exist so a model outage
+still delivers the reminder — but it means a plain-title notification, a stalled
+copywriter, and a model tier failing every call all look approximately fine from
+the outside. `/healthz` reports whether loops are ticking and nothing about
+whether the work is any good.
+
+Two things this project already committed to are metrics wearing other clothes.
+`llm_calls` exists so the routing table can be rewritten from tier-one success
+rate rather than intuition. `resolution_source` exists to reveal which surface
+actually gets used. Both are questions about a trend, and a table with a 90-day
+retention policy answers them worse than a time series does.
+
+**Cost.** Two containers that are not the application, in a document that argues
+against extra moving parts. The tension is real and resolves cleanly: they are
+sidecars, not components. Nothing in the fire path reads them, scraping is pull-
+based so a dead Prometheus cannot block the app, and if both die every reminder
+still fires. That is the same degradation rule as everything else here.

@@ -36,6 +36,39 @@ Random times round to 5 minutes so they read as chosen rather than generated.
 Whether that is the right granularity, and whether some items want unrounded
 times, is untested.
 
+### Q-14: RRULE and DST expansion correctness
+
+Numbered out of sequence because IDs are stable and this arrived with D-021.
+
+The Python version of this spec leaned on `python-dateutil`, which has had twenty
+years of edge cases beaten out of it. `teambition/rrule-go` is well regarded and
+has had rather fewer. Separately, Go's `time.Date` resolves nonexistent and
+ambiguous local times silently, and not always the way
+[05-schedule-spec.md](05-schedule-spec.md#dst) requires.
+
+Three specific behaviours are unverified: weekly expansion spanning a DST
+boundary, `BYDAY` with a negative index (`-1SU` for "last Sunday"), and the
+explicit fold handling this spec adds on top of the stdlib.
+
+**This is the one place S2 is under discussion,** and the argument is narrower
+than "the project should have tests." Every other component in this system fails
+visibly: a stalled loop shows on the dashboard, a bad tool call is caught by the
+validator, a model outage sends the plain title. A materializer that places an
+occurrence an hour off twice a year fails *invisibly and rarely*, which is the
+one shape hand-verification is structurally bad at — you cannot notice in March
+that November will be wrong.
+
+**Leaning:** a single table-driven test over the expansion function, maybe forty
+lines, covering the three cases above plus the two DST examples already written
+out in the schedule spec. Go ships the runner, so this costs a file and no
+dependency. Not a suite, not a framework, not a coverage target — and explicitly
+not a precedent for testing anything else here.
+
+**Resolve by:** writing those cases during P0, when the materializer is being
+built and the expected values are already in your head. If `rrule-go` passes all
+three on the first run, the file stays anyway; it is cheaper to keep than to
+reconstruct the reasoning later.
+
 ---
 
 ## Needs an answer before P3
@@ -219,8 +252,9 @@ Recorded so they do not get relitigated without new information.
 - **A native iOS app.** APNs with notification categories is the only fully
   reliable path to native actions, and it costs a developer account and a build
   pipeline. ntfy gets close enough.
-- **A test suite.** Explicitly declined. `/healthz` covers the failure that
-  actually matters, which is a stalled loop.
+- **A test suite.** Explicitly declined. `/healthz` and the metrics in D-023 cover
+  the failure that actually matters, which is a stalled loop. Q-14 is the single
+  narrow carve-out under discussion and is not an opening to revisit this.
 - **Postgres.** Decided in D-002 and superseding an earlier decision. Only revisit
   if multi-replica ever becomes necessary. D-002 now records the one construct
   that would not port.

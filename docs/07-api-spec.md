@@ -3,6 +3,11 @@
 All JSON, all timestamps ISO-8601 UTC with a `Z` suffix. Base path `/api` unless
 otherwise noted.
 
+Routed with stdlib `net/http.ServeMux`. Since Go 1.22 it handles method matching
+and path wildcards — `mux.HandleFunc("POST /api/occurrences/{id}/resolve", h)` —
+which covers every route in this document. A third-party router would buy nothing
+here; middleware is ordinary `func(http.Handler) http.Handler`.
+
 ## Authentication
 
 Four separate mechanisms, because four callers with genuinely different
@@ -15,6 +20,7 @@ constraints hit this service.
 | Calendar subscription | `/calendar/{token}.ics` | Long random path token | Google and Apple calendar clients cannot authenticate interactively |
 | Transport webhooks | `/webhook/{transport}` | Per-transport shared secret | Provider-defined |
 | Health | `/healthz` | Open | Needs to work when everything else does not |
+| Metrics | `/metrics` | Not exposed through the tunnel | Scraped by Prometheus on the container network only |
 
 ### Action tokens
 
@@ -269,6 +275,19 @@ and enqueues for the agent.
 `pending_overdue` above zero means the scheduler has stalled, which is the one
 failure worth alerting on. Everything else in this service degrades visibly on its
 own.
+
+### `GET /metrics`
+
+Prometheus exposition format, the series listed in
+[03-architecture.md](03-architecture.md#observability). Bound to the container
+network and deliberately absent from the Cloudflare Tunnel ingress table: it
+carries no secrets but it does describe usage patterns in detail, and there is no
+reason for it to leave the host.
+
+`/healthz` and `/metrics` answer different questions. `/healthz` is a liveness
+check for a human or a restart policy. `/metrics` is the time series that shows a
+loop slowing down before it stops, which is the failure this system is otherwise
+silent about.
 
 ---
 

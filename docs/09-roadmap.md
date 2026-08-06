@@ -21,9 +21,11 @@ to be useful.
 - Scheduler loop with `BEGIN IMMEDIATE` claiming and restart recovery
 - ntfy outbound adapter
 - Docker Compose, Cloudflare Tunnel ingress, Litestream to R2
-- Repository module: all SQL behind it from the first query
+- Repository module: all SQL behind it from the first query, sqlc wired up
+- Loop supervisor: per-tick `recover`, context cancellation, `SIGTERM` drain (D12)
 - First-run secret generation into `/data` (D10)
-- `/healthz`
+- `/healthz`, `/metrics`, and a Grafana dashboard with delivery latency and loop
+  ticks on it
 
 **Exit criteria**
 
@@ -31,9 +33,14 @@ to be useful.
 - [ ] A `fuzzy` 3-per-week reminder produces three well-spread occurrences
 - [ ] Restarting the container mid-day loses nothing and fires nothing twice
 - [ ] `litestream restore` into a clean directory reproduces the database
+- [ ] The image is `scratch`, the binary is static, and timezones resolve inside it
+- [ ] Killing a loop's goroutine shows up as a flat line on the dashboard, and the
+      supervisor brings it back
 
-**Roughly an evening or two.** This is the phase that has to be right. Everything
-after it is recoverable.
+**A few evenings.** The estimate was one or two when this was going to be Python;
+D-021 traded some of that for a static binary and a language worth knowing, and
+the honest cost is a slower P0. This is also the phase that has to be right, so
+it is the wrong one to rush. Everything after it is recoverable.
 
 ---
 
@@ -115,17 +122,20 @@ after it is recoverable.
 
 **Goal.** A screen that is faster than typing.
 
-- Day view: today's occurrences, one-tap resolution, optimistic updates
+- `templ` templates and a base layout; HTMX wired to the existing endpoints
+- Day view: today's occurrences, one-tap resolution, optimistic updates via Alpine
 - PWA manifest and service worker, installable to the home screen
 - Calendar view over `/api/occurrences`, colour-coded by item and status
-- Statistics: completion rate over time, streaks, median lag, time-of-day heatmap
+- Statistics: completion rate over time, streaks, median lag, time-of-day heatmap,
+  charted with uPlot
 - `get_stats` tool reading the same `chains` view
 - Cloudflare Access on `/app` and `/api`
 
 **Exit criteria**
 
 - [ ] The day view is one tap from the home screen
-- [ ] Checking an item off feels instant on mobile data
+- [ ] Checking an item off feels instant on mobile data — the row flips before the
+      request lands, and reconciles or reverts when it does
 - [ ] The calendar shows resolved random times, not ranges
 - [ ] The agent's numbers match the dashboard's numbers exactly
 

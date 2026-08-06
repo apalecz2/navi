@@ -86,12 +86,18 @@ Three reasons, in order of weight.
    writing a translation layer the day calendar sync starts.
 2. Models emit it reliably, because the syntax is heavily represented in training
    data. A bespoke DSL would need examples and would still be guessed at.
-3. `python-dateutil.rrule` parses and expands it, so no date arithmetic gets
+3. `teambition/rrule-go` parses and expands it, so no date arithmetic gets
    written by hand.
 
 The cost is that `fuzzy` sits outside it. That is accepted: fuzzy schedules are
 reminder-only and export to calendars as individual events rather than as a
 recurrence rule.
+
+A second cost is newer. `rrule-go` is a good library and it is not
+`python-dateutil`, which has two decades of edge cases beaten out of it. The
+places that matter are expansion across a DST boundary and `BYDAY` with a
+negative index. Both are covered by [Q-14](10-open-questions.md#q-14-rrule-and-dst-expansion-correctness),
+which is the one place where S2 is under discussion.
 
 ## Vocabulary defaults
 
@@ -231,9 +237,22 @@ Two edge cases in the spring-forward gap and the autumn overlap:
 - Ambiguous local time (01:30 on a fall-back day): take the first occurrence, the
   pre-transition one.
 
-`zoneinfo` with explicit `fold` handling covers both. This is worth getting right
-once, because the failure looks like a reminder firing an hour off with no
-explanation.
+Go's `time.Date` handles neither of these the way this spec requires, and it does
+not report that it has made a choice. For a nonexistent time it normalizes
+forward, which happens to match rule one by accident. For an ambiguous time it
+picks one offset with no indication that two were available, which does not
+reliably match rule two.
+
+So both cases are resolved explicitly rather than inherited: construct the time,
+then check whether `t.Format` round-trips to the requested wall clock. If it does
+not, the time did not exist and the normalized result is correct. For the
+ambiguous case, probe one hour either side and take the earlier offset
+deliberately. This is roughly twenty lines and it is worth writing them, because
+the failure mode is a reminder firing an hour off twice a year with no
+explanation, which is exactly the kind of bug that gets misfiled as flakiness.
+
+`time/tzdata` is imported for the embedded database (see D11 — a `scratch` image
+has no system zoneinfo).
 
 ## Edit scope
 
@@ -338,10 +357,10 @@ feed the escalation ladder in [06-agent-spec.md](06-agent-spec.md).
 
 | Check | Rule |
 |---|---|
-| RRULE parses | `dateutil.rrule.rrulestr` succeeds |
+| RRULE parses | `rrule.StrToRRule` succeeds |
 | Produces occurrences | Expands to at least one occurrence within 90 days |
 | Not absurdly dense | Under 50 occurrences in 30 days |
-| Timezone valid | Resolvable by `zoneinfo` |
+| Timezone valid | `time.LoadLocation` succeeds |
 | Window ordered | `window[0] < window[1]` |
 | Window wide enough | At least 30 minutes |
 | Count sane | `1 <= count <= 20` per period |

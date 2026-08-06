@@ -5,8 +5,15 @@ sort and compare correctly as text and avoid SQLite's lack of a native timestamp
 type. Local wall-clock times within a schedule are stored as `HH:MM` strings and
 resolved against the item's timezone at materialization.
 
-Identifiers are ULIDs stored as text, so they sort chronologically and are safe to
-put in URLs.
+Identifiers are ULIDs stored as text (`oklog/ulid`), so they sort chronologically
+and are safe to put in URLs.
+
+The DDL below is the source of truth. **sqlc** compiles it, plus the hand-written
+queries, into typed Go structs and methods — there is no ORM and no model layer
+that could drift from the schema. That direction of dependency is deliberate: the
+partial indexes, the recursive-CTE `chains` view, and the `BEGIN IMMEDIATE` claim
+are the load-bearing parts of this design, and they are precisely what an ORM
+either abstracts badly or cannot express.
 
 ## Tables
 
@@ -337,3 +344,7 @@ Plain numbered SQL files applied in order, with the applied version in `kv`. No
 migration framework. At this scale the framework is more machinery than the
 problem justifies, and a single-user database can afford a restore-from-R2 if a
 migration goes wrong.
+
+The files are embedded with `//go:embed` and applied on startup, which keeps D11
+intact — a single binary with no migration step to forget and no external tool to
+install on the host.

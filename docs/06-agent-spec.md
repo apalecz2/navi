@@ -14,71 +14,94 @@ modes.
 
 ### Tool catalog
 
-```python
-list_items(
-    filter: Literal["active", "all", "paused"] = "active",
-) -> list[ItemSummary]
+Argument structs, from which the JSON Schema sent to the model is generated. Full
+schema tags are shown on `CreateItemArgs` and elided elsewhere for readability;
+every enum field carries them.
 
-create_item(
-    title: str,
-    schedule: Schedule,              # tagged union, see 05-schedule-spec.md
-    notes: str | None = None,
-    kind: Literal["reminder", "event"] = "reminder",
-    tz: str | None = None,           # defaults to current device tz
-    tz_mode: Literal["fixed", "floating"] = "floating",
-    notify_policy: Literal["at_time", "silent", "digest"] = "at_time",
-    priority: int = 3,
-    grace_period_minutes: int | None = None,
-    reconcile_at: str | None = None,
-) -> CreateResult                    # includes next 3 concrete occurrences
+```go
+type ListItemsArgs struct {
+    Filter string `json:"filter,omitempty"` // active | all | paused, default active
+}
 
-update_item(
-    item_id: str,
-    scope: Literal["future_all", "from_date", "single"] = "future_all",
-    from_date: str | None = None,    # required when scope="from_date"
-    occurrence_id: str | None = None,# required when scope="single"
-    changes: ItemChanges,            # only fields being changed
-) -> UpdateResult                    # includes next 3 concrete occurrences
+type CreateItemArgs struct {
+    Title              string   `json:"title" jsonschema:"required"`
+    Schedule           Schedule `json:"schedule" jsonschema:"required"` // tagged union, 05-schedule-spec.md
+    Notes              *string  `json:"notes,omitempty"`
+    Kind               string   `json:"kind,omitempty"      jsonschema:"enum=reminder,enum=event,default=reminder"`
+    TZ                 *string  `json:"tz,omitempty"`       // defaults to current device tz
+    TZMode             string   `json:"tz_mode,omitempty"   jsonschema:"enum=fixed,enum=floating,default=floating"`
+    NotifyPolicy       string   `json:"notify_policy,omitempty" jsonschema:"enum=at_time,enum=silent,enum=digest,default=at_time"`
+    Priority           int      `json:"priority,omitempty"  jsonschema:"minimum=1,maximum=5,default=3"`
+    GracePeriodMinutes *int     `json:"grace_period_minutes,omitempty"`
+    ReconcileAt        *string  `json:"reconcile_at,omitempty"` // "HH:MM" local
+}
 
-delete_item(
-    item_id: str,
-    confirmed: bool = False,         # must be True to execute
-) -> DeleteResult
+type UpdateItemArgs struct {
+    ItemID       string      `json:"item_id" jsonschema:"required"`
+    Scope        string      `json:"scope,omitempty"` // future_all | from_date | single
+    FromDate     *string     `json:"from_date,omitempty"`     // required when scope=from_date
+    OccurrenceID *string     `json:"occurrence_id,omitempty"` // required when scope=single
+    Changes      ItemChanges `json:"changes" jsonschema:"required"` // only fields being changed
+}
 
-bulk_resolve(
-    resolutions: list[Resolution],   # {occurrence_id, status, note}
-) -> BulkResolveResult               # atomic; all or nothing
+type DeleteItemArgs struct {
+    ItemID    string `json:"item_id" jsonschema:"required"`
+    Confirmed bool   `json:"confirmed"` // must be true to execute
+}
 
-snooze(
-    occurrence_id: str,
-    delta: Literal["10m", "1h", "tonight", "tomorrow"],
-) -> SnoozeResult
+type BulkResolveArgs struct {
+    Resolutions []Resolution `json:"resolutions" jsonschema:"required,minItems=1"`
+}
 
-pause(
-    scope: Literal["global", "item"],
-    until: str,                      # ISO date
-    item_id: str | None = None,
-) -> PauseResult
+type Resolution struct {
+    OccurrenceID string  `json:"occurrence_id" jsonschema:"required"`
+    Status       string  `json:"status" jsonschema:"required"` // completed | skipped | missed
+    Note         *string `json:"note,omitempty"`
+}
 
-set_timezone(
-    tz: str,                         # IANA
-) -> TimezoneResult                  # reports how many floating items shifted
+type SnoozeArgs struct {
+    OccurrenceID string `json:"occurrence_id" jsonschema:"required"`
+    Delta        string `json:"delta" jsonschema:"required"` // 10m | 1h | tonight | tomorrow
+}
 
-get_stats(
-    range: Literal["week", "month", "quarter", "all"] = "month",
-    item_id: str | None = None,
-) -> Stats                           # reads the same `chains` view as the dashboard
+type PauseArgs struct {
+    Scope  string  `json:"scope" jsonschema:"required"` // global | item
+    Until  string  `json:"until" jsonschema:"required"` // ISO date
+    ItemID *string `json:"item_id,omitempty"`
+}
 
-propose_change(
-    item_id: str,
-    proposal: ItemChanges,
-    rationale: str,
-) -> None                            # writes nothing; surfaces a suggestion
+type SetTimezoneArgs struct {
+    TZ string `json:"tz" jsonschema:"required"` // IANA
+}
 
-request_escalation(
-    reason: str,
-) -> None                            # terminates the turn, retries at the next tier
+type GetStatsArgs struct {
+    Range  string  `json:"range,omitempty"` // week | month | quarter | all, default month
+    ItemID *string `json:"item_id,omitempty"`
+}
+
+type ProposeChangeArgs struct {
+    ItemID    string      `json:"item_id" jsonschema:"required"`
+    Proposal  ItemChanges `json:"proposal" jsonschema:"required"`
+    Rationale string      `json:"rationale" jsonschema:"required"`
+}
+
+type RequestEscalationArgs struct {
+    Reason string `json:"reason" jsonschema:"required"`
+}
 ```
+
+Returns: `CreateItemArgs` and `UpdateItemArgs` yield a result carrying the next
+three concrete occurrences. `BulkResolveArgs` is atomic, all or nothing.
+`GetStatsArgs` reads the same `chains` view as the dashboard. `ProposeChangeArgs`
+and `RequestEscalationArgs` return nothing — the first surfaces a suggestion and
+writes no rows, the second terminates the turn for retry at the next tier.
+
+Optional fields are pointers rather than zero values throughout. This is the one
+place Go is genuinely worse than the Python this spec was first written in: `0`
+and `omitted` are the same value for a plain `int`, and `priority` has a
+non-zero default, so a model that omits the field would otherwise silently get
+priority zero and fail validation. Pointers make "absent" representable, and the
+defaults get applied in one place after decoding rather than at each use.
 
 Two of these deserve comment.
 
@@ -167,8 +190,11 @@ per person. Callers should not know which it is.
 
 Applied to every tool call before any write. Code, not judgement.
 
-**Layer 1, schema.** Pydantic model for the arguments. Types, enums, required
-fields.
+**Layer 1, schema.** `encoding/json` decode into the argument struct with
+`DisallowUnknownFields`, then `go-playground/validator` for enums, ranges, and
+required fields. The JSON Schema advertised to the model is generated from the
+same structs by `invopop/jsonschema`, so what the model is told and what the
+validator enforces cannot drift.
 
 **Layer 2, semantic.** The table in
 [05-schedule-spec.md](05-schedule-spec.md#validation): RRULE parses and produces
@@ -232,18 +258,23 @@ already acceptable spends money to avoid an outcome that is fine.
 
 ### Interface
 
-```python
-async def complete(
-    task: Task,
-    messages: list[Message],
-    tools: list[Tool] | None = None,
-) -> Result
+```go
+func (c *Client) Complete(
+    ctx context.Context,
+    task Task,
+    messages []Message,
+    tools []Tool,
+) (Result, error)
 ```
 
 Configuration maps each `Task` to an ordered tier list. All providers behind one
-OpenAI-compatible client with per-tier `base_url` and key. OpenRouter is the
-default path, because one key and automatic provider failover matter when running
-on free-tier hosting.
+OpenAI-compatible client with per-tier `base_url` and key, built on `net/http` —
+no SDK, per D-021. OpenRouter is the default path, because one key and automatic
+provider failover matter when running on free-tier hosting.
+
+`ctx` carries the per-tier timeout. It matters most for the copywriter, whose
+whole failure story is "give up and let the scheduler send the plain title" — a
+hung request there would otherwise hold a slot until the occurrence fires anyway.
 
 Every call is logged to `llm_calls`. After two weeks, tier-one success rate per
 task becomes a query, and the ladder gets tuned from data rather than intuition.

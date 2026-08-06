@@ -21,7 +21,7 @@ It cannot stop a reminder from firing.
       ▼             │  ┌────────────┐                      │
   Telegram ─────────┼─▶│  inbound   │──▶ agent ──▶ tools ──┼──┐
   (conversation     │  │  adapter   │      │               │  │
-   transport)◀──────┼──│            │◀─────┘               │  │
+   role)     ◀──────┼──│            │◀─────┘               │  │
                     │  └────────────┘                      │  │
                     │                                      │  ▼
                     │  ┌────────────┐                   ┌─────────┐
@@ -40,16 +40,24 @@ It cannot stop a reminder from firing.
                     │  └─────┬──────┘        └──────▲─────┘
                     └────────┼──────────────────────┼─────────┘
                              ▼                      │
-                        ntfy ──▶ iPhone ────────────┘
-                     (notification         action button
-                       transport)          HTTP callback
+                        Telegram ──▶ iPhone         │
+                    (notification role)     │       │
+                                     inline button  │
+                                      tap returns   │
+                                    via /webhook ───┘
                                                     ▲
                                                     │
                                             browser (PWA day view,
                                             calendar, stats)
 
+  Telegram appears twice because it fills both transport roles. It is one bot and
+  one chat; the roles stay separately configured so a dedicated push channel can
+  be substituted into the lower one later (T10). A button tap arrives as a callback
+  query on the same authenticated webhook that carries conversation, not as a
+  separate unauthenticated callback.
+
   all external access via cloudflared tunnel
-  /api and /app behind Cloudflare Access; /a/{token} behind HMAC
+  /api and /app behind Cloudflare Access; /webhook/telegram behind a shared secret
              │
              ▼
        Litestream ──▶ Cloudflare R2 (continuous backup)
@@ -141,7 +149,8 @@ scheduler tick
       AND item.notify_policy = 'at_time' AND item not paused
   → BEGIN IMMEDIATE, claim rows, set status='notified', notified_at=now
   → for each: body = occurrence.message_text OR item.title
-  → build actions [Done, Snooze, Skip] with HMAC tokens
+  → build actions [Done, Snooze, Skip] as abstract descriptors, rendered
+      natively by the adapter — inline keyboard buttons on Telegram
   → outbound via notification transport
 ```
 
@@ -150,7 +159,7 @@ No model call appears in this path. That is the point.
 ### Resolve path
 
 ```
-ntfy action button  ┐
+inline button tap   ┐
 web day view tap    ├─→ POST /api/occurrences/{id}/resolve
 agent bulk_resolve  ┘        │
                              ▼
@@ -204,11 +213,9 @@ type Capabilities struct {
 }
 
 type Action struct {
-    ID      string // "complete" | "snooze" | "skip"
-    Label   string
-    URL     string
-    Method  string
-    Headers map[string]string
+    ID    string // "complete" | "snooze" | "skip"
+    Label string
+    Arg   string // optional, e.g. a snooze delta
 }
 
 type IncomingMessage struct {
@@ -225,6 +232,14 @@ type IncomingMessage struct {
 arguments and most calls set two of the five fields. The zero values are the
 defaults.
 
+An `Action` names what it does and nothing about how it travels. *How* an action
+becomes tappable belongs entirely to the adapter: Telegram packs the action id and
+occurrence id into `callback_data` and receives the tap back on its own webhook,
+while a push transport that can only carry a URL would build a signed one instead
+(T10, and Q6 applies only there). Putting `URL`, `Method`, and `Headers` on this
+struct — as an earlier draft did — pushed one transport's delivery mechanism into
+the shared vocabulary and made every caller responsible for signing.
+
 Callers branch on `capabilities`, never on `name`. A transport without action
 support renders a numbered plain-text list that the agent parses from the reply,
 which is how iMessage would work later.
@@ -232,13 +247,20 @@ which is how iMessage would work later.
 Configuration:
 
 ```
-NOTIFY_TRANSPORT=ntfy
+NOTIFY_TRANSPORT=telegram
 CHAT_TRANSPORT=telegram
 ```
 
-Splitting the roles is what lets ntfy handle notifications, where its native iOS
-action buttons are the whole reason it was chosen, while Telegram handles
-conversation, where a real chat UI matters.
+Both roles point at the same adapter to start with (D-006). The split is kept
+because it is the seam a dedicated push channel drops into later, and because it
+costs one environment variable to keep and a refactor to reintroduce.
+
+Telegram declares `supports_actions` true and
+`supports_native_notification_actions` false. That second flag currently has no
+adapter setting it true, which is the point: the notification-versus-chat-message
+distinction is recorded in the capability model rather than in anyone's memory, so
+the code that would need to change when T10 lands is already the code reading the
+flag.
 
 ## Model access
 
@@ -277,10 +299,11 @@ services:
       - ./defaults.yaml:/config/defaults.yaml:ro
     environment:
       - DATABASE_PATH=/data/navi.db
-      - NOTIFY_TRANSPORT=ntfy
+      - NOTIFY_TRANSPORT=telegram
       - CHAT_TRANSPORT=telegram
+      - TELEGRAM_BOT_TOKEN=...
+      - TELEGRAM_WEBHOOK_SECRET=...
       - ALLOWED_SENDER_ID=...
-      - ACTION_TOKEN_SECRET=...
       - LITESTREAM_REPLICA_URL=s3://...r2...
 
   cloudflared:
@@ -302,25 +325,36 @@ boundary.
 Litestream runs as the container entrypoint wrapping the app process, which is
 the standard pattern and avoids a second service.
 
-`ACTION_TOKEN_SECRET` is shown above for completeness, but per D10 it and the
-calendar path token are generated into `/data` on first run when unset. Nothing
+The bot token and the webhook secret are borrowed credentials and come from the
+environment. The calendar path token is one this deployment owns rather than
+borrows, so per D10 it is generated into `/data` on first run when absent. Nothing
 that signs or authorizes may have a compiled-in or committed default value: a
 default signing key is indistinguishable from no signing key, and it is the
-failure that survives being copied to a second machine.
+failure that survives being copied to a second machine. The action-token signing
+key that an earlier draft generated here is gone with the `/a/*` path; it returns
+with T10 if T10 ever lands.
 
 Cloudflare Tunnel ingress:
 
 | Path | Protection |
 |---|---|
 | `/app/*`, `/api/*` | Cloudflare Access, one-time PIN |
-| `/a/*` | HMAC action token in the request, no session |
 | `/calendar/*.ics` | Long random path token |
 | `/webhook/*` | Transport-specific secret |
 | `/healthz` | Open |
 
-`/a/*` cannot sit behind Cloudflare Access, because the ntfy client issues those
-requests with no browser session. That is why action tokens are signed, scoped to
-one occurrence and one action, and short-lived.
+Every path here is either behind Access, behind a secret, or trivial. Notification
+actions do not appear in this table at all, because a button tap arrives as a
+callback query on `/webhook/telegram` — already authenticated by the shared secret
+and already filtered by the sender allowlist (D8).
+
+This is the part of D-006 that is a straightforward improvement rather than a
+trade. An earlier draft carried `/a/{token}`, a session-less public path that
+could not sit behind Access because the push client issues those requests with no
+browser session, and a signed-token scheme existed to make that path safe. One
+public path, one authentication mechanism, and one signing key all disappear. T10
+would reintroduce all three, which is a cost that belongs in the decision to add
+it.
 
 ## Storage
 
@@ -407,13 +441,23 @@ Each row states what breaks, what the user notices, and what the system does.
 |---|---|---|
 | Model provider down | Reminders arrive as plain titles; agent cannot process new requests | Copywriter gives up after the attempt cap and leaves text null; scheduler is unaffected; inbound messages get an explicit apology rather than silence |
 | Copywriter falls behind | Some reminders arrive as plain titles | Fallback in the scheduler, `generation_attempts` bounds the retries |
-| ntfy unreachable | No notification arrives | Occurrence stays `pending`, retried on the next tick, and picked up by reconciliation regardless |
-| Telegram unreachable | Cannot message the agent | Notifications and web app unaffected; reconciliation queues its message and sends on recovery |
+| Telegram unreachable | No notification arrives and the agent cannot be messaged | Occurrence stays `pending`, retried on the next tick; reconciliation queues its message and sends on recovery; the web app is unaffected and remains the working surface |
 | Container restarts | Brief gap | Occurrences overdue under the threshold fire immediately; older ones go to reconciliation rather than firing a backlog |
-| Cloudflare Tunnel down | No web app, no action buttons | Local firing continues; resolution catches up via reconciliation |
+| Cloudflare Tunnel down | No web app | Local firing continues, and outbound Telegram is unaffected because it dials out. Inbound depends on the adapter mode: webhook delivery stalls until Telegram's retries succeed, `getUpdates` long-polling does not care at all |
 | Materializer misses a night | Occurrences thin out beyond the horizon | Hourly sweeper detects a horizon shorter than 25 days and re-runs |
 | SQLite file lost | Total | Litestream restore |
 
 The pattern across all of these: the reminder still happens, or the reconciliation
 pass catches what was dropped. Reconciliation is not just a UX feature, it is the
 backstop for every delivery failure in the table.
+
+With one exception, which D-006 accepted knowingly and which is worth stating
+plainly rather than leaving to be discovered. Reconciliation is itself a Telegram
+message, so a Telegram outage takes out delivery *and* its backstop together. This
+is the only correlated failure in the table. Two things bound it: nothing is
+marked `missed` during the outage, because K6 assigns `missed` only after
+reconciliation has asked and been ignored, so an unsent check-in produces no false
+misses; and the day view keeps working, since it depends on the tunnel rather than
+on Telegram. Adding a second transport (T10) would decorrelate this, and that is
+the strongest argument in its favour — stronger, arguably, than the lock-screen
+buttons it would be adopted for.

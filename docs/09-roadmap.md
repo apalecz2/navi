@@ -19,11 +19,15 @@ to be useful.
 - Materializer, including the fuzzy placement algorithm and partial periods
 - Timezone resolution, both modes, with DST edge cases handled
 - Scheduler loop with `BEGIN IMMEDIATE` claiming and restart recovery
-- ntfy outbound adapter
+- Transport interface and capability flags, with the Telegram outbound half:
+  `Send` only, plain bodies, no buttons yet
 - Docker Compose, Cloudflare Tunnel ingress, Litestream to R2
 - Repository module: all SQL behind it from the first query, sqlc wired up
 - Loop supervisor: per-tick `recover`, context cancellation, `SIGTERM` drain (D12)
-- First-run secret generation into `/data` (D10)
+- First-run secret generation into `/data` (D10) — the helper, which has nothing to
+  generate until the calendar token in P6. Built here because D10 is a rule about
+  how secrets come into existence, and rules adopted after the first secret ships
+  are rules that get an exception written for the first secret
 - `/healthz`, `/metrics`, and a Grafana dashboard with delivery latency and loop
   ticks on it
 
@@ -48,8 +52,8 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 **Goal.** Reminders are created by messaging rather than by SQL.
 
-- Transport interface, capability flags, canonical `IncomingMessage`
-- Telegram inbound and outbound adapter, sender allowlist
+- Canonical `IncomingMessage` and the inbound half of the transport interface
+- Telegram inbound adapter, webhook secret, sender allowlist
 - Model client with per-task tier configuration
 - Tool catalog: `list_items`, `create_item`, `update_item`, `delete_item`
 - Context injection: now, timezone, active items
@@ -75,9 +79,9 @@ it is the wrong one to rush. Everything after it is recoverable.
 **Goal.** Completions get recorded, so there is data worth charting.
 
 - Resolution endpoints and the full transition table
-- HMAC action tokens, `/a/{token}` handler
-- ntfy action buttons: Done, Snooze, Skip
-- Confirmation push after an action
+- Telegram inline keyboards on notifications: Done, Snooze, Skip
+- Callback query handling: decode `callback_data`, resolve, `answerCallbackQuery`
+  with the outcome, `editMessageText` to fold it into the original message
 - Snooze child creation, depth cap, delta resolution
 - `chains` view
 - Early resolution: `complete` on a `pending` occurrence, cancelling its
@@ -86,7 +90,10 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 **Exit criteria**
 
-- [ ] Done from the lock screen resolves without opening an app
+- [ ] Done on the reminder message resolves it in one tap, with no typing and no
+      navigating to find the item
+- [ ] The message updates in place to show the outcome, leaving one message in the
+      chat rather than two
 - [ ] Double-tapping Done does not double-record
 - [ ] Snooze creates a child, the chain completes once, the streak survives
 - [ ] Hitting the snooze cap resolves the chain as missed
@@ -211,6 +218,47 @@ had nothing to work with. Live on P0 through P4 for two weeks first.
 the largest single piece of work in this document and the easiest to get subtly
 wrong, and there is no reason to attempt it before the reminder half has proven
 its design.
+
+---
+
+## Not scheduled: a dedicated push transport (T10)
+
+**Goal, if it ever happens.** Done and Snooze on the lock screen, without opening
+any app, and reminder priority that breaks through a Focus mode.
+
+This has no phase number because it may never be built. It is not P8 in waiting;
+it is a decision that has been deliberately left open, with the evidence to settle
+it arriving on its own (D-006).
+
+- ntfy outbound adapter, declaring `supports_native_notification_actions` true
+- HMAC action tokens, reusing the scheme recorded in
+  [07-api-spec.md](07-api-spec.md#action-tokens-not-present-and-what-would-bring-them-back)
+- `/a/{token}` handler and its ingress exception
+- First-run generation of the action-token signing key (D10)
+- `NOTIFY_TRANSPORT=ntfy`, and nothing else changes — that is the test of whether
+  D-006 and D-007 were built honestly
+
+**Decide it from data, not from instinct.** After a month of P4, look at
+`resolution_source`:
+
+- Mostly `notification` — the friction is tolerable and the buttons are working
+  where they are. Nothing to do.
+- Mostly `web` — resolution is happening, but only once something has already
+  pulled the user to a screen. That is the case T10 was invented for.
+- Mostly `agent` — reminders are being answered conversationally, and a push
+  channel with buttons would be solving a problem that is not there.
+
+The reason this is late and optional rather than early and assumed is that
+building it first costs a second integration, a fourth authentication mechanism,
+and a public unauthenticated route, in exchange for a UX property nobody has
+measured yet. The reason it is written down in this much detail anyway is that the
+cheapest moment to record how something would be built is while the reasoning for
+not building it is still fresh.
+
+There is a second argument for it that has nothing to do with buttons, and it may
+turn out to be the stronger one: a single transport means one outage takes
+delivery, conversation, and reconciliation together. See the failure-mode table in
+[03-architecture.md](03-architecture.md#failure-modes).
 
 ---
 

@@ -2,7 +2,7 @@
 
 A self-hosted, single-user reminder service with a conversational agent front end.
 Reminders are created and resolved by messaging the agent in natural language, or by
-tapping an action in a phone notification, or by checking a box in a small web app.
+tapping a button on the reminder itself, or by checking a box in a small web app.
 The system is built so that calendar events can be added later without restructuring.
 
 
@@ -31,7 +31,7 @@ and [D-023](08-decisions.md#d-023-metrics-and-dashboards-are-part-of-the-system-
 | [04-data-model.md](04-data-model.md) | Schema DDL, status state machines, indexes, retention |
 | [05-schedule-spec.md](05-schedule-spec.md) | Schedule kinds, materializer, timezones, edit scope, snooze |
 | [06-agent-spec.md](06-agent-spec.md) | Tool catalog, prompts, model routing, escalation, copywriter |
-| [07-api-spec.md](07-api-spec.md) | HTTP endpoints, auth modes, action tokens, idempotency |
+| [07-api-spec.md](07-api-spec.md) | HTTP endpoints, auth modes, idempotency |
 | [08-decisions.md](08-decisions.md) | Decision records with rationale and consequences |
 | [09-roadmap.md](09-roadmap.md) | Phased build plan with exit criteria |
 | [10-open-questions.md](10-open-questions.md) | Deferred decisions and known unknowns |
@@ -64,8 +64,10 @@ day and asks about it in a single message, rather than nagging per item.
 occurrence shortly before it fires.
 
 **Transport.** A messaging channel adapter. Two roles exist: notification
-transport (outbound pushes with action buttons) and conversation transport
-(two-way chat with the agent).
+transport (outbound pushes carrying action buttons) and conversation transport
+(two-way chat with the agent). Both roles are filled by Telegram to start with and
+stay separately configured, so a dedicated push channel is a configuration change
+rather than a restructuring ([D-006](08-decisions.md#d-006-notification-and-conversation-are-separate-transport-roles-on-one-channel-to-start)).
 
 ## Guiding principles
 

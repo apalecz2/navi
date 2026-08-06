@@ -10,42 +10,46 @@ here; middleware is ordinary `func(http.Handler) http.Handler`.
 
 ## Authentication
 
-Four separate mechanisms, because four callers with genuinely different
+Three separate mechanisms, because three callers with genuinely different
 constraints hit this service.
 
 | Surface | Paths | Mechanism | Why |
 |---|---|---|---|
 | Web app and dashboards | `/app/*`, `/api/*` | Cloudflare Access, one-time PIN | Browser sessions, so a real identity layer is free |
-| Notification action buttons | `/a/*` | HMAC token in the URL | The ntfy iOS client issues these with no browser session, so Access cannot apply |
 | Calendar subscription | `/calendar/{token}.ics` | Long random path token | Google and Apple calendar clients cannot authenticate interactively |
-| Transport webhooks | `/webhook/{transport}` | Per-transport shared secret | Provider-defined |
+| Transport webhooks | `/webhook/{transport}` | Per-transport shared secret, plus the sender allowlist | Provider-defined |
 | Health | `/healthz` | Open | Needs to work when everything else does not |
 | Metrics | `/metrics` | Not exposed through the tunnel | Scraped by Prometheus on the container network only |
 
-### Action tokens
+Notification action buttons do not get their own row. A tap on an inline keyboard
+button arrives as a callback query on `/webhook/telegram`, so it is authenticated
+by the webhook secret and filtered by the allowlist before anything else looks at
+it. There is no session-less public action path in this service.
 
-Notification buttons carry a signed token rather than a session or an API key.
+The calendar path token is generated into the data directory on first run when
+absent (D10) and has no default.
+
+### Action tokens: not present, and what would bring them back
+
+An earlier draft signed a token into every notification, because the push client
+issued action requests directly and with no session:
 
 ```
 token   = base64url(payload) + "." + base64url(hmac_sha256(secret, payload))
 payload = {"o": occurrence_id, "a": action, "e": expiry_unix}
 ```
 
-Properties that matter:
+Scoped to one occurrence and one action, stateless, 24-hour expiry. It is recorded
+here because the scheme is correct and should be reused rather than redesigned if
+T10 lands — a transport that can only carry a URL has no other way to authorize a
+tap, and Q6 exists for exactly that case.
 
-- **Scoped to one occurrence and one action.** A leaked token can complete exactly
-  one reminder, which is close to a harmless outcome.
-- **Stateless.** No lookup, no revocation list, no storage.
-- **Expires in 24 hours.** Long enough for a notification sitting unactioned
-  overnight, short enough that revocation is unnecessary.
-
-Tokens appear in the notification payload, which transits ntfy's push
-infrastructure. The scoping is what makes that acceptable.
-
-The signing secret and the calendar path token are both generated into the data
-directory on first run when absent (D10). Neither has a default. Regenerating the
-signing secret invalidates outstanding action tokens, which is bounded by their
-24-hour expiry and is the intended way to revoke.
+It is not built now because Telegram does not need it. `callback_data` carries the
+occurrence id and action over a channel this service already authenticates, and a
+64-byte budget holds a 26-character ULID and an action name comfortably. Building
+the token scheme anyway would mean maintaining a signing key, a fourth
+authentication mechanism, and a public unauthenticated route in order to serve no
+caller.
 
 ## Idempotency
 
@@ -141,18 +145,33 @@ Atomic. All or nothing. Backs the agent's `bulk_resolve` tool.
 Response includes per-item outcomes and a summary. If any occurrence id is
 invalid, nothing is written and the response identifies which one.
 
-### `GET /a/{token}`
+### Notification button taps
 
-Action endpoint for notification buttons. No session. Decodes and verifies the
-token, applies the encoded action, returns a minimal HTML confirmation page
-because the ntfy client may surface the response.
+Not an HTTP route on this service. A tap on Done, Snooze, or Skip arrives as a
+Telegram callback query on `/webhook/telegram`, and the adapter turns it into the
+same internal resolve call the web app reaches through
+`POST /api/occurrences/{id}/resolve`. Same endpoint, same state machine, same
+transition rules — D-014 is satisfied by one surface fewer, not by a special case.
 
-Deliberately `GET` and not `POST`: the ntfy action configuration is simpler for
-GET, and idempotency is guaranteed by the state machine regardless of method,
-which is what actually matters here.
+The adapter's obligations on a tap, in order:
 
-Triggers a short confirmation push, because the ntfy iOS client does not dismiss
-the originating notification on action tap.
+1. Verify the webhook secret and the sender allowlist, as with any inbound update
+2. Decode `callback_data` into an occurrence id and an action
+3. Resolve, taking whatever the state machine returns
+4. `answerCallbackQuery` to clear the client's spinner, with the outcome as the
+   toast text — including on a `409`, where the toast reports the current state
+5. `editMessageText` to fold the outcome into the original message and drop the
+   keyboard
+
+Step five is why N6 changed. The original message is edited rather than followed by
+a confirmation push, so a resolved reminder leaves one message in the chat instead
+of two. A transport that cannot edit a message it has already sent falls back to
+sending the short confirmation, which is what N6 now says.
+
+Double-tapping is handled by the state machine exactly as it is everywhere else,
+so no deduplication lives in the adapter. The keyboard is usually gone by the
+second tap; when it is not, the second tap is a `200` no-op or a `409` and the
+toast says so.
 
 ---
 
@@ -252,8 +271,20 @@ than an instruction. Refresh timing is not under this service's control.
 ### `POST /webhook/telegram`
 
 Verified against a per-transport secret. Drops anything whose sender is not the
-allowlisted id, silently and without a reply. Normalizes into `IncomingMessage`
-and enqueues for the agent.
+allowlisted id, silently and without a reply.
+
+Two kinds of update arrive here and they diverge immediately after that check. A
+message normalizes into `IncomingMessage` and is enqueued for the agent. A
+callback query is a button tap and never reaches the agent at all — it decodes to
+an occurrence and an action and goes straight to the resolve path, because a tap
+is an instruction that has already been unambiguously expressed and running a
+model over it would add latency, cost, and a failure mode to a decision with
+nothing left to interpret.
+
+The adapter may instead run in `getUpdates` long-polling mode, which needs no
+inbound route and no tunnel ingress. `Receive` looks identical to the rest of the
+system either way; T4 is the requirement that makes this a configuration detail
+rather than a design one.
 
 ### `GET /healthz`
 

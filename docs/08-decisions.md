@@ -104,25 +104,63 @@ already exist, so only genuinely new occurrences get fresh draws.
 
 ---
 
-## D-006: Notification and conversation are separate transports
+## D-006: Notification and conversation are separate transport roles, on one channel to start
 
-**Decision.** ntfy for outbound notifications, Telegram for two-way conversation,
-both behind one interface with capability flags.
+**Decision.** Two transport *roles*, configured independently and both behind one
+interface with capability flags. Both point at Telegram to begin with. A dedicated
+push channel with native lock-screen actions (T10, ntfy the likely candidate) is
+deferred and may never be built.
 
-**Forced by.** The requirement for Done and Snooze as native iOS notification
-actions. Telegram inline keyboards render inside the chat message, not in the
-notification, so acting on one means opening the app. That friction is what leaves
-a statistics dashboard empty after a week. ntfy's iOS action buttons render in the
-notification and can issue HTTP requests.
+Supersedes an earlier decision to run ntfy for notifications and Telegram for
+conversation from day one. What changed is not the reasoning below — it is the
+recognition that the reasoning is a *hypothesis about resolution friction*, and
+that the design already contains the instrument to test it.
 
-Telegram remains better for conversation, because it is a real chat UI. Rather
-than compromise on one channel, use each for what it is good at.
+**Forced by.** Telegram is required regardless, because conversation is the
+primary way items get created. Adding a second transport before the first has
+been used buys one property — Done and Snooze rendered in the notification itself
+rather than in the chat message — at the cost of a second integration, a fourth
+authentication mechanism, a signed-token scheme, and the only path in the ingress
+table that cannot sit behind Cloudflare Access.
 
-**Cost.** Two integrations instead of one. Self-hosted ntfy requires forwarding
-poll requests upstream to ntfy.sh for iOS push, so message bodies transit their
-infrastructure regardless. The ntfy iOS client ignores the `clear` flag on HTTP
-actions, so the original notification lingers after a tap, which is why a
-confirmation push is sent.
+That property may well be worth all of it. The honest position is that nobody
+knows yet, and `resolution_source` exists precisely to answer it. Building the
+cheap version first and reading the column is a better sequence than building the
+expensive version first and never learning whether it was necessary.
+
+Splitting the roles rather than collapsing them is what keeps this reversible.
+The interface, the capability flags, and the two environment variables all stay.
+Telegram declares `supports_actions` true and
+`supports_native_notification_actions` false, which is the exact distinction D-007
+was written for — the abstraction earns its keep on day one instead of on day
+ninety.
+
+**Cost.** Three things, and they are real.
+
+Resolving means opening Telegram. Inline keyboards render inside the chat message,
+not in the notification, and that friction is the thing that leaves a statistics
+dashboard empty after a week. iOS quick-reply from the notification is a partial
+mitigation — typing "done" into the reply field reaches the agent without opening
+the app — but it is typing, not a tap.
+
+Priority collapses to silent versus normal. Telegram has no equivalent of an iOS
+interruption level, so nothing breaks through a Focus mode. N7 records what is
+lost.
+
+Delivery and conversation now share a failure. Previously an ntfy outage left
+conversation working and a Telegram outage left delivery working; now one outage
+takes both, and it takes reconciliation with them, since reconciliation is a
+Telegram message. The web app is the only surviving surface. This is the sharpest
+tension with "degrade to boring" in the document, and it is accepted rather than
+resolved — the mitigation is that occurrences stay `pending` and reconciliation
+catches up on recovery, which is the same backstop every other row in the
+failure-mode table relies on.
+
+**Revisit when** `resolution_source` has a month of data. If notification-sourced
+resolutions are rare and web-sourced ones dominate, the friction is real and T10
+is worth its cost. If resolution mostly happens by messaging the agent, a push
+channel with buttons would have been solving a problem that was not there. See
+[Q-15](10-open-questions.md#q-15-whether-a-dedicated-push-transport-is-worth-adding).
 
 ---
 
@@ -132,11 +170,19 @@ confirmation push is sent.
 `supports_native_notification_actions`, and `supports_rich_text`. Calling code
 reads those flags.
 
-**Forced by.** The requirement to swap to Discord or iMessage later. An
+**Forced by.** The requirement to swap to ntfy, Discord, or iMessage later. An
 abstraction that is correct on day one and full of `if transport == "telegram"` on
 day ninety has not abstracted anything.
 
-**Cost.** Slightly more ceremony for the two adapters that exist today.
+D-006 makes this immediately load-bearing rather than speculative. Telegram fills
+both roles while declaring `supports_actions` true and
+`supports_native_notification_actions` false, so the distinction the flags encode
+is being exercised by the only adapter that exists. Code written against the flags
+is code that already works the day a push transport is added; code written against
+"is this Telegram" is code that has to be found and rewritten.
+
+**Cost.** Ceremony for one adapter serving two roles, where a direct call would
+plainly work today.
 
 ---
 

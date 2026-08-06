@@ -133,6 +133,54 @@ unknown. It is the easiest thing in P5 to remove.
 
 ---
 
+## Needs an answer after P4 has run for a month
+
+### Q-15: Whether a dedicated push transport is worth adding
+
+Numbered out of sequence because IDs are stable and this arrived with the revision
+of D-006.
+
+Telegram fills both transport roles. Its inline keyboards render inside the chat
+message rather than in the notification, so resolving means opening Telegram. The
+open question is whether that friction matters enough to justify T10: a second
+integration, a fourth authentication mechanism, a signed-token scheme, and a
+public route that cannot sit behind Cloudflare Access.
+
+The earlier version of this specification answered yes in advance and built ntfy
+from day one. That answer may still be right. What was wrong was answering it
+before there was any evidence, when `resolution_source` had been put in the schema
+specifically to produce that evidence and costs nothing to read.
+
+Three outcomes and what each implies:
+
+| `resolution_source` after a month | Reading | Action |
+|---|---|---|
+| Mostly `notification` | The buttons are being used where they are | Nothing |
+| Mostly `web` | Resolution happens, but only once a screen has been opened anyway | T10 is worth its cost |
+| Mostly `agent` | Reminders get answered by replying | T10 solves a problem that is not there |
+
+A fourth outcome is worth naming because it does not appear in the column at all:
+if occurrences are largely resolved by *reconciliation* rather than in the moment,
+the notification is being ignored regardless of what it carries, and no button
+placement fixes that. That is the case where the answer is fewer reminders, as the
+first known unknown below already says.
+
+**Watch for the confound.** iOS quick-reply lets a "done" be typed straight from
+the Telegram notification, which lands as `agent` rather than `notification`. A
+month of mostly-`agent` therefore has two readings — reminders being answered
+conversationally at leisure, or the lock screen already working well enough
+through a different door. Separating them means looking at lag from `notified_at`
+to `resolved_at`, not just at the source: quick-replies cluster within seconds of
+the notification, considered replies do not.
+
+**Resolve by:** running P0 through P4 and reading the column. There is also a
+second argument for T10 that is independent of friction — it decorrelates the
+single-transport failure in
+[03-architecture.md](03-architecture.md#failure-modes) — and if that outage is
+ever actually experienced, it may settle this on its own.
+
+---
+
 ## Needs an answer before P7
 
 ### Q-10: Conflict resolution strategy for two-way calendar sync
@@ -216,10 +264,12 @@ another owner's rows. One test, not a suite.
 
 Things that will only become clear through use.
 
-- **Whether ntfy notifications get ignored the way any notification does.** The
-  action buttons are meant to lower resolution friction to near zero. If the
-  notifications themselves get swiped away without reading, no button placement
-  fixes that, and the answer is fewer reminders rather than better ones.
+- **Whether notifications get ignored the way any notification does.** Buttons on
+  the message are meant to lower resolution friction. If the notifications
+  themselves get swiped away without reading, no button placement fixes that —
+  not in the chat message and not on the lock screen — and the answer is fewer
+  reminders rather than better ones. This sits underneath Q-15 and is the reason
+  Q-15 can be answered "neither" rather than only "here or there".
 
 - **Whether the personality is a feature or a novelty.** The honest expectation is
   that it charms for a fortnight. The tone ladder and the dormancy branch are the
@@ -238,7 +288,8 @@ Things that will only become clear through use.
 - **Whether `resolution_source` reveals something actionable.** If nearly
   everything gets resolved from the day view rather than notifications, the
   notification design is wrong. If nearly everything is resolved by messaging, the
-  web app was not worth building.
+  web app was not worth building. Q-15 now depends on this column, which promotes
+  it from an interesting series to the one that settles a build decision.
 
 ---
 
@@ -250,8 +301,10 @@ Recorded so they do not get relitigated without new information.
   Not the same claim as "impossible later" — see Q-13 for what the design does
   and does not foreclose.
 - **A native iOS app.** APNs with notification categories is the only fully
-  reliable path to native actions, and it costs a developer account and a build
-  pipeline. ntfy gets close enough.
+  reliable path to native lock-screen actions, and it costs a developer account
+  and a build pipeline. If those actions turn out to be worth having, T10 buys
+  most of the benefit for an adapter and a token scheme, which is why Q-15 is the
+  live question and this one is not.
 - **A test suite.** Explicitly declined. `/healthz` and the metrics in D-023 cover
   the failure that actually matters, which is a stalled loop. Q-14 is the single
   narrow carve-out under discussion and is not an opening to revisit this.

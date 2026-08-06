@@ -45,10 +45,11 @@ Priority levels:
 | T3 | M | Outbound interface: `send(recipient, body, actions, priority) -> message_id`, where actions are declared abstractly and rendered natively per channel. |
 | T4 | M | Inbound adapters normalize into a canonical message shape regardless of whether the channel polls or receives a webhook. |
 | T5 | M | Behaviour branches on declared transport capability flags (`supports_actions`, `supports_native_notification_actions`, `supports_rich_text`), never on transport name. |
-| T6 | M | Initial notification transport: ntfy. Chosen because its iOS action buttons render in the notification itself and can issue HTTP requests. |
+| T6 | M | Initial notification transport: Telegram, the same channel as conversation. Both roles are still configured independently, so a dedicated push channel is a configuration change rather than a code change. |
 | T7 | M | Initial conversation transport: Telegram. |
-| T8 | L | Additional adapters: Discord, iMessage. No design change required to add one. |
+| T8 | L | Additional adapters: ntfy, Discord, iMessage. No design change required to add one. |
 | T9 | S | A transport without action support falls back to a numbered plain-text list the agent can parse from a reply. |
+| T10 | L | A dedicated push transport carrying native lock-screen actions, ntfy being the likely candidate. Deferred and possibly permanent: see [D-006](08-decisions.md#d-006-notification-and-conversation-are-separate-transport-roles-on-one-channel-to-start) and [Q-15](10-open-questions.md#q-15-whether-a-dedicated-push-transport-is-worth-adding). |
 
 ## N. Notifications
 
@@ -57,9 +58,10 @@ Priority levels:
 | N1 | M | Delivered to iPhone. |
 | N2 | M | Notification body is read from a pre-generated string on the occurrence row. No model call occurs at fire time. |
 | N3 | M | If that string is null, the plain item title is sent. Delivery never depends on an LLM call succeeding. |
-| N4 | M | Notifications carry Done, Snooze, and Skip actions that resolve the occurrence without opening an app. |
-| N5 | S | Notification priority is per item and maps to iOS interruption levels, so high-priority reminders can break through Focus modes. |
-| N6 | S | After an action is tapped, a short confirmation push is sent, because the ntfy iOS client does not dismiss the original notification on action tap. |
+| N4 | M | Notifications carry Done, Snooze, and Skip actions that resolve the occurrence in one tap, with no typing and no navigating to find the item. On Telegram these are inline keyboard buttons attached to the message. |
+| N5 | S | Notification priority is per item and maps to the strongest signal the transport offers. On Telegram that is silent versus normal delivery. |
+| N6 | S | After an action is tapped, the originating message is edited in place to show the outcome. A transport that cannot edit a message it has already sent sends a short confirmation push instead. |
+| N7 | L | Resolution from the lock screen without opening any app, and priority mapped to iOS interruption levels so high-priority reminders break through Focus modes. Both require T10. |
 
 ## I. Item model
 
@@ -187,7 +189,7 @@ Priority levels:
 | Q3 | M | The system survives restart without losing or duplicating pending occurrences. |
 | Q4 | M | The system survives a model provider outage with degraded messaging but intact delivery. |
 | Q5 | S | Recovery from total host loss is restoring the Litestream replica and starting the container. |
-| Q6 | S | Action tokens embedded in notifications are scoped to a single occurrence and action and expire. |
+| Q6 | L | Applies only under T10. A transport whose action callbacks arrive unauthenticated must embed signed tokens scoped to a single occurrence and one action, and they must expire. Not required while every callback arrives over an authenticated transport webhook from an allowlisted sender. |
 | Q7 | S | Metrics exported in Prometheus format on a scrape endpoint, covering at minimum: delivery latency (scheduled time to send), per-loop tick interval, occurrence status transitions, model tier success and escalation rate, and copywriter fallback rate. |
 | Q8 | S | A dashboard renders Q7. `pending_overdue > 0` is the one condition that alerts; everything else in this system degrades visibly on its own. |
 

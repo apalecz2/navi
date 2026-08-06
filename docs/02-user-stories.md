@@ -114,13 +114,14 @@ A reminder comes due.
 - [ ] If no generated text exists, the plain title is sent instead [N3]
 - [ ] The occurrence moves to `notified` [R1]
 
-### US-3.2 Resolve from the notification without opening an app
-I long-press the notification on my lock screen.
+### US-3.2 Resolve a reminder in one tap
+I open the reminder and tap Done.
 
-- [ ] Done, Snooze, and Skip appear as native notification actions [N4, T6]
-- [ ] Tapping one resolves the occurrence via an HTTP request from the notification [N4]
-- [ ] A short confirmation push follows, because the original notification does not self-dismiss [N6]
+- [ ] Done, Snooze, and Skip appear as buttons on the reminder message itself [N4, T6]
+- [ ] Tapping one resolves the occurrence with no typing and no navigating to find the item [N4]
+- [ ] The message is edited in place to show the outcome, leaving one message in the chat rather than two [N6]
 - [ ] Tapping twice does not double-record [R4]
+- [ ] The tap never reaches the model — it decodes to an occurrence and an action and goes straight to the resolve path [D-001]
 
 ### US-3.3 Snooze
 I tap Snooze on a reminder.
@@ -136,11 +137,25 @@ I tap "tonight".
 
 - [ ] The delta resolves against the item's timezone and window, not naive arithmetic [R9]
 
-### US-3.5 Reminder priority breaks through a Focus mode
-A high-priority reminder fires while my phone is in Focus.
+### US-3.5 Reminder priority changes how loudly it arrives
+A low-priority reminder fires while I am working.
 
-- [ ] Priority maps to the iOS interruption level [N5]
-- [ ] Low-priority reminders do not break through
+- [ ] Priority is stored per item and maps to the strongest signal the transport offers [N5]
+- [ ] On Telegram that is silent versus normal delivery, so a low-priority reminder arrives without a sound [N5]
+
+### US-3.6 Resolve from the lock screen without opening anything (later)
+I long-press the notification without unlocking.
+
+- [ ] Done, Snooze, and Skip appear as native notification actions [N7, T10]
+- [ ] Tapping one resolves the occurrence without opening an app [N7]
+- [ ] A high-priority reminder breaks through a Focus mode, and a low-priority one does not [N7]
+- [ ] Adding this requires a new adapter and a configuration change, not a change to the scheduler or the resolution path [T5]
+
+**May never be built.** The nearest thing available today is iOS quick-reply:
+typing "done" into the notification's reply field reaches the agent without
+opening Telegram. That is typing rather than a tap, which is the whole of the gap
+[Q-15](10-open-questions.md#q-15-whether-a-dedicated-push-transport-is-worth-adding)
+is meant to measure.
 
 ---
 
@@ -298,3 +313,11 @@ I decide to move conversation from Telegram to Discord.
 
 - [ ] Only a new adapter and a configuration change are required [T2, T8]
 - [ ] No scheduler, agent, or resolution code changes [T5]
+
+### US-9.5 Split the two transport roles apart again (later)
+The evidence says lock-screen actions are worth having, so notifications move to a dedicated push channel.
+
+- [ ] `NOTIFY_TRANSPORT` changes and `CHAT_TRANSPORT` does not [T1, T10]
+- [ ] The scheduler keeps emitting the same abstract Done, Snooze, and Skip actions [T3]
+- [ ] Code that already branched on `supports_native_notification_actions` starts taking the other path without being edited [T5]
+- [ ] Reconciliation and delivery stop sharing a single point of failure

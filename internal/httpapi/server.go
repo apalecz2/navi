@@ -23,7 +23,7 @@ import (
 // reaching a query it has no business with as the repository grows.
 type Store interface {
 	Ping(ctx context.Context) error
-	PendingOverdue(ctx context.Context) (int, error)
+	PendingOverdue(ctx context.Context, floor time.Time) (int, error)
 	Horizon(ctx context.Context) (int, bool, error)
 }
 
@@ -34,13 +34,19 @@ type Server struct {
 	health  *health.Registry
 	metrics *metrics.Metrics
 	store   Store
+
+	// claimFloor is the scheduler's oldest firable start time. It is a value
+	// rather than a callback because the floor is fixed at process start and
+	// never moves; passing it in is what makes /healthz count exactly what the
+	// scheduler would claim.
+	claimFloor time.Time
 }
 
 // New builds the http.Server. It takes the HTTP config group rather than the
 // whole configuration, so a handler cannot reach a credential it has no
 // business with.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store) *http.Server {
-	s := &Server{log: log, health: h, metrics: m, store: st}
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time) *http.Server {
+	s := &Server{log: log, health: h, metrics: m, store: st, claimFloor: claimFloor}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

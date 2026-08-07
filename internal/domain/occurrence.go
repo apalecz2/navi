@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -69,6 +70,26 @@ type Occurrence struct {
 	GenerationPass     int
 
 	CreatedAt time.Time
+}
+
+// NotificationBody is the text a surface shows for an occurrence: the
+// copywriter's generated message when there is one, the plain item title when
+// there is not (N3).
+//
+// It lives in this leaf rather than beside the scheduler because the fallback is
+// a user-facing rule, not a fire-path detail — the reconciler's check-in, the
+// day view, and the copywriter's own tone decisions all need the same answer,
+// and each of them reaching it through a store row type would mean either
+// importing one or reimplementing the rule. Same argument that puts the
+// transition table here.
+//
+// An empty generated string counts as absent. A blank message is a generation
+// that went wrong, and sending nothing at all is worse than sending the title.
+func NotificationBody(messageText *string, title string) string {
+	if messageText != nil && strings.TrimSpace(*messageText) != "" {
+		return *messageText
+	}
+	return title
 }
 
 // NewOccurrence is what a caller supplies to materialize an instance. The store

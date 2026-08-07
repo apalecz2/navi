@@ -26,13 +26,14 @@ import (
 // Config is the whole of the process configuration, grouped by the component
 // that consumes it. Components take their own group, never the whole struct.
 type Config struct {
-	HTTP     HTTP
-	Log      Log
-	Data     Data
-	Files    Files
-	Schedule Schedule
-	Telegram Telegram
-	Backup   Backup
+	HTTP      HTTP
+	Log       Log
+	Data      Data
+	Files     Files
+	Schedule  Schedule
+	Transport Transport
+	Telegram  Telegram
+	Backup    Backup
 }
 
 // HTTP configures the API listener.
@@ -109,18 +110,34 @@ type Schedule struct {
 	DefaultTZ *time.Location
 }
 
+// Transport names the adapter filling each transport role. Both point at the
+// same one to start with (D-006); they stay separate because that split is the
+// seam a dedicated push channel drops into later, and it costs one environment
+// variable to keep against a refactor to reintroduce.
+//
+// Separate from Telegram because these are role assignments and not Telegram's
+// credentials — the scheduler reads Notify and must not appear to be reading a
+// bot token to do it.
+type Transport struct {
+	// Notify is the outbound half of the firing path. Consumed by the scheduler.
+	Notify string
+
+	// Chat is the conversational transport. Nothing reads it until P1.
+	Chat string
+}
+
+// LoggingTransport is the adapter that delivers to the log instead of to a
+// phone. It is the default for Notify so the service runs with no credentials,
+// which is right for development and wrong everywhere else — main warns loudly
+// when it is in force.
+const LoggingTransport = "logging"
+
 // Telegram is parsed but not yet consumed. The bot token and the webhook secret
 // are borrowed credentials and come from the environment with no default (D9).
 type Telegram struct {
 	BotToken        string
 	WebhookSecret   string
 	AllowedSenderID string
-
-	// NotifyTransport and ChatTransport name the adapter filling each transport
-	// role. Both point at Telegram to start with (D-006); they stay separate
-	// because that split is the seam a dedicated push channel drops into later.
-	NotifyTransport string
-	ChatTransport   string
 }
 
 // Backup is parsed but not yet consumed. Litestream becomes the container
@@ -157,12 +174,17 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Required now: the scheduler resolves an adapter from this in the same
+	// commit that reads it.
+	if cfg.Transport.Notify, err = envRequiredString("NOTIFY_TRANSPORT", LoggingTransport); err != nil {
+		return Config{}, err
+	}
+	cfg.Transport.Chat = envString("CHAT_TRANSPORT", "")
+
 	cfg.Telegram = Telegram{
 		BotToken:        envString("TELEGRAM_BOT_TOKEN", ""),
 		WebhookSecret:   envString("TELEGRAM_WEBHOOK_SECRET", ""),
 		AllowedSenderID: envString("ALLOWED_SENDER_ID", ""),
-		NotifyTransport: envString("NOTIFY_TRANSPORT", ""),
-		ChatTransport:   envString("CHAT_TRANSPORT", ""),
 	}
 
 	cfg.Backup.LitestreamReplicaURL = envString("LITESTREAM_REPLICA_URL", "")
@@ -181,6 +203,11 @@ func (c Config) LogValue() slog.Value {
 		slog.String("data_dir", c.Data.Dir),
 		slog.String("config_dir", c.Files.ConfigDir),
 		slog.String("default_tz", c.Schedule.DefaultTZ.String()),
+
+		// Which adapter is delivering reminders is the one setting whose wrong
+		// value looks exactly like a working system, so it goes in the line that
+		// gets read when someone asks why their phone is quiet.
+		slog.String("notify_transport", c.Transport.Notify),
 	)
 }
 

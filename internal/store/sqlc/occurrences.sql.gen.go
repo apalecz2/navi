@@ -9,11 +9,33 @@ import (
 	"context"
 )
 
+const claimOccurrence = `-- name: ClaimOccurrence :execrows
+UPDATE occurrences
+SET status = 'notified', notified_at = ?
+WHERE id = ?
+  AND status = 'pending'
+`
+
+type ClaimOccurrenceParams struct {
+	NotifiedAt *string
+	ID         string
+}
+
+func (q *Queries) ClaimOccurrence(ctx context.Context, arg ClaimOccurrenceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, claimOccurrence, arg.NotifiedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const countPendingOverdue = `-- name: CountPendingOverdue :one
 SELECT count(*) FROM occurrences o
 JOIN items i ON i.id = o.item_id
 WHERE o.status = 'pending'
   AND o.starts_at <= ?
+  AND o.starts_at >= ?
+  AND i.kind = 'reminder'
   AND i.notify_policy = 'at_time'
   AND i.active = 1
   AND i.archived_at IS NULL
@@ -22,11 +44,12 @@ WHERE o.status = 'pending'
 
 type CountPendingOverdueParams struct {
 	StartsAt    string
+	StartsAt_2  string
 	PausedUntil *string
 }
 
 func (q *Queries) CountPendingOverdue(ctx context.Context, arg CountPendingOverdueParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countPendingOverdue, arg.StartsAt, arg.PausedUntil)
+	row := q.db.QueryRowContext(ctx, countPendingOverdue, arg.StartsAt, arg.StartsAt_2, arg.PausedUntil)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -148,6 +171,76 @@ func (q *Queries) GetOccurrence(ctx context.Context, id string) (Occurrence, err
 	return i, err
 }
 
+const listDueOccurrences = `-- name: ListDueOccurrences :many
+SELECT o.id, o.item_id, o.starts_at, o.message_text,
+       i.title, i.kind, i.priority
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.status = 'pending'
+  AND o.starts_at <= ?
+  AND o.starts_at >= ?
+  AND i.kind = 'reminder'
+  AND i.notify_policy = 'at_time'
+  AND i.active = 1
+  AND i.archived_at IS NULL
+  AND ifnull(i.paused_until, '0000-01-01T00:00:00Z') <= ?
+ORDER BY o.starts_at, o.id
+LIMIT ?
+`
+
+type ListDueOccurrencesParams struct {
+	StartsAt    string
+	StartsAt_2  string
+	PausedUntil *string
+	Limit       int64
+}
+
+type ListDueOccurrencesRow struct {
+	ID          string
+	ItemID      string
+	StartsAt    string
+	MessageText *string
+	Title       string
+	Kind        string
+	Priority    int64
+}
+
+func (q *Queries) ListDueOccurrences(ctx context.Context, arg ListDueOccurrencesParams) ([]ListDueOccurrencesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDueOccurrences,
+		arg.StartsAt,
+		arg.StartsAt_2,
+		arg.PausedUntil,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDueOccurrencesRow{}
+	for rows.Next() {
+		var i ListDueOccurrencesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.MessageText,
+			&i.Title,
+			&i.Kind,
+			&i.Priority,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFutureOccurrencesForItem = `-- name: ListFutureOccurrencesForItem :many
 SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
 WHERE item_id = ?
@@ -250,4 +343,25 @@ func (q *Queries) ListOccurrencesForItem(ctx context.Context, itemID string) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+const releaseClaimedOccurrence = `-- name: ReleaseClaimedOccurrence :execrows
+UPDATE occurrences
+SET status = 'pending', notified_at = NULL
+WHERE id = ?
+  AND status = 'notified'
+  AND notified_at = ?
+`
+
+type ReleaseClaimedOccurrenceParams struct {
+	ID         string
+	NotifiedAt *string
+}
+
+func (q *Queries) ReleaseClaimedOccurrence(ctx context.Context, arg ReleaseClaimedOccurrenceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseClaimedOccurrence, arg.ID, arg.NotifiedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

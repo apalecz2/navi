@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	// Same reason as cmd/navi: the schedule below resolves against an IANA
@@ -34,9 +35,12 @@ import (
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/materializer"
+	"github.com/aidenpaleczny/navi/internal/metrics"
 	"github.com/aidenpaleczny/navi/internal/schedule"
+	"github.com/aidenpaleczny/navi/internal/scheduler"
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
+	"github.com/aidenpaleczny/navi/internal/transport"
 )
 
 func main() {
@@ -99,7 +103,13 @@ func run() error {
 	// re-materialization is for: floating items resolve against the device zone,
 	// and the rows written here are the ones that move when it changes.
 	reportDST()
-	return reportMaterialization(ctx, st, cfg.Schedule.DefaultTZ, log)
+	if err := reportMaterialization(ctx, st, cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// Last, because it is the only section that sends anything, and because it
+	// wants the global pause reportPause left lifted.
+	return reportFire(ctx, st, cfg.Schedule.DefaultTZ.String(), log)
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running
@@ -201,7 +211,9 @@ func seedOccurrences(ctx context.Context, st *store.Store, item domain.Item) err
 // reportHealthInputs prints the two values /healthz reads from the database, so
 // the endpoint's numbers can be checked against their source.
 func reportHealthInputs(ctx context.Context, st *store.Store) error {
-	overdue, err := st.PendingOverdue(ctx)
+	// The floor a process that just started would use, which is what /healthz
+	// and the gauge both count against.
+	overdue, err := st.PendingOverdue(ctx, time.Now().Add(-scheduler.RecoveryWindow))
 	if err != nil {
 		return err
 	}
@@ -907,4 +919,391 @@ func verdict(ok bool) string {
 		return "ok"
 	}
 	return "FAILED"
+}
+
+// reportFire drives the scheduler against a transport that records instead of
+// delivering, and checks every claim the fire path makes.
+//
+// Assertions are scoped to this section's own occurrences rather than to totals,
+// because the database also holds thirty days of materialized rows from the
+// section above and a previous run's rows may have come due since. Every
+// occurrence written here carries a distinctive body for that reason, except one
+// left deliberately without generated text so the N3 fallback is exercised.
+func reportFire(ctx context.Context, st *store.Store, tz string, log *slog.Logger) error {
+	fmt.Printf("\nfire path  recovery window %s  batch %d\n",
+		scheduler.RecoveryWindow, scheduler.MaxBatch)
+
+	item, err := seedFireItem(ctx, st, "fire path probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+	silent, err := seedFireItem(ctx, st, "fire path silent", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+
+	// Inside the window, and with no message_text: this is the only send path
+	// that exists at P0, since no copywriter has ever run.
+	due, err := fireOccurrence(ctx, st, item, now.Add(-5*time.Minute), nil)
+	if err != nil {
+		return err
+	}
+	// Older than the window. C9 leaves this pending and silent; P3 asks about it.
+	stale, err := fireOccurrence(ctx, st, item, now.Add(-2*time.Hour), nil)
+	if err != nil {
+		return err
+	}
+	// notify_policy = silent: generates, appears in the day view, resolvable,
+	// never pushed (K1, K2).
+	quiet, err := fireOccurrence(ctx, st, silent, now.Add(-5*time.Minute), ptr("fire path silent body"))
+	if err != nil {
+		return err
+	}
+
+	rec := &recordingTransport{}
+	m := metrics.New()
+	sched := scheduler.New(log.With("component", "scheduler"), st, rec, m, now)
+
+	res, err := sched.Fire(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  claim floor %s  (%s before now)\n",
+		domain.FormatTime(sched.ClaimFloor()), scheduler.RecoveryWindow)
+	fmt.Printf("  pass 1   claimed %d  sent %d  failed %d  released %d  fallbacks %d  max latency %s\n",
+		res.Claimed, res.Sent, res.Failed, res.Released, res.Fallbacks, res.MaxLatency.Truncate(time.Second))
+
+	sentDue, err := statusOf(ctx, st, due.ID)
+	if err != nil {
+		return err
+	}
+	notifiedAtSet, err := notifiedAt(ctx, st, due.ID)
+	if err != nil {
+		return err
+	}
+	fireOnce := rec.count(item.Title) == 1 && sentDue == domain.StatusNotified && notifiedAtSet
+	fmt.Printf("    due row fired once            %s -> %s, notified_at %s, %d send(s)  %s\n",
+		domain.StatusPending, sentDue, presence(notifiedAtSet), rec.count(item.Title), verdict(fireOnce))
+
+	// N3: the body is the plain item title, because message_text is null.
+	fmt.Printf("    body fell back to the title   %q  %s\n",
+		item.Title, verdict(rec.count(item.Title) == 1 && res.Fallbacks >= 1))
+
+	staleStatus, err := statusOf(ctx, st, stale.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    2h overdue left alone         %s, %d send(s)  %s\n",
+		staleStatus, rec.count(item.Title)-1, verdict(staleStatus == domain.StatusPending))
+
+	quietStatus, err := statusOf(ctx, st, quiet.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    silent item not pushed        %s, %d send(s)  %s\n",
+		quietStatus, rec.count("fire path silent body"),
+		verdict(quietStatus == domain.StatusPending && rec.count("fire path silent body") == 0))
+
+	if err := reportFireConcurrency(ctx, st, item, now, log); err != nil {
+		return err
+	}
+	if err := reportFireRetry(ctx, st, item, now, log); err != nil {
+		return err
+	}
+	if err := reportFirePause(ctx, st, item, now, log); err != nil {
+		return err
+	}
+
+	fmt.Printf("    latency observed              %s  %s\n",
+		res.MaxLatency.Truncate(time.Second), verdict(res.MaxLatency > 0))
+
+	// The one thing this session must not have done. missed belongs to
+	// reconciliation, which does not exist (K6, D-008).
+	missed, err := countStatus(ctx, st, []string{item.ID, silent.ID}, domain.StatusMissed)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    nothing marked missed         %d row(s)  %s\n", missed, verdict(missed == 0))
+
+	// The gauge does not latch: the two-hour row above is pending and overdue,
+	// and is deliberately not counted, because it is past firing rather than
+	// waiting on a stalled scheduler.
+	overdue, err := st.PendingOverdue(ctx, sched.ClaimFloor())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    pending_overdue after firing  %d  (stale rows excluded by the floor)  %s\n",
+		overdue, verdict(overdue == 0))
+
+	// Item-level pause shares its predicate verbatim with the global one and with
+	// the gauge, so it is checked by construction rather than here: there is no
+	// writer for items.paused_until at P0, and adding one belongs to P3's edit
+	// path rather than to a seeding tool.
+	fmt.Printf("    item-level pause              no writer at P0, predicate shared with the claim\n")
+	return nil
+}
+
+// reportFireConcurrency forces two passes at once. This is the BEGIN IMMEDIATE
+// guarantee the whole claim rests on, and the one P1's synchronous write path
+// and P2's endpoints will lean on next: two claimers see disjoint sets, so
+// nothing is sent twice.
+func reportFireConcurrency(ctx context.Context, st *store.Store, item domain.Item, now time.Time, log *slog.Logger) error {
+	bodies := []string{"fire path concurrent A", "fire path concurrent B"}
+	for _, b := range bodies {
+		if _, err := fireOccurrence(ctx, st, item, now.Add(-4*time.Minute), ptr(b)); err != nil {
+			return err
+		}
+	}
+
+	rec := &recordingTransport{}
+	m := metrics.New()
+	first := scheduler.New(log.With("component", "scheduler"), st, rec, m, now)
+	second := scheduler.New(log.With("component", "scheduler"), st, rec, m, now)
+
+	var wg sync.WaitGroup
+	results := make([]scheduler.Result, 2)
+	errs := make([]error, 2)
+	for i, s := range []*scheduler.Scheduler{first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = s.Fire(ctx)
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+
+	disjoint := true
+	for _, b := range bodies {
+		if rec.count(b) != 1 {
+			disjoint = false
+		}
+	}
+	fmt.Printf("    double tick, disjoint claims  %d + %d claimed, each body sent once  %s\n",
+		results[0].Claimed, results[1].Claimed, verdict(disjoint))
+	return nil
+}
+
+// reportFireRetry simulates a transport outage. The failure-mode table says the
+// occurrence stays pending and is retried, which is what the released claim
+// makes true — and is why the claim floor is anchored to process start rather
+// than sliding, since a sliding floor would age this row out after thirty ticks
+// of the same failure.
+func reportFireRetry(ctx context.Context, st *store.Store, item domain.Item, now time.Time, log *slog.Logger) error {
+	const body = "fire path retry"
+
+	occ, err := fireOccurrence(ctx, st, item, now.Add(-3*time.Minute), ptr(body))
+	if err != nil {
+		return err
+	}
+
+	m := metrics.New()
+	failing := scheduler.New(log.With("component", "scheduler"), st, &failingTransport{}, m, now)
+
+	// An error is expected here: the pass returns one so navi_loop_errors_total
+	// sees the outage.
+	res, _ := failing.Fire(ctx)
+	afterFail, err := statusOf(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+	stampCleared, err := notifiedAt(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    send failure releases claim   %s, notified_at %s, released %d  %s\n",
+		afterFail, presence(stampCleared), res.Released,
+		verdict(afterFail == domain.StatusPending && !stampCleared && res.Released >= 1))
+
+	rec := &recordingTransport{}
+	working := scheduler.New(log.With("component", "scheduler"), st, rec, m, now)
+	if _, err := working.Fire(ctx); err != nil {
+		return err
+	}
+	afterRetry, err := statusOf(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    next pass delivers it         %s, %d send(s)  %s\n",
+		afterRetry, rec.count(body),
+		verdict(afterRetry == domain.StatusNotified && rec.count(body) == 1))
+	return nil
+}
+
+// reportFirePause checks vacation mode at the fire path rather than at
+// materialization: a paused system claims nothing, and the rows it did not claim
+// are still pending afterwards.
+func reportFirePause(ctx context.Context, st *store.Store, item domain.Item, now time.Time, log *slog.Logger) error {
+	const body = "fire path paused"
+
+	occ, err := fireOccurrence(ctx, st, item, now.Add(-2*time.Minute), ptr(body))
+	if err != nil {
+		return err
+	}
+	if err := st.SetGlobalPauseUntil(ctx, time.Now().Add(time.Hour)); err != nil {
+		return err
+	}
+
+	rec := &recordingTransport{}
+	sched := scheduler.New(log.With("component", "scheduler"), st, rec, metrics.New(), now)
+	paused, err := sched.Fire(ctx)
+	if err != nil {
+		return err
+	}
+	during, err := statusOf(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+
+	// Counted before the pause is lifted. Reading the recorder afterwards would
+	// see the delivery the next pass makes and report a pause that leaked.
+	duringSends := rec.count(body)
+
+	// Lifted the way the agent does when a trip ends early, rather than by
+	// deleting the key.
+	if err := st.SetGlobalPauseUntil(ctx, time.Now().Add(-time.Second)); err != nil {
+		return err
+	}
+	if _, err := sched.Fire(ctx); err != nil {
+		return err
+	}
+	after, err := statusOf(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("    global pause claims nothing   paused=%t, %s, %d send(s)  %s\n",
+		paused.Paused, during, duringSends,
+		verdict(paused.Paused && during == domain.StatusPending && duringSends == 0))
+	fmt.Printf("    lifted, then it fires         %s, %d send(s)  %s\n",
+		after, rec.count(body), verdict(after == domain.StatusNotified && rec.count(body) == 1))
+	return nil
+}
+
+// seedFireItem creates one of this section's items on first run and reuses it
+// afterwards. Occurrences are not reused: every pass needs rows that have not
+// been claimed yet.
+func seedFireItem(ctx context.Context, st *store.Store, title string, policy domain.NotifyPolicy, tz string) (domain.Item, error) {
+	existing, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return domain.Item{}, err
+	}
+	for _, it := range existing {
+		if it.Title == title {
+			return it, nil
+		}
+	}
+
+	// A one-off in the past, so the materializer expands nothing from it and
+	// this section's rows stay the ones written here. Naive local date-time, not
+	// an instant: the trailing Z belongs to stored timestamps, never to a
+	// schedule's wall-clock time.
+	sched := json.RawMessage(`{"kind":"one_off","at":"2020-01-01T09:00:00"}`)
+	return st.CreateItem(ctx, domain.NewItem{
+		Title:        title,
+		Schedule:     sched,
+		TZ:           tz,
+		NotifyPolicy: &policy,
+	})
+}
+
+func fireOccurrence(ctx context.Context, st *store.Store, item domain.Item, at time.Time, body *string) (domain.Occurrence, error) {
+	return st.CreateOccurrence(ctx, domain.NewOccurrence{
+		ItemID:      item.ID,
+		StartsAt:    at,
+		MessageText: body,
+
+		// An override, so the materializer leaves it alone no matter what the
+		// item's schedule expands to.
+		IsOverride: true,
+	})
+}
+
+func statusOf(ctx context.Context, st *store.Store, id string) (domain.Status, error) {
+	occ, err := st.GetOccurrence(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return occ.Status, nil
+}
+
+func notifiedAt(ctx context.Context, st *store.Store, id string) (bool, error) {
+	occ, err := st.GetOccurrence(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return occ.NotifiedAt != nil, nil
+}
+
+func countStatus(ctx context.Context, st *store.Store, itemIDs []string, want domain.Status) (int, error) {
+	n := 0
+	for _, id := range itemIDs {
+		occurrences, err := st.ListOccurrencesForItem(ctx, id)
+		if err != nil {
+			return 0, err
+		}
+		for _, occ := range occurrences {
+			if occ.Status == want {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
+func presence(set bool) string {
+	if set {
+		return "set"
+	}
+	return "null"
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// recordingTransport keeps what it was asked to send instead of sending it.
+// Concurrency-safe because reportFireConcurrency drives two passes at once
+// through one instance, which is the whole point of that check.
+type recordingTransport struct {
+	mu   sync.Mutex
+	sent []transport.Outbound
+}
+
+func (t *recordingTransport) Name() string { return "recording" }
+
+func (t *recordingTransport) Capabilities() transport.Capabilities {
+	return transport.Capabilities{SupportsActions: true}
+}
+
+func (t *recordingTransport) Send(_ context.Context, msg transport.Outbound) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sent = append(t.sent, msg)
+	return fmt.Sprintf("rec-%d", len(t.sent)), nil
+}
+
+func (t *recordingTransport) count(body string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, msg := range t.sent {
+		if msg.Body == body {
+			n++
+		}
+	}
+	return n
+}
+
+// failingTransport is a transport outage.
+type failingTransport struct{}
+
+func (t *failingTransport) Name() string { return "failing" }
+
+func (t *failingTransport) Capabilities() transport.Capabilities { return transport.Capabilities{} }
+
+func (t *failingTransport) Send(context.Context, transport.Outbound) (string, error) {
+	return "", errors.New("failing: transport unreachable")
 }

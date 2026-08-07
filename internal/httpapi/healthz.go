@@ -29,7 +29,10 @@ type healthzResponse struct {
 	HorizonDays *int `json:"horizon_days"`
 
 	// PendingOverdue above zero means the scheduler has stalled. See
-	// store.OverdueGrace for what counts as overdue.
+	// store.OverdueGrace for what counts as overdue, and scheduler.ClaimFloor
+	// for the other end of the window: rows older than the floor are past firing
+	// and are not counted here, because a number that latches above zero is a
+	// number nobody reads.
 	PendingOverdue int `json:"pending_overdue"`
 }
 
@@ -101,7 +104,7 @@ func (s *Server) checkDB(ctx context.Context, resp *healthzResponse) bool {
 		return fail("ping", err)
 	}
 
-	overdue, err := s.store.PendingOverdue(ctx)
+	overdue, err := s.store.PendingOverdue(ctx, s.claimFloor)
 	if err != nil {
 		return fail("pending overdue", err)
 	}

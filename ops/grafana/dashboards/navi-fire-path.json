@@ -1,0 +1,229 @@
+{
+  "uid": "navi-fire-path",
+  "title": "Navi — fire path",
+  "description": "Are reminders actually going out, and how late? The loops dashboard answers 'is it running'; this one answers 'is it working', which is the question this system is bad at failing loudly about. A stalled copywriter, a plain-title reminder, and a transport that has started refusing every send all look fine from /healthz.",
+  "tags": ["navi"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Pending overdue",
+      "description": "Occurrences the scheduler should already have claimed. This is the one alerting condition in the design — everything else degrades to a plainer reminder, and this degrades to no reminder. It is bounded at both ends: rows younger than the 60s grace are not late yet, and rows older than the scheduler's claim floor are past firing rather than waiting, so the number self-clears instead of latching. A gap in the series means the database could not be reached.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "navi_pending_overdue",
+          "legendFormat": "overdue"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Delivered within one minute",
+      "description": "Share of notifications sent within 60s of their scheduled time. Q1 allows one minute; 60 is a bucket boundary precisely so this is a division rather than an interpolation. Expect near 100% in steady state — the scheduler polls every 30s, so half the budget is spent waiting for the next tick and the rest belongs to the transport. Dips after a restart are honest: recovery delivers rows up to fifteen minutes old.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.9 },
+              { "color": "green", "value": 0.99 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum(increase(navi_delivery_latency_seconds_bucket{le=\"60\"}[6h])) / clamp_min(sum(increase(navi_delivery_latency_seconds_count[6h])), 1)",
+          "legendFormat": "within 60s"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Plain-title rate",
+      "description": "Share of notifications that went out as the bare item title because no generated text existed (N3). At P0 this reads 1: no copywriter has ever run, so the fallback is the only path there is. Once the copywriter lands, a rising line here is the model provider failing — and the reminders still arrive, which is the whole point of generating text in advance.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum(increase(navi_copywriter_fallback_total[6h])) / clamp_min(sum(increase(navi_delivery_latency_seconds_count[6h])), 1)",
+          "legendFormat": "plain title"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Claims released",
+      "description": "Claimed occurrences rolled back to pending because the send did not happen — a failed transport, a cancelled tick, or a panic. Deliberately not counted as a status transition: notified back to pending is not an edge in the state machine, and putting it in that series would make anyone summing by target state over-count. Above zero means the transport is refusing sends; the rows stay pending and are retried.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "increase(navi_scheduler_claims_released_total[6h])",
+          "legendFormat": "released"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Delivery latency",
+      "description": "Seconds from an occurrence's scheduled time to the notification being sent. The 60s line is Q1's budget. p50 should sit near half the 30s poll interval. The spikes after every deploy are real and expected: restart recovery delivers everything that came due in the previous fifteen minutes, and those observations are genuinely that late.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(navi_delivery_latency_seconds_bucket[1h])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(navi_delivery_latency_seconds_bucket[1h])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(navi_delivery_latency_seconds_bucket[1h])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Occurrence transitions",
+      "description": "Status changes per hour, by edge and by the surface that made them. Only edges the state machine actually permits appear here. At P0 the only producer is the scheduler's pending to notified claim; resolution surfaces join in P2 and the reconciler in P3, at which point this is the completion rate as a live series rather than a query.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "auto" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (from, to, source) (increase(navi_occurrence_transitions_total[1h]))",
+          "legendFormat": "{{from}} → {{to}} ({{source}})"
+        }
+      ]
+    }
+  ]
+}

@@ -35,7 +35,38 @@ SELECT count(*) FROM occurrences o
 JOIN items i ON i.id = o.item_id
 WHERE o.status = 'pending'
   AND o.starts_at <= ?
+  AND o.starts_at >= ?
+  AND i.kind = 'reminder'
   AND i.notify_policy = 'at_time'
   AND i.active = 1
   AND i.archived_at IS NULL
   AND ifnull(i.paused_until, '0000-01-01T00:00:00Z') <= ?;
+
+-- name: ListDueOccurrences :many
+SELECT o.id, o.item_id, o.starts_at, o.message_text,
+       i.title, i.kind, i.priority
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.status = 'pending'
+  AND o.starts_at <= ?
+  AND o.starts_at >= ?
+  AND i.kind = 'reminder'
+  AND i.notify_policy = 'at_time'
+  AND i.active = 1
+  AND i.archived_at IS NULL
+  AND ifnull(i.paused_until, '0000-01-01T00:00:00Z') <= ?
+ORDER BY o.starts_at, o.id
+LIMIT ?;
+
+-- name: ClaimOccurrence :execrows
+UPDATE occurrences
+SET status = 'notified', notified_at = ?
+WHERE id = ?
+  AND status = 'pending';
+
+-- name: ReleaseClaimedOccurrence :execrows
+UPDATE occurrences
+SET status = 'pending', notified_at = NULL
+WHERE id = ?
+  AND status = 'notified'
+  AND notified_at = ?;

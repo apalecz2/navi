@@ -29,6 +29,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/copywriter"
 	"github.com/aidenpaleczny/navi/internal/defaults"
+	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/health"
 	"github.com/aidenpaleczny/navi/internal/httpapi"
 	"github.com/aidenpaleczny/navi/internal/materializer"
@@ -39,6 +40,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/supervisor"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
+	"github.com/aidenpaleczny/navi/internal/transport/logging"
 )
 
 // shutdownTimeout bounds each phase of shutdown: draining HTTP, then joining
@@ -100,8 +102,18 @@ func run() error {
 		}
 	}()
 
-	m.RegisterPendingOverdue(func() float64 { return pendingOverdue(st, log) })
-	m.RegisterHorizonDays(func() float64 { return horizonDays(st, log) })
+	notifier, err := notifyTransport(cfg.Transport.Notify, log)
+	if err != nil {
+		return err
+	}
+	if notifier.Name() == config.LoggingTransport {
+		// The one misconfiguration that looks exactly like a working system:
+		// loops tick, rows are claimed and marked notified, /healthz is green,
+		// and no phone ever buzzes. It is the right default for `go run` and
+		// wrong in a container, so it says so every boot.
+		log.Warn("notifications are going to the log, not to a device",
+			"notify_transport", notifier.Name())
+	}
 
 	// Loops run under their own context so shutdown can drain HTTP first and
 	// cancel them second (D12).
@@ -112,17 +124,29 @@ func run() error {
 	// the same instance the supervisor drives rather than one of its own.
 	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
 
+	// The scheduler's recovery window is measured back from now, which is process
+	// start (C9, Q-2).
+	sched := scheduler.New(log.With("loop", scheduler.Name), st, notifier, m, time.Now())
+
+	// The claim floor is fixed for the life of the process, so the gauge, the
+	// health endpoint, and the claim itself are all driven by the one value
+	// rather than by three thresholds that can drift.
+	claimFloor := sched.ClaimFloor()
+	m.RegisterPendingOverdue(func() float64 { return pendingOverdue(st, claimFloor, log) })
+	m.RegisterHorizonDays(func() float64 { return horizonDays(st, log) })
+	m.RegisterTransition(string(domain.StatusPending), string(domain.StatusNotified), scheduler.Source)
+
 	sup := supervisor.New(log, h, m)
 	sup.Register(
 		mat.Loop(),
-		scheduler.New(log.With("loop", scheduler.Name)).Loop(),
+		sched.Loop(),
 		copywriter.New(log.With("loop", copywriter.Name)).Loop(),
 		reconciler.New(log.With("loop", reconciler.Name)).Loop(),
 		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
 	)
 	sup.Start(loopCtx)
 
-	srv := httpapi.New(cfg.HTTP, log, h, m, st)
+	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)
@@ -167,14 +191,32 @@ func run() error {
 	return nil
 }
 
+// notifyTransport resolves NOTIFY_TRANSPORT to an adapter.
+//
+// An unknown name is a boot failure rather than a fallback. A typo that quietly
+// degraded to the logging transport would produce a container that ticks, claims
+// rows, reports healthy, and never reaches a phone — which is the failure this
+// whole switch exists to make impossible.
+//
+// Telegram joins this switch in session 6, which is the entire change the fire
+// path needs to start delivering for real.
+func notifyTransport(name string, log *slog.Logger) (scheduler.Notifier, error) {
+	switch name {
+	case config.LoggingTransport:
+		return logging.New(log.With("transport", logging.Name)), nil
+	default:
+		return nil, fmt.Errorf("config: NOTIFY_TRANSPORT %q is not a known adapter", name)
+	}
+}
+
 // pendingOverdue answers navi_pending_overdue at scrape time. NaN rather than
 // zero when the database cannot be reached, because a gap in the series is what
 // "unknown" looks like on a dashboard and zero is what "healthy" looks like.
-func pendingOverdue(st *store.Store, log *slog.Logger) float64 {
+func pendingOverdue(st *store.Store, claimFloor time.Time, log *slog.Logger) float64 {
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
 	defer cancel()
 
-	n, err := st.PendingOverdue(ctx)
+	n, err := st.PendingOverdue(ctx, claimFloor)
 	if err != nil {
 		log.Error("metrics: pending overdue", "err", err)
 		return math.NaN()

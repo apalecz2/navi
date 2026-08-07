@@ -20,6 +20,13 @@ services:
       DEFAULT_TZ: ${DEFAULT_TZ:?DEFAULT_TZ must be set, e.g. America/Toronto}
       CONFIG_DIR: /config
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Which adapter delivers reminders. Named explicitly rather than left to
+      # the code's default, because that default is "logging" — a container that
+      # inherited it would tick, claim rows, mark them notified, report healthy,
+      # and never reach a phone. The service warns every boot when it is in
+      # force; this line is what makes the choice deliberate.
+      NOTIFY_TRANSPORT: ${NOTIFY_TRANSPORT:-logging}
+      CHAT_TRANSPORT: ${CHAT_TRANSPORT:-}
     volumes:
       # Local disk only. SQLite locking is unreliable over NFS and SMB (D3).
       # The container runs as uid 65532, so: mkdir -p data && sudo chown 65532:65532 data

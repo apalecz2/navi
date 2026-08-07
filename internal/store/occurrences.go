@@ -210,22 +210,189 @@ func (s *Store) materializeTx(
 }
 
 // PendingOverdue counts occurrences the scheduler should already have claimed:
-// pending, at least OverdueGrace past their start time, belonging to an item
-// that is active, unarchived, unpaused, and notified at its time.
+// pending, at least OverdueGrace past their start time, no older than floor, and
+// belonging to a reminder that is active, unarchived, unpaused, and notified at
+// its time.
 //
 // Above zero means the scheduler has stalled, which is the one failure in this
 // system worth alerting on — everything else degrades to a plainer reminder,
 // and this degrades to no reminder.
-func (s *Store) PendingOverdue(ctx context.Context) (int, error) {
+//
+// floor is the scheduler's own claim floor, passed in rather than computed here
+// so the gauge and the claim are driven by one value instead of two constants
+// that can drift. Without it the count is every pending row that ever aged out,
+// which latches above zero forever and turns the design's single alert into
+// noise. What that loses — "these rows are past saving and nobody will fire
+// them" — is P3's input and does not belong in this number.
+//
+// A global pause zeroes it. During vacation the scheduler is deliberately idle,
+// and a gauge that climbs while the system is behaving correctly is worse than
+// no gauge.
+func (s *Store) PendingOverdue(ctx context.Context, floor time.Time) (int, error) {
 	now := time.Now()
-	nowText := domain.FormatTime(now)
 
+	pausedUntil, paused, err := s.GlobalPauseUntil(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if paused && pausedUntil.After(now) {
+		return 0, nil
+	}
+
+	nowText := domain.FormatTime(now)
 	n, err := s.read.CountPendingOverdue(ctx, sqlc.CountPendingOverdueParams{
 		StartsAt:    domain.FormatTime(now.Add(-OverdueGrace)),
+		StartsAt_2:  domain.FormatTime(floor),
 		PausedUntil: &nowText,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("store: count pending overdue: %w", err)
 	}
 	return int(n), nil
+}
+
+// Due is the fire path's projection: one claimable occurrence and the few item
+// columns a send needs.
+//
+// Narrower than an (Occurrence, Item) pair on purpose. The scheduler reads a
+// body, a priority, and a kind; a join that handed back two whole rows would
+// invite it to read more, and the one thing this package owes the firing path is
+// that it stays small enough to reason about.
+type Due struct {
+	ID     string
+	ItemID string
+
+	StartsAt time.Time
+
+	MessageText *string
+	Title       string
+
+	Kind     domain.Kind
+	Priority int
+}
+
+// ClaimDue marks every due occurrence notified and returns what it claimed.
+//
+// One transaction, which is already BEGIN IMMEDIATE because the writer DSN
+// carries _txlock=immediate — do not reach for sql.Conn and an explicit BEGIN.
+// The candidate read happens through the transaction's own handle rather than
+// through the read pool: reading a WAL snapshot taken outside the write lock and
+// then updating inside it would leave correctness resting on the row guard
+// alone, which is not what that DSN parameter was for.
+//
+// upper is the due boundary, normally now. floor is the oldest start time still
+// worth firing; rows older than it are left pending and silent for
+// reconciliation to find (C9, Q-2). Nothing here ever assigns missed (K6).
+//
+// The returned instant is the notified_at written to every claimed row, and is
+// what ReleaseClaims guards on.
+func (s *Store) ClaimDue(ctx context.Context, upper, floor time.Time, limit int) (time.Time, []Due, error) {
+	claimedAt := time.Now().Truncate(time.Second)
+	claimedAtText := domain.FormatTime(claimedAt)
+
+	upperText := domain.FormatTime(upper)
+	floorText := domain.FormatTime(floor)
+
+	var claimed []Due
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		rows, err := q.ListDueOccurrences(ctx, sqlc.ListDueOccurrencesParams{
+			StartsAt:    upperText, // starts_at <= upper
+			StartsAt_2:  floorText, // starts_at >= floor
+			PausedUntil: &upperText,
+			Limit:       int64(limit),
+		})
+		if err != nil {
+			return fmt.Errorf("store: list due occurrences: %w", err)
+		}
+
+		claimed = make([]Due, 0, len(rows))
+		for _, row := range rows {
+			startsAt, err := domain.ParseTime(row.StartsAt)
+			if err != nil {
+				return fmt.Errorf("store: list due occurrences: %w", err)
+			}
+			kind := domain.Kind(row.Kind)
+
+			// The state machine decides, not the query. The SQL filters kind as
+			// well, so a row that reaches here and is refused is a schema that
+			// has moved rather than an ordinary case — worth a line.
+			if _, err := domain.Transition(kind, domain.StatusPending, domain.StatusNotified); err != nil {
+				s.log.Warn("claim: refused transition", "occurrence", row.ID, "kind", kind, "err", err)
+				continue
+			}
+
+			n, err := q.ClaimOccurrence(ctx, sqlc.ClaimOccurrenceParams{
+				NotifiedAt: &claimedAtText,
+				ID:         row.ID,
+			})
+			if err != nil {
+				return fmt.Errorf("store: claim occurrence: %w", err)
+			}
+			if n == 0 {
+				// The guard refused it: the row is no longer pending. Inside the
+				// write transaction on the only writer that cannot happen, so
+				// this is defence against a future caller rather than a case
+				// with a story, and it is a skip and not an error.
+				continue
+			}
+
+			claimed = append(claimed, Due{
+				ID:          row.ID,
+				ItemID:      row.ItemID,
+				StartsAt:    startsAt,
+				MessageText: row.MessageText,
+				Title:       row.Title,
+				Kind:        kind,
+				Priority:    int(row.Priority),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	return claimedAt, claimed, nil
+}
+
+// ReleaseClaims returns claimed occurrences to pending, and reports how many it
+// actually moved.
+//
+// This is not a state machine transition — notified to pending is not an edge in
+// the table and must never be routed through domain.Transition. It is the
+// rollback of a claim whose send never happened, which is why the guard names
+// both the status and the exact notified_at this claim wrote: a row anything
+// else has touched since is left alone.
+//
+// One transaction for the whole batch rather than one each. Every transaction is
+// a BEGIN IMMEDIATE on a pool of exactly one writer connection, and a shutdown
+// releasing forty claims serially would race the drain timeout and strand the
+// remainder as notified with nothing ever sent.
+//
+// Callers pass a context that is not the one that failed — a release triggered
+// by cancellation cannot run on the cancelled context.
+func (s *Store) ReleaseClaims(ctx context.Context, ids []string, claimedAt time.Time) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	claimedAtText := domain.FormatTime(claimedAt)
+
+	released := 0
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		released = 0
+		for _, id := range ids {
+			n, err := q.ReleaseClaimedOccurrence(ctx, sqlc.ReleaseClaimedOccurrenceParams{
+				ID:         id,
+				NotifiedAt: &claimedAtText,
+			})
+			if err != nil {
+				return fmt.Errorf("store: release claimed occurrence: %w", err)
+			}
+			released += int(n)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return released, nil
 }

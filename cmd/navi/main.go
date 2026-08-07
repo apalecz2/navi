@@ -41,6 +41,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/supervisor"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
 	"github.com/aidenpaleczny/navi/internal/transport/logging"
+	"github.com/aidenpaleczny/navi/internal/transport/telegram"
 )
 
 // shutdownTimeout bounds each phase of shutdown: draining HTTP, then joining
@@ -102,7 +103,7 @@ func run() error {
 		}
 	}()
 
-	notifier, err := notifyTransport(cfg.Transport.Notify, log)
+	notifier, err := notifyTransport(cfg.Transport.Notify, cfg.Telegram, log)
 	if err != nil {
 		return err
 	}
@@ -198,12 +199,16 @@ func run() error {
 // rows, reports healthy, and never reaches a phone — which is the failure this
 // whole switch exists to make impossible.
 //
-// Telegram joins this switch in session 6, which is the entire change the fire
-// path needs to start delivering for real.
-func notifyTransport(name string, log *slog.Logger) (scheduler.Notifier, error) {
+// Telegram's supports_actions is false here and stays that way until P2 adds
+// the callback handler; flipping it is a change inside the adapter, not a
+// change to this switch, which is the entire point of building against
+// scheduler.Notifier instead of a concrete type.
+func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (scheduler.Notifier, error) {
 	switch name {
 	case config.LoggingTransport:
 		return logging.New(log.With("transport", logging.Name)), nil
+	case config.TelegramTransport:
+		return telegram.New(tg.BotToken, tg.AllowedSenderID), nil
 	default:
 		return nil, fmt.Errorf("config: NOTIFY_TRANSPORT %q is not a known adapter", name)
 	}

@@ -132,8 +132,18 @@ type Transport struct {
 // when it is in force.
 const LoggingTransport = "logging"
 
-// Telegram is parsed but not yet consumed. The bot token and the webhook secret
-// are borrowed credentials and come from the environment with no default (D9).
+// TelegramTransport is the adapter that delivers to a real device, since
+// session 6.
+const TelegramTransport = "telegram"
+
+// Telegram holds Telegram's credentials. BotToken and WebhookSecret are
+// borrowed and come from the environment with no default (D9).
+//
+// AllowedSenderID does double duty. D8 will read it as the inbound sender
+// allowlist once P1 wires conversation; since session 6 it is also the
+// outbound recipient for the notify role — this is a single-user system with
+// no user table (S1), so the one chat id this deployment is allowed to hear
+// from is also the only chat it ever needs to send to.
 type Telegram struct {
 	BotToken        string
 	WebhookSecret   string
@@ -181,10 +191,22 @@ func Load() (Config, error) {
 	}
 	cfg.Transport.Chat = envString("CHAT_TRANSPORT", "")
 
-	cfg.Telegram = Telegram{
-		BotToken:        envString("TELEGRAM_BOT_TOKEN", ""),
-		WebhookSecret:   envString("TELEGRAM_WEBHOOK_SECRET", ""),
-		AllowedSenderID: envString("ALLOWED_SENDER_ID", ""),
+	// TELEGRAM_WEBHOOK_SECRET stays optional: nothing consumes it until P1's
+	// webhook exists. BotToken and AllowedSenderID become required exactly
+	// when NOTIFY_TRANSPORT names the adapter that reads them — required-when-
+	// consumed applied to a value chosen by another value, not just by which
+	// session has landed.
+	cfg.Telegram.WebhookSecret = envString("TELEGRAM_WEBHOOK_SECRET", "")
+	if cfg.Transport.Notify == TelegramTransport {
+		if cfg.Telegram.BotToken, err = envRequiredString("TELEGRAM_BOT_TOKEN", ""); err != nil {
+			return Config{}, err
+		}
+		if cfg.Telegram.AllowedSenderID, err = envRequiredString("ALLOWED_SENDER_ID", ""); err != nil {
+			return Config{}, err
+		}
+	} else {
+		cfg.Telegram.BotToken = envString("TELEGRAM_BOT_TOKEN", "")
+		cfg.Telegram.AllowedSenderID = envString("ALLOWED_SENDER_ID", "")
 	}
 
 	cfg.Backup.LitestreamReplicaURL = envString("LITESTREAM_REPLICA_URL", "")

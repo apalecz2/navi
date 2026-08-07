@@ -27,6 +27,11 @@ services:
       # force; this line is what makes the choice deliberate.
       NOTIFY_TRANSPORT: ${NOTIFY_TRANSPORT:-logging}
       CHAT_TRANSPORT: ${CHAT_TRANSPORT:-}
+      # Only actually required when NOTIFY_TRANSPORT=telegram — config.Load
+      # does that gating, not compose, so these stay soft-defaulted here the
+      # same way CHAT_TRANSPORT does.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      ALLOWED_SENDER_ID: ${ALLOWED_SENDER_ID:-}
     volumes:
       # Local disk only. SQLite locking is unreliable over NFS and SMB (D3).
       # The container runs as uid 65532, so: mkdir -p data && sudo chown 65532:65532 data

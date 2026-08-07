@@ -11,6 +11,14 @@ scrape_configs:
     static_configs:
       - targets: ["navi:8000"]
 
+  # Litestream (session 7) runs as navi's container entrypoint, in the same
+  # container, so its metrics live on the same network target at a different
+  # port. This is what makes "R2 unreachable" a dashboard fact instead of
+  # only something found by reading logs.
+  - job_name: litestream
+    static_configs:
+      - targets: ["navi:9200"]
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

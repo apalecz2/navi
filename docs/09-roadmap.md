@@ -33,13 +33,46 @@ to be useful.
 
 **Exit criteria**
 
-- [ ] A `fixed` daily reminder fires within a minute, every day, for three days
-- [ ] A `fuzzy` 3-per-week reminder produces three well-spread occurrences
-- [ ] Restarting the container mid-day loses nothing and fires nothing twice
-- [ ] `litestream restore` into a clean directory reproduces the database
-- [ ] The image is `scratch`, the binary is static, and timezones resolve inside it
-- [ ] Killing a loop's goroutine shows up as a flat line on the dashboard, and the
-      supervisor brings it back
+- [ ] A `fixed` daily reminder fires within a minute, every day, for three days —
+      wall-clock bound, not checkable in one sitting. Not run this session; the
+      service needs to be left running on the real host starting from the day
+      this box gets ticked, three full days forward, before it can be marked
+      done.
+- [x] A `fuzzy` 3-per-week reminder produces three well-spread occurrences —
+      verified via `cmd/naviseed`'s placement output (session 7): week 2026-W33
+      placed Mon 13:25, Wed 19:50, Fri 15:25, each gap over the 20h minimum.
+- [x] Restarting the container mid-day loses nothing and fires nothing twice —
+      verified for real (session 7): an override occurrence was inserted,
+      `docker compose restart navi` run mid-cycle before it was due, and it
+      fired exactly once (`claimed:1, sent:1`) afterward. See
+      `ops/restore-runbook.md`.
+- [x] `litestream restore` into a clean directory reproduces the database —
+      verified for real (session 7) against a local file-type replica (no R2
+      bucket exists yet): restored copy's row counts, integrity check, and full
+      `sqlite3 .dump` hash all matched the original exactly. Real R2
+      connectivity itself is still unverified — see the runbook's "what this
+      session did not verify."
+- [x] The image is `scratch`, the binary is static, and timezones resolve inside
+      it — re-verified (session 7) with Litestream now wrapping the entrypoint:
+      `docker inspect` shows no base-image layers, the litestream binary is
+      confirmed statically linked, and `DEFAULT_TZ=America/Toronto` resolves
+      cleanly on boot.
+- [x] Killing a loop's goroutine shows up as a flat line on the dashboard, and the
+      supervisor brings it back — verified for real (session 7) via a temporary,
+      reverted fault injection: `/healthz` showed `copywriter` as
+      `last_tick: null, healthy: false` for the ~3.5 minutes the fault was
+      active, with the other four loops unaffected throughout, then recovered
+      on its own the instant the fault stopped. See the runbook for the full
+      before/after `/healthz` output.
+
+Two more things session 7 verified that aren't separate boxes above but are
+part of its own done-when list: killing backup access (an unreachable
+Litestream target) left `/healthz` green and a reminder still fired mid-outage
+— see the runbook. Tunnel reachability (`/healthz` through Cloudflare Access,
+`/metrics` refused) was **not** verified — this session had no access to the
+real `cloudflared` instance or Cloudflare account; `ops/cloudflared-ingress.md`
+has the ingress rule and Access table to apply on the real host, and reachability
+needs checking there, not here.
 
 **A few evenings.** The estimate was one or two when this was going to be Python;
 D-021 traded some of that for a static binary and a language worth knowing, and

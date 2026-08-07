@@ -15,6 +15,12 @@ services:
     environment:
       HTTP_ADDR: ":8000"
       DATA_DIR: /data
+      # Explicit rather than left to Go's internal DBPath() default, because
+      # litestream.yml (baked into the image) reads this same variable
+      # straight from the environment — it has no access to Go's resolved
+      # value. One explicit source is what makes the two agree by
+      # construction instead of by two defaults happening to match.
+      DATABASE_PATH: /data/navi.db
       # No default, here or in the code: the schedule machinery resolves against
       # this zone and a wrong guess is invisible until a DST boundary.
       DEFAULT_TZ: ${DEFAULT_TZ:?DEFAULT_TZ must be set, e.g. America/Toronto}
@@ -32,6 +38,17 @@ services:
       # same way CHAT_TRANSPORT does.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       ALLOWED_SENDER_ID: ${ALLOWED_SENDER_ID:-}
+      # Litestream (session 7) reads these directly — they never reach Go's
+      # config package, see internal/config/config.go. D4 is a Must and has no
+      # honest default to fall back to silently, so unlike NOTIFY_TRANSPORT
+      # this is a hard boot failure rather than a soft one when unset.
+      # ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY are needed for s3:// replicas
+      # (R2 is S3-compatible but not at an AWS endpoint) and ignored for a
+      # file:// replica.
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:?LITESTREAM_REPLICA_URL must be set, e.g. s3://bucket/navi or file:///backup/navi}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:-}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
     volumes:
       # Local disk only. SQLite locking is unreliable over NFS and SMB (D3).
       # The container runs as uid 65532, so: mkdir -p data && sudo chown 65532:65532 data

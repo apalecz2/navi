@@ -10,3 +10,8 @@ ops
 # persona.md out of it in P5, and the symptom would be a voice that ignores
 # every edit — so it is excepted here, now, rather than found later.
 !config/persona.md
+
+# litestream.yml is baked into the image the same way (session 7) — see the
+# Dockerfile and ops/litestream/litestream.yml for why this one file doesn't
+# get the ops/ exclusion above.
+!ops/litestream/litestream.yml

@@ -33,7 +33,6 @@ type Config struct {
 	Schedule  Schedule
 	Transport Transport
 	Telegram  Telegram
-	Backup    Backup
 }
 
 // HTTP configures the API listener.
@@ -150,11 +149,14 @@ type Telegram struct {
 	AllowedSenderID string
 }
 
-// Backup is parsed but not yet consumed. Litestream becomes the container
-// entrypoint when the SQLite file exists to replicate.
-type Backup struct {
-	LitestreamReplicaURL string
-}
+// There is deliberately no Backup group here. Litestream runs as the
+// container entrypoint wrapping this binary (session 7) rather than as Go
+// code in this repository, so LITESTREAM_REPLICA_URL and its companion
+// endpoint/credential variables are read by the litestream process itself,
+// straight from the container environment. Parsing them here would be
+// plumbing that looks like validation without ever being consumed by
+// anything — see ops/litestream/litestream.yml for where they're actually
+// read.
 
 // Load reads the environment and validates it. The error names the offending
 // variable and why it was rejected, because that message is the only diagnostic
@@ -208,8 +210,6 @@ func Load() (Config, error) {
 		cfg.Telegram.BotToken = envString("TELEGRAM_BOT_TOKEN", "")
 		cfg.Telegram.AllowedSenderID = envString("ALLOWED_SENDER_ID", "")
 	}
-
-	cfg.Backup.LitestreamReplicaURL = envString("LITESTREAM_REPLICA_URL", "")
 
 	return cfg, nil
 }

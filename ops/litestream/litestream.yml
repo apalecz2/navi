@@ -1,0 +1,35 @@
+# Litestream's own config, baked into the image at /etc/litestream.yml (see
+# Dockerfile). Unlike config/, which is bind-mounted so the vocabulary table
+# can be retuned with a restart and no rebuild (D-016), this file never
+# changes by editing YAML — every real change here is an environment
+# variable, substituted by litestream itself at process start. So it travels
+# in the image only.
+#
+# DATABASE_PATH must be the same literal value docker-compose.yml gives navi
+# (D3, DBPath) — litestream reads its own environment, not the value Go's
+# config package resolves internally, so the two have to agree by an explicit
+# shared source rather than by two defaults happening to match.
+#
+# LITESTREAM_REPLICA_URL carries both the scheme and the destination:
+#   file:///backup/navi         local directory replica — used for the
+#                                restore drill and the R2-unreachable check in
+#                                session 7, where no cloud bucket is involved.
+#   s3://<bucket>/navi           the real production target.
+# LITESTREAM_ENDPOINT, LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY
+# are ignored for a file:// replica. For s3://, ENDPOINT matters because R2 is
+# S3-compatible but lives behind a Cloudflare-specific host rather than AWS's
+# — a bare s3:// URL alone cannot express that, which is what 03-architecture's
+# illustrative LITESTREAM_REPLICA_URL=s3://...r2... compose snippet leaves out.
+dbs:
+  - path: ${DATABASE_PATH}
+    replicas:
+      - url: ${LITESTREAM_REPLICA_URL}
+        endpoint: ${LITESTREAM_ENDPOINT}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+
+# litestream's own metrics, container-network only — Prometheus scrapes this
+# the same way it scrapes navi:8000/metrics (ops/prometheus/prometheus.yml).
+# This is what makes a backup that can't reach its bucket visible on a
+# dashboard rather than only discoverable by reading logs.
+addr: :9200

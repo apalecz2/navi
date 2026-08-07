@@ -2,9 +2,19 @@
 # first run (D10).
 /data/
 
+# Local-only Litestream replica target and restore-drill output (session 7,
+# ops/restore-runbook.md). Never the real backup — that's R2.
+/backup/
+/data-restore/
+
 # Local build output.
 /navi
 /navi.exe
 
 # Secrets.
 .env
+
+# Local-only compose override (session 7) — the tracked template is
+# ops/docker-compose.drill.override.yml.example; copy it here to reproduce
+# the restore drill, never commit the copy itself.
+/docker-compose.override.yml

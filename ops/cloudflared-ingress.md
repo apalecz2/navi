@@ -44,7 +44,10 @@ ingress:
 `/metrics` is excluded deliberately. It carries no secrets, but it describes
 usage patterns in detail — when reminders fire, how often, how much the models
 are being called — and Prometheus scrapes it over the container network, so
-nothing needs it from outside the host.
+nothing needs it from outside the host. Litestream's own metrics (session 7)
+are on a separate port, `navi:9200`, which is never named in the `service:`
+line above at all — there is no path that could reach it through this
+ingress, the same exclusion `/metrics` gets, for the same reason.
 
 ## 3. Protection per path
 

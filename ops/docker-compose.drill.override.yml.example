@@ -1,0 +1,20 @@
+# Copy to docker-compose.override.yml at the repo root (docker compose picks
+# that filename up automatically, merged over docker-compose.yml) to reproduce
+# the session 7 restore drill and the R2-unreachable check
+# (ops/restore-runbook.md) without any cloud account.
+#
+# It does two things production's compose shape does not:
+#   - points LITESTREAM_REPLICA_URL at a local directory instead of R2, so
+#     `litestream restore` can be run against a plain bind mount;
+#   - mounts that directory into the container, since a file:// replica needs
+#     somewhere on disk to write to, the same way ./data does for the
+#     database itself.
+#
+# Set LITESTREAM_REPLICA_URL=file:///backup/navi in your .env (or export it)
+# before bringing this up — the base compose file still requires it to be set
+# at all, which this override does not change.
+
+services:
+  navi:
+    volumes:
+      - ./backup:/backup

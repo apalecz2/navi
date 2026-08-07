@@ -33,11 +33,15 @@ services:
       # force; this line is what makes the choice deliberate.
       NOTIFY_TRANSPORT: ${NOTIFY_TRANSPORT:-logging}
       CHAT_TRANSPORT: ${CHAT_TRANSPORT:-}
-      # Only actually required when NOTIFY_TRANSPORT=telegram — config.Load
-      # does that gating, not compose, so these stay soft-defaulted here the
-      # same way CHAT_TRANSPORT does.
+      # Only actually required when NOTIFY_TRANSPORT and/or CHAT_TRANSPORT
+      # names telegram — config.Load does that gating, not compose, so these
+      # stay soft-defaulted here the same way CHAT_TRANSPORT does.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       ALLOWED_SENDER_ID: ${ALLOWED_SENDER_ID:-}
+      # Required only when CHAT_TRANSPORT=telegram (session 8, P1): the whole
+      # authentication mechanism for /webhook/telegram, since Telegram has no
+      # session to put behind Cloudflare Access.
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       # Litestream (session 7) reads these directly — they never reach Go's
       # config package, see internal/config/config.go. D4 is a Must and has no
       # honest default to fall back to silently, so unlike NOTIFY_TRANSPORT

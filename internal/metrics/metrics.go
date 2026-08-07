@@ -33,6 +33,9 @@ type Metrics struct {
 	transitions         *prometheus.CounterVec
 	claimsReleased      prometheus.Counter
 	copywriterFallbacks prometheus.Counter
+
+	inboundAccepted *prometheus.CounterVec
+	inboundDropped  *prometheus.CounterVec
 }
 
 // deliveryLatencyBuckets are explicit rather than exponential so that 60 is an
@@ -89,6 +92,14 @@ func New() *Metrics {
 			Name: "navi_copywriter_fallback_total",
 			Help: "Notifications sent as the plain item title because no generated text existed.",
 		}),
+		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_inbound_messages_accepted_total",
+			Help: "Inbound messages recorded to conversations, by transport.",
+		}, []string{"transport"}),
+		inboundDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_inbound_messages_dropped_total",
+			Help: "Inbound messages rejected before being recorded, by reason.",
+		}, []string{"reason"}),
 	}
 	reg.MustRegister(
 		m.loopTickInterval,
@@ -97,6 +108,8 @@ func New() *Metrics {
 		m.transitions,
 		m.claimsReleased,
 		m.copywriterFallbacks,
+		m.inboundAccepted,
+		m.inboundDropped,
 	)
 	return m
 }
@@ -163,6 +176,31 @@ func (m *Metrics) IncClaimReleased() { m.claimsReleased.Inc() }
 // observe it: it knows what it failed to generate, not what was actually sent,
 // and the number worth having is how often a reminder reached the user plain.
 func (m *Metrics) IncCopywriterFallback() { m.copywriterFallbacks.Inc() }
+
+// IncInboundAccepted counts one inbound message actually recorded to
+// conversations — not one webhook call, so a retried delivery that hit the
+// dedup path does not inflate this.
+func (m *Metrics) IncInboundAccepted(transport string) {
+	m.inboundAccepted.WithLabelValues(transport).Inc()
+}
+
+// IncInboundDropped counts one inbound message rejected before it was
+// recorded — today only "allowlist" (D8), labeled for the reasons a future
+// adapter or check might add.
+func (m *Metrics) IncInboundDropped(reason string) {
+	m.inboundDropped.WithLabelValues(reason).Inc()
+}
+
+// RegisterInboundAccepted and RegisterInboundDropped create their child
+// series up front, on the same RegisterLoop/RegisterTransition argument: a
+// combination that has not happened yet should export a zero, not be absent.
+func (m *Metrics) RegisterInboundAccepted(transport string) {
+	m.inboundAccepted.WithLabelValues(transport)
+}
+
+func (m *Metrics) RegisterInboundDropped(reason string) {
+	m.inboundDropped.WithLabelValues(reason)
+}
 
 // RegisterPendingOverdue publishes navi_pending_overdue, backed by a function
 // this package calls at scrape time.

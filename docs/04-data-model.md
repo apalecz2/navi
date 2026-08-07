@@ -318,6 +318,17 @@ CREATE INDEX idx_items_active ON items(active) WHERE archived_at IS NULL;
 
 CREATE INDEX idx_conv_created ON conversations(created_at DESC);
 CREATE INDEX idx_llm_created ON llm_calls(created_at DESC);
+
+-- webhook update dedup (session 8, P1): a transport adapter that retries a
+-- delivery it did not get a 2xx for must not produce two rows for the same
+-- update. store.CreateConversation already guards this in application code,
+-- inside the one writer transaction; this index is the backstop, on the same
+-- "guard belongs in SQL, not caller discipline" reasoning idx_occ_due and
+-- DeleteFuturePendingOccurrence's WHERE clause already use. Partial: a row
+-- this service generated itself (an assistant reply, a tool result) has no
+-- transport/external_id and is never a dedup candidate.
+CREATE UNIQUE INDEX idx_conv_dedup ON conversations(transport, external_id)
+  WHERE transport IS NOT NULL AND external_id IS NOT NULL;
 ```
 
 Partial indexes matter more than usual here. `status = 'pending'` is a small

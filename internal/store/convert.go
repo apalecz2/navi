@@ -125,6 +125,25 @@ func toDomainOccurrence(row sqlc.Occurrence) (domain.Occurrence, error) {
 	}, nil
 }
 
+func toDomainConversation(row sqlc.Conversation) (domain.Conversation, error) {
+	createdAt, err := domain.ParseTime(row.CreatedAt)
+	if err != nil {
+		return domain.Conversation{}, fmt.Errorf("conversation %s created_at: %w", row.ID, err)
+	}
+
+	return domain.Conversation{
+		ID:         row.ID,
+		Role:       domain.Role(row.Role),
+		Content:    row.Content,
+		ToolCalls:  row.ToolCalls,
+		ToolCallID: row.ToolCallID,
+		Transport:  row.Transport,
+		ExternalID: row.ExternalID,
+		ContextRef: row.ContextRef,
+		CreatedAt:  createdAt,
+	}, nil
+}
+
 // parseTimePtr reads a nullable timestamp column.
 func parseTimePtr(s *string) (*time.Time, error) {
 	if s == nil {

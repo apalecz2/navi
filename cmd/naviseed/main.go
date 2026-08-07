@@ -22,8 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +44,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
 	"github.com/aidenpaleczny/navi/internal/transport"
+	"github.com/aidenpaleczny/navi/internal/transport/telegram"
 )
 
 func main() {
@@ -109,7 +113,13 @@ func run() error {
 
 	// Last, because it is the only section that sends anything, and because it
 	// wants the global pause reportPause left lifted.
-	return reportFire(ctx, st, cfg.Schedule.DefaultTZ.String(), log)
+	if err := reportFire(ctx, st, cfg.Schedule.DefaultTZ.String(), log); err != nil {
+		return err
+	}
+
+	// After fire, since it exercises the other direction — inbound rather
+	// than outbound — and needs nothing fire left behind.
+	return reportConversations(ctx, st, log)
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running
@@ -1042,6 +1052,114 @@ func reportFire(ctx context.Context, st *store.Store, tz string, log *slog.Logge
 	// writer for items.paused_until at P0, and adding one belongs to P3's edit
 	// path rather than to a seeding tool.
 	fmt.Printf("    item-level pause              no writer at P0, predicate shared with the claim\n")
+	return nil
+}
+
+// reportConversations exercises store.CreateConversation's round trip and its
+// dedup guarantee directly, against the same predicate the webhook handler
+// relies on, then hands off to reportWebhook to prove the same thing through
+// the actual HTTP handler.
+func reportConversations(ctx context.Context, st *store.Store, log *slog.Logger) error {
+	fmt.Printf("\nconversations\n")
+
+	tp, externalID := telegram.Name, "naviseed-dedup-probe"
+	first, inserted, err := st.CreateConversation(ctx, domain.NewConversation{
+		Role:       domain.RoleUser,
+		Content:    "naviseed round trip",
+		Transport:  &tp,
+		ExternalID: &externalID,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  create                          inserted=%v id=%s  %s\n",
+		inserted, first.ID, verdict(inserted))
+
+	back, err := st.GetConversation(ctx, first.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  read back                       role=%s content=%q  %s\n",
+		back.Role, back.Content, verdict(back.Role == domain.RoleUser && back.Content == first.Content))
+
+	// Same (transport, external_id) again: the update dedup path Telegram's
+	// retry-on-non-2xx behaviour depends on, exercised at the store level
+	// before reportWebhook exercises it through the handler.
+	dup, insertedAgain, err := st.CreateConversation(ctx, domain.NewConversation{
+		Role:       domain.RoleUser,
+		Content:    "naviseed round trip, redelivered",
+		Transport:  &tp,
+		ExternalID: &externalID,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  redelivered (same external_id)  inserted=%v id matches first %v, content unchanged %v  %s\n",
+		insertedAgain, dup.ID == first.ID, dup.Content == first.Content,
+		verdict(!insertedAgain && dup.ID == first.ID && dup.Content == first.Content))
+
+	return reportWebhook(ctx, st, log)
+}
+
+// reportWebhook drives telegram.Inbound.ServeHTTP directly, in process,
+// against the real store — the same "exercise the component without a
+// listener" style reportFire uses for the scheduler. It is what proves the
+// session's four "done when" cases by hand: secret rejection, allowlist
+// drop, acceptance, and update dedup through the actual handler rather than
+// only through the store method underneath it.
+func reportWebhook(ctx context.Context, st *store.Store, log *slog.Logger) error {
+	fmt.Printf("\nwebhook  POST /webhook/telegram\n")
+
+	const (
+		secret     = "naviseed-webhook-secret"
+		allowedID  = "111"
+		strangerID = "999"
+	)
+	m := metrics.New()
+	m.RegisterInboundAccepted(telegram.Name)
+	m.RegisterInboundDropped("allowlist")
+	h := telegram.NewInbound(secret, allowedID, st, m, log.With("component", "webhook"))
+
+	post := func(secretHeader, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(body))
+		if secretHeader != "" {
+			req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secretHeader)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+	update := func(id int, senderID, text string) string {
+		return fmt.Sprintf(`{"update_id":%d,"message":{"from":{"id":%s},"text":%q}}`, id, senderID, text)
+	}
+
+	wrong := post("wrong-secret", update(9001, allowedID, "hi"))
+	fmt.Printf("  wrong secret            status %d  %s\n",
+		wrong.Code, verdict(wrong.Code == http.StatusUnauthorized))
+
+	stranger := post(secret, update(9002, strangerID, "hi"))
+	_, strangerErr := st.GetConversationByExternalID(ctx, telegram.Name, "9002")
+	strangerDropped := errors.Is(strangerErr, store.ErrNotFound)
+	fmt.Printf("  non-allowlisted sender  status %d  dropped, nothing stored %v  %s\n",
+		stranger.Code, strangerDropped, verdict(stranger.Code == http.StatusOK && strangerDropped))
+
+	accepted := post(secret, update(9003, allowedID, "naviseed webhook probe"))
+	row, err := st.GetConversationByExternalID(ctx, telegram.Name, "9003")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  allowlisted sender      status %d  content %q  %s\n",
+		accepted.Code, row.Content, verdict(accepted.Code == http.StatusOK && row.Content == "naviseed webhook probe"))
+
+	redelivered := post(secret, update(9003, allowedID, "naviseed webhook probe, redelivered"))
+	again, err := st.GetConversationByExternalID(ctx, telegram.Name, "9003")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  duplicate update_id     status %d  same row %v, content unchanged %v  %s\n",
+		redelivered.Code, again.ID == row.ID, again.Content == row.Content,
+		verdict(redelivered.Code == http.StatusOK && again.ID == row.ID && again.Content == row.Content))
+
 	return nil
 }
 

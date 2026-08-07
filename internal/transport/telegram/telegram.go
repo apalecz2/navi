@@ -1,15 +1,20 @@
 // Package telegram is the first notification transport that reaches a real
-// device. It implements the outbound half of transport.Transport against the
-// Telegram Bot API's sendMessage endpoint.
+// device, and, since session 8 (P1), the first to receive from one. Send
+// implements the outbound half of transport.Transport against the Telegram
+// Bot API's sendMessage endpoint; Inbound (webhook.go) is the inbound half,
+// verified against a shared secret and filtered by the sender allowlist
+// (D8), recording plain messages to conversations.
 //
-// Outbound only, at P0. Receive has no consumer until P1 wires conversation,
-// so it fails loudly rather than returning a channel nothing ever writes to
-// — a premature caller finds out immediately instead of getting an inbound
-// half that looks connected and silently never fires. Inline keyboards are
-// not rendered here either: Capabilities declares supports_actions false
-// because the callback path (P2, /webhook/telegram) does not exist yet, and
-// a button whose tap goes nowhere is worse than no button. Both flip in the
-// sessions that build their other halves, not here.
+// Transport.Receive has no caller anywhere in this codebase and stays
+// unimplemented rather than wired to a live channel: the durable seam for
+// whatever consumes inbound messages next (the agent, P1) is the
+// conversations table Inbound writes to, not an in-memory channel with no
+// restart durability and nothing draining it yet. See ErrReceiveNotImplemented.
+//
+// Inline keyboards are not rendered here either: Capabilities declares
+// supports_actions false because the callback-query branch of the webhook
+// (P2) does not exist yet, and a button whose tap goes nowhere is worse than
+// no button. Flips in the session that builds it, not here.
 //
 // No SDK: the Bot API is plain JSON over HTTPS, so net/http and
 // encoding/json are the whole client, on the same reasoning the stack
@@ -42,8 +47,11 @@ const apiBase = "https://api.telegram.org"
 // with no astral characters.
 const maxBodyLength = 4096
 
-// ErrReceiveNotImplemented is returned by Receive until P1 wires conversation.
-var ErrReceiveNotImplemented = errors.New("telegram: receive not implemented until P1")
+// ErrReceiveNotImplemented is returned by Receive. Inbound messages arrive
+// through the webhook (Inbound, webhook.go) and are persisted directly to
+// conversations, not streamed through this method — see the package doc for
+// why a channel isn't the seam here.
+var ErrReceiveNotImplemented = errors.New("telegram: receive is not implemented; inbound messages are recorded via the webhook, not streamed")
 
 // Transport sends to one bot, one chat. There is no user table (S1), so both
 // are fixed at construction rather than resolved per message.
@@ -149,10 +157,10 @@ func (t *Transport) Send(ctx context.Context, msg transport.Outbound) (string, e
 	return strconv.Itoa(out.Result.MessageID), nil
 }
 
-// Receive has no consumer until P1 wires conversation. Returning an error
-// rather than an inert channel means a caller that reaches for it too early
-// finds out immediately, instead of getting an inbound half that looks wired
-// and never delivers anything.
+// Receive is not implemented. Returning an error rather than an inert
+// channel means a caller finds out immediately, instead of getting an
+// inbound half that looks wired and never delivers anything. See the package
+// doc and ErrReceiveNotImplemented.
 func (t *Transport) Receive(ctx context.Context) (<-chan transport.IncomingMessage, error) {
 	return nil, ErrReceiveNotImplemented
 }

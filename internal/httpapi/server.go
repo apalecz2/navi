@@ -45,7 +45,15 @@ type Server struct {
 // New builds the http.Server. It takes the HTTP config group rather than the
 // whole configuration, so a handler cannot reach a credential it has no
 // business with.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time) *http.Server {
+//
+// chatWebhook is the conversational transport's own inbound handler —
+// *telegram.Inbound today, mounted the same way m.Handler() is: the package
+// that owns a wire format hands this one a ready http.Handler rather than
+// this package importing telegram's internals. nil means CHAT_TRANSPORT
+// names nothing (still the default outside P1 testing), in which case the
+// route is never registered and a POST to it 404s from the mux itself rather
+// than reaching a handler with nothing configured to verify against.
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time, chatWebhook http.Handler) *http.Server {
 	s := &Server{log: log, health: h, metrics: m, store: st, claimFloor: claimFloor}
 
 	mux := http.NewServeMux()
@@ -55,6 +63,12 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	// the tunnel ingress table: it carries no secrets, but it describes usage
 	// patterns in detail and has no reason to leave the host.
 	mux.Handle("GET /metrics", m.Handler())
+
+	if chatWebhook != nil {
+		// Authenticated by its own shared secret (D8), not by Cloudflare
+		// Access — Telegram has no session to put behind it.
+		mux.Handle("POST /webhook/telegram", chatWebhook)
+	}
 
 	return &http.Server{
 		Addr:    cfg.Addr,

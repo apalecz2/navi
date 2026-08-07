@@ -422,6 +422,8 @@ Exported on `/metrics` in Prometheus format, scraped locally, rendered in Grafan
 | `navi_llm_latency_seconds{task,tier}` | histogram | |
 | `navi_copywriter_fallback_total` | counter | How often reminders actually go out as plain titles |
 | `navi_materializer_horizon_days` | gauge | Catches a thinning horizon before the sweeper does |
+| `navi_inbound_messages_accepted_total{transport}` | counter | Messages actually recorded to conversations — not webhook calls, so a Telegram retry that hit the dedup path does not inflate this |
+| `navi_inbound_messages_dropped_total{reason}` | counter | Messages rejected before being recorded; `reason="allowlist"` is the only value as of P1 (D8) |
 
 The `llm_calls` table and the model metrics overlap deliberately. The table is the
 90-day analytical record you write SQL against; the metrics are the live series

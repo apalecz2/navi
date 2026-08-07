@@ -116,6 +116,18 @@ func run() error {
 			"notify_transport", notifier.Name())
 	}
 
+	chatWebhook, err := chatTransport(cfg.Transport.Chat, cfg.Telegram, st, m, log)
+	if err != nil {
+		return err
+	}
+	if chatWebhook != nil {
+		// Zero-value on start (RegisterLoop's argument): a webhook that has
+		// never seen a message should read as "no data yet" and not be
+		// missing from the series entirely.
+		m.RegisterInboundAccepted(telegram.Name)
+		m.RegisterInboundDropped("allowlist")
+	}
+
 	// Loops run under their own context so shutdown can drain HTTP first and
 	// cancel them second (D12).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
@@ -147,7 +159,7 @@ func run() error {
 	)
 	sup.Start(loopCtx)
 
-	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor)
+	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor, chatWebhook)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)
@@ -211,6 +223,24 @@ func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (schedul
 		return telegram.New(tg.BotToken, tg.AllowedSenderID), nil
 	default:
 		return nil, fmt.Errorf("config: NOTIFY_TRANSPORT %q is not a known adapter", name)
+	}
+}
+
+// chatTransport resolves CHAT_TRANSPORT to an inbound webhook handler, or to
+// nil when nothing names it — today's default outside of P1 testing, in
+// which case /webhook/telegram is never registered (internal/httpapi.New).
+//
+// An unknown non-empty name is a boot failure, same reasoning as
+// notifyTransport: a typo that quietly ran with no inbound route would be a
+// container that looks entirely healthy and simply never hears from anyone.
+func chatTransport(name string, tg config.Telegram, st telegram.ConversationStore, m telegram.Metrics, log *slog.Logger) (http.Handler, error) {
+	switch name {
+	case "":
+		return nil, nil
+	case config.TelegramTransport:
+		return telegram.NewInbound(tg.WebhookSecret, tg.AllowedSenderID, st, m, log.With("transport", telegram.Name)), nil
+	default:
+		return nil, fmt.Errorf("config: CHAT_TRANSPORT %q is not a known adapter", name)
 	}
 }
 

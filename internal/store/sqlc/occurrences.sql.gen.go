@@ -93,6 +93,29 @@ func (q *Queries) CreateOccurrence(ctx context.Context, arg CreateOccurrencePara
 	return i, err
 }
 
+const deleteFuturePendingOccurrence = `-- name: DeleteFuturePendingOccurrence :execrows
+DELETE FROM occurrences
+WHERE id = ?
+  AND item_id = ?
+  AND status = 'pending'
+  AND is_override = 0
+  AND starts_at > ?
+`
+
+type DeleteFuturePendingOccurrenceParams struct {
+	ID       string
+	ItemID   string
+	StartsAt string
+}
+
+func (q *Queries) DeleteFuturePendingOccurrence(ctx context.Context, arg DeleteFuturePendingOccurrenceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteFuturePendingOccurrence, arg.ID, arg.ItemID, arg.StartsAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getOccurrence = `-- name: GetOccurrence :one
 SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
 WHERE id = ?
@@ -123,6 +146,61 @@ func (q *Queries) GetOccurrence(ctx context.Context, id string) (Occurrence, err
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listFutureOccurrencesForItem = `-- name: ListFutureOccurrencesForItem :many
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
+WHERE item_id = ?
+  AND starts_at > ?
+ORDER BY starts_at, id
+`
+
+type ListFutureOccurrencesForItemParams struct {
+	ItemID   string
+	StartsAt string
+}
+
+func (q *Queries) ListFutureOccurrencesForItem(ctx context.Context, arg ListFutureOccurrencesForItemParams) ([]Occurrence, error) {
+	rows, err := q.db.QueryContext(ctx, listFutureOccurrencesForItem, arg.ItemID, arg.StartsAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Occurrence{}
+	for rows.Next() {
+		var i Occurrence
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.Status,
+			&i.IsOverride,
+			&i.ParentOccurrenceID,
+			&i.SnoozeDepth,
+			&i.NotifiedAt,
+			&i.ReconciledAt,
+			&i.ResolvedAt,
+			&i.ResolutionNote,
+			&i.ResolutionSource,
+			&i.MessageText,
+			&i.MessageModel,
+			&i.MessageGeneratedAt,
+			&i.GenerationAttempts,
+			&i.GenerationPass,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listOccurrencesForItem = `-- name: ListOccurrencesForItem :many

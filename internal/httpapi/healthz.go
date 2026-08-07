@@ -107,28 +107,17 @@ func (s *Server) checkDB(ctx context.Context, resp *healthzResponse) bool {
 	}
 	resp.PendingOverdue = overdue
 
-	through, ok, err := s.store.LastMaterializedThrough(ctx)
+	days, ok, err := s.store.Horizon(ctx)
 	if err != nil {
-		return fail("last materialized through", err)
+		return fail("horizon", err)
 	}
 	if ok {
-		resp.HorizonDays = horizonDays(through, time.Now())
+		resp.HorizonDays = &days
 	}
 
 	state := "ok"
 	resp.DB = &state
 	return true
-}
-
-// horizonDays is how many whole days of occurrences exist ahead of now. A
-// horizon in the past is zero rather than negative: the number is "how much
-// runway is left", and there is no such thing as less than none.
-func horizonDays(through, now time.Time) *int {
-	days := int(through.Sub(now) / (24 * time.Hour))
-	if days < 0 {
-		days = 0
-	}
-	return &days
 }
 
 // formatTick renders a last-tick time as an ISO-8601 UTC string with a Z

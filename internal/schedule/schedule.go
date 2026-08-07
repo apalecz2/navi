@@ -4,10 +4,12 @@
 // semantic validation every one passes before a write, and which timezone an
 // item resolves to.
 //
-// It generates no occurrences. Expanding a schedule into rows — fuzzy
-// placement, the random draw, converting a local wall clock to a UTC instant
-// and the two DST edge cases — belongs to the materializer, and the only
-// expansion here is counting, which two rows of the validation table require.
+// It generates no occurrences. Expanding a schedule into rows — walking an
+// RRULE, fuzzy placement, the random draw — belongs to the materializer, and
+// the only expansion here is counting, which two rows of the validation table
+// require. Resolving one wall clock to one instant is here, in dst.go, because
+// it is a property of a zone rather than of a schedule and P2's snooze deltas
+// need the same answer.
 //
 // It is pure logic. The one thing it reads is the defaults table, and that
 // arrives as a value.

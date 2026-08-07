@@ -10,8 +10,8 @@ import (
 // mean (C5, C6).
 //
 // Only which zone. Turning a local wall clock into a UTC instant, and the two
-// DST edge cases docs/05-schedule-spec.md#dst spells out, belong with the
-// materializer — the thing that writes instants to rows.
+// DST edge cases docs/05-schedule-spec.md#dst spells out, are Instant's in
+// dst.go — this answers where, that answers when.
 //
 // It is a value rather than a lookup against the database because the
 // materializer resolves a zone once per run for every item, and reading

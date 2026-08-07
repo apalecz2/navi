@@ -100,13 +100,20 @@ func (d LocalDateTime) String() string {
 		d.Year, int(d.Month), d.Day, d.Hour, d.Minute, d.Second)
 }
 
+// Combine builds a wall clock from a date and a time of day, which is what
+// every kind but one_off is: an RRULE or a draw picks the day, the schedule
+// carries the time, and neither is an instant until Instant resolves it.
+func Combine(year int, month time.Month, day int, t LocalTime) LocalDateTime {
+	return LocalDateTime{Year: year, Month: month, Day: day, Hour: t.Hour, Minute: t.Minute}
+}
+
 // In places the wall clock in a location with time.Date and nothing more.
 //
 // This is deliberately not the DST-correct conversion. docs/05-schedule-spec.md
 // requires a nonexistent local time to shift forward to the first valid one and
-// an ambiguous one to take the earlier offset, and time.Date does the first by
-// accident and the second unpredictably. That handling belongs with the
-// materializer, which is the only thing that writes an instant to a row.
+// an ambiguous one to take the earlier offset, and time.Date does neither
+// reliably. Instant in dst.go is the version that decides both, and it is what
+// anything writing an instant to a row calls.
 //
 // Validation is the one caller allowed to use this, because the questions it
 // asks — is this in the future, is it under two years out — cannot be changed

@@ -69,6 +69,23 @@ built and the expected values are already in your head. If `rrule-go` passes all
 three on the first run, the file stays anyway; it is cheaper to keep than to
 reconstruct the reasoning later.
 
+**Resolved, P0 session 4.** `internal/materializer/expand_test.go`, eleven cases
+in two tables, all passing on the first run.
+
+`rrule-go` was fine, and it was also handed the easier job: the materializer
+expands rules in UTC for dates only, so weekly-across-a-boundary and `BYDAY=-1SU`
+were verified over an expander that never sees a timezone.
+
+The stdlib was not fine, and worse than this question assumed. `time.Date`
+resolves 02:30 on a spring-forward day in `America/New_York` to **01:30 EST** —
+an hour before what was asked for, on the far side of the transition — not
+forward as [05-schedule-spec.md](05-schedule-spec.md#dst) had recorded. The
+"matches rule one by accident" line has been corrected there. Both edge cases are
+now decided explicitly via `time.ZoneBounds`, in `internal/schedule/dst.go`, and
+the file stays as the leaning said it would.
+
+The carve-out ends here. It bought one file, no dependency, and no precedent.
+
 ---
 
 ## Needs an answer before P3

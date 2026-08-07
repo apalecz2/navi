@@ -16,6 +16,20 @@ SELECT * FROM occurrences
 WHERE item_id = ?
 ORDER BY starts_at, id;
 
+-- name: ListFutureOccurrencesForItem :many
+SELECT * FROM occurrences
+WHERE item_id = ?
+  AND starts_at > ?
+ORDER BY starts_at, id;
+
+-- name: DeleteFuturePendingOccurrence :execrows
+DELETE FROM occurrences
+WHERE id = ?
+  AND item_id = ?
+  AND status = 'pending'
+  AND is_override = 0
+  AND starts_at > ?;
+
 -- name: CountPendingOverdue :one
 SELECT count(*) FROM occurrences o
 JOIN items i ON i.id = o.item_id

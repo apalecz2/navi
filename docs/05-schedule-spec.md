@@ -142,31 +142,64 @@ show real timestamps.
 
 **Horizon:** 30 days.
 
+Each item is read, planned, and written inside **one transaction**, because the
+plan is decided by looking at what already exists and a read taken before the
+write opened can be stale by the time it lands. The nightly run and the
+synchronous re-materialization on a schedule change are two callers of exactly
+that.
+
 ```
 for each active, non-archived item:
-    if item.paused_until > horizon_start: skip
-    existing = occurrences where item_id = item.id
-                 and starts_at > now
-                 and status = 'pending'
-                 and is_override = 0
-    delete existing
-    generate = expand(item.schedule, from=now, to=now+30d, tz=resolve_tz(item))
-    for each candidate in generate:
-        if candidate falls inside a pause window: skip
-        if an override already exists at that slot: skip
-        insert occurrence(status='pending')
-update kv.last_materialized_through
+    begin
+    existing = occurrences where item_id = item.id and starts_at > now
+    eligible = existing minus anything inside a pause window
+    wanted   = expand(item.schedule, from=now, to=now+30d, tz=resolve_tz(item),
+                      already=eligible)
+    for each slot in wanted:
+        if slot is already filled by an eligible row: keep that row
+        else: insert occurrence(status='pending')
+    delete every pending, non-override, future row that filled no slot
+    commit
+update kv.last_materialized_through   # only if no item failed
 ```
+
+Keep-and-top-up rather than delete-and-regenerate. The resulting set is the same
+and two things fall out of it that the other ordering loses: a drawn time that
+already exists is kept rather than redrawn, which is what makes the idempotence
+below true for `windowed` and `fuzzy` at all (D-005); and a row the copywriter has
+already generated `message_text` for survives the night instead of being deleted
+and rewritten empty for another model call to fill.
+
+A **paused** item is not skipped, it is materialized to an empty set. Skipping it
+would leave the pending rows already sitting inside a newly-created pause window,
+which is the opposite of what [Pause](#pause) asks for; an empty wanted set
+deletes exactly those and leaves history and overrides alone. An **archived or
+inactive** item takes the same path, which is what makes archiving clear the
+calendar without a second code path.
 
 Three invariants:
 
 - **Only `pending`, non-override, future rows are touched.** Everything else is
-  history or a deliberate exception.
+  history or a deliberate exception. This is enforced in the `WHERE` clause of
+  the delete rather than by the planner, so a planner bug cannot reach history.
 - **Overrides survive.** A row with `is_override = 1` is never deleted or
   overwritten, which is the entire mechanism behind "skip tomorrow's".
 - **Idempotent.** Running it twice produces the same set. New random draws happen
   only for slots that did not already exist, so re-running does not reshuffle
   times you have already seen on the calendar.
+
+What counts as a slot differs by kind, and that predicate is the whole of the
+third invariant:
+
+| Kind | A slot is | Filled when |
+|---|---|---|
+| `one_off`, `fixed` | the exact instant | a future row has that `starts_at` |
+| `windowed` | the local **date** | a future row falls on that date, at a time the current window still allows |
+| `fuzzy` | the local **period** | counted, not matched: a week needing three that holds two draws one more |
+
+The two drawn kinds match coarser than the instant deliberately. Matching on the
+instant would make every run a fresh draw, because a redrawn time never equals the
+one it replaced.
 
 ### Expansion by kind
 
@@ -175,9 +208,25 @@ Three invariants:
 **`fixed`:** expand the RRULE across the range, combine each date with `at` in the
 item's timezone, convert to UTC.
 
-**`windowed`:** expand the RRULE, and for each date draw a uniform random minute
-inside the window. Round to the nearest 5 minutes, because 14:37 reads as
-machine-generated noise and 14:35 does not.
+The rule is expanded **in UTC and for dates only**, from a `DTSTART` built out of
+the item's creation date, and never sees the item's timezone. RRULE expresses
+which days rather than when on them, so a zone has nothing to contribute to that
+half; and keeping `rrule-go`'s arithmetic away from DST leaves exactly one
+conversion in the system that can get a transition wrong, which is the one
+[written for it](#dst). Anchoring on `created_at` rather than on today is what
+makes a rule with no `BYDAY` stable — `FREQ=WEEKLY` means "every seven days from
+`DTSTART`", so an anchor of today would walk the item to a new weekday on every
+nightly run.
+
+**`windowed`:** expand the RRULE, and for each date draw a uniform random time
+inside the window on a 5 minute grid, because 14:37 reads as machine-generated
+noise and 14:35 does not.
+
+The draw is from the grid rather than a free minute rounded onto it. Rounding
+pushes a time out of its own window at both ends — 20:58 in a window closing at
+21:00 rounds to 21:00, 09:01 in one opening at 09:00 rounds to 09:00 — and gives
+the two end marks half the share of every other mark. Drawing from the marks
+directly is uniform and cannot leave the window.
 
 **`fuzzy`:** for each period in range:
 
@@ -187,7 +236,7 @@ attempts = 0
 while len(slots) < count and attempts < 200:
     attempts += 1
     day  = random choice from days_allowed within this period
-    time = uniform random inside window, rounded to 5 min
+    time = uniform random inside window, on the 5 min grid
     cand = combine(day, time) in item tz
     if cand < now: continue
     if any(abs(cand - s) < min_gap_hours for s in slots): continue
@@ -204,9 +253,27 @@ three and move on than to fail the whole item.
 
 A `fuzzy` weekly item created on a Thursday should not try to fit three
 occurrences into the remaining two days. Scale the count to the remaining fraction
-of the period, rounding up, minimum one. So Thursday creation of a 3-per-week item
-produces one occurrence for the current partial week and three for each full week
-after.
+of the period, **rounding down, minimum one**. So Thursday creation of a
+3-per-week item produces one occurrence for the current partial week and three for
+each full week after.
+
+Rounding down rather than up, because rounding up does not produce that. Weeks
+start on Monday, so a Thursday has four of seven days left and `ceil(3 × 4/7)` is
+two; the fraction has to fall under a third before rounding up reaches one at all,
+which no day of the week does. Rounding down, with the minimum carrying the last
+day or two of a period:
+
+| Created | Fraction left | Target |
+|---|---|---|
+| Monday | 7/7 | 3 |
+| Wednesday | 5/7 | 2 |
+| Thursday | 4/7 | 1 |
+| Friday | 3/7 | 1 |
+| Sunday | 1/7 | 1, by the minimum |
+
+The fraction is measured in elapsed time rather than in whole days, so it means
+the same thing for all three periods. A 3-per-day item created at 18:00 gets one
+occurrence for what is left of the day, not three.
 
 ## Timezones
 
@@ -238,18 +305,31 @@ Two edge cases in the spring-forward gap and the autumn overlap:
   pre-transition one.
 
 Go's `time.Date` handles neither of these the way this spec requires, and it does
-not report that it has made a choice. For a nonexistent time it normalizes
-forward, which happens to match rule one by accident. For an ambiguous time it
-picks one offset with no indication that two were available, which does not
-reliably match rule two.
+not report that it has made a choice. Its own documentation says the choice is not
+guaranteed, and measurement against the embedded tzdb bears that out: 02:30 on
+8 March 2026 in `America/New_York` comes back as **01:30 EST** — an hour *before*
+what was asked for, on the far side of the transition — while the same gap in
+`Australia/Lord_Howe` normalizes the other way. For an ambiguous time it picks an
+offset, sometimes the earlier and sometimes the later, and reports neither that it
+chose nor that there was a choice.
 
-So both cases are resolved explicitly rather than inherited: construct the time,
-then check whether `t.Format` round-trips to the requested wall clock. If it does
-not, the time did not exist and the normalized result is correct. For the
-ambiguous case, probe one hour either side and take the earlier offset
-deliberately. This is roughly twenty lines and it is worth writing them, because
-the failure mode is a reminder firing an hour off twice a year with no
-explanation, which is exactly the kind of bug that gets misfiled as flakiness.
+So both cases are resolved explicitly rather than inherited, and neither assumes
+which way the stdlib went. Construct the time and check whether it reads back as
+the requested wall clock. If it does not, the time never existed, and the answer
+is the transition instant itself — reachable from `time.ZoneBounds`, which reports
+the extent of the zone period an instant falls in, without searching for a
+transition. If it does read back, the same bounds say whether a clock going
+backwards puts a second instant on the same wall clock, in which case the earlier
+one wins. The size of the shift is derived from the two offsets rather than
+assumed to be an hour, because Lord Howe moves by thirty minutes.
+
+This is roughly twenty lines and it is worth writing them, because the failure
+mode is a reminder firing an hour off twice a year with no explanation, which is
+exactly the kind of bug that gets misfiled as flakiness.
+
+It lives in `internal/schedule/dst.go` as `Instant`, beside the naive
+`LocalDateTime.In` that validation uses, and it returns which of the two cases it
+hit so the materializer can say so at debug.
 
 `time/tzdata` is imported for the embedded database (see D11 — a `scratch` image
 has no system zoneinfo).

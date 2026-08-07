@@ -24,7 +24,7 @@ import (
 type Store interface {
 	Ping(ctx context.Context) error
 	PendingOverdue(ctx context.Context) (int, error)
-	LastMaterializedThrough(ctx context.Context) (time.Time, bool, error)
+	Horizon(ctx context.Context) (int, bool, error)
 }
 
 // Server holds what the handlers read. Nothing in this struct is written after

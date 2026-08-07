@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"time"
 
 	// Same reason as cmd/navi: the schedule below resolves against an IANA
@@ -32,8 +33,10 @@ import (
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/store"
+	"github.com/aidenpaleczny/navi/internal/sweeper"
 )
 
 func main() {
@@ -88,7 +91,15 @@ func run() error {
 	reportRoundTrips()
 	reportValidation(table, cfg.Schedule.DefaultTZ)
 	reportResolution(table)
-	return reportZones(ctx, st, item, cfg.Schedule.DefaultTZ)
+	if err := reportZones(ctx, st, item, cfg.Schedule.DefaultTZ); err != nil {
+		return err
+	}
+
+	// Last, and after the timezone block, because setting kv.current_tz is what
+	// re-materialization is for: floating items resolve against the device zone,
+	// and the rows written here are the ones that move when it changes.
+	reportDST()
+	return reportMaterialization(ctx, st, cfg.Schedule.DefaultTZ, log)
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running
@@ -136,8 +147,17 @@ func seedOccurrences(ctx context.Context, st *store.Store, item domain.Item) err
 		return err
 	}
 	if len(existing) > 0 {
+		// Truncated because after the first run most of these are materialized
+		// rows rather than seeded ones, and thirty of them buries everything
+		// below. The materialization section prints the ones worth reading.
+		const show = 3
+
 		fmt.Printf("\n%d occurrence(s) already present, not adding more\n", len(existing))
-		for _, occ := range existing {
+		for i, occ := range existing {
+			if i == show {
+				fmt.Printf("occ    ... and %d more\n", len(existing)-show)
+				break
+			}
 			fmt.Printf("occ    %s  %s  %s\n", occ.ID, domain.FormatTime(occ.StartsAt), occ.Status)
 		}
 		return nil
@@ -461,4 +481,430 @@ func printZone(zones schedule.Zones, label string, item domain.Item) {
 		return
 	}
 	fmt.Printf("  %-9s item tz %-16s  resolves to %s\n", label, item.TZ, loc)
+}
+
+// localStamp carries the weekday and the offset. Both matter here: the weekday
+// is what days_allowed is about, and the offset is the only visible difference
+// between a reminder that held its wall clock across a DST boundary and one that
+// did not.
+const localStamp = "Mon 2006-01-02 15:04 -0700"
+
+// reportDST prints the two worked examples from docs/05-schedule-spec.md#dst
+// against a real transition, plus the ordinary times either side of them.
+//
+// Neither answer is the stdlib's, which is why time.Date is printed beside each
+// one. For the gap it resolves 02:30 to 01:30 EST — an hour before what was
+// asked for, on the far side of the transition — and for the fold it picks an
+// offset without reporting that two were available.
+func reportDST() {
+	const zone = "America/New_York"
+
+	loc, err := schedule.LoadLocation(zone)
+	if err != nil {
+		fmt.Printf("\ndst  FAILED  %s\n", err)
+		return
+	}
+
+	locals := []schedule.LocalDateTime{
+		{Year: 2026, Month: time.March, Day: 8, Hour: 1, Minute: 30},
+		{Year: 2026, Month: time.March, Day: 8, Hour: 2, Minute: 30},
+		{Year: 2026, Month: time.March, Day: 8, Hour: 3, Minute: 0},
+		{Year: 2026, Month: time.November, Day: 1, Hour: 1, Minute: 0},
+		{Year: 2026, Month: time.November, Day: 1, Hour: 1, Minute: 30},
+		{Year: 2026, Month: time.November, Day: 1, Hour: 2, Minute: 30},
+	}
+
+	fmt.Printf("\ndst resolution  %s\n", zone)
+	fmt.Printf("  %-21s %-10s %-30s %s\n", "wall clock", "fold", "instant", "time.Date would give")
+	for _, d := range locals {
+		at, fold := schedule.Instant(d, loc)
+		fmt.Printf("  %-21s %-10s %-30s %s\n",
+			d, fold, at.In(loc).Format(localStamp), d.In(loc).Format(localStamp))
+	}
+}
+
+// reportMaterialization is the three invariants in
+// docs/05-schedule-spec.md#materialization, checked against a real database
+// rather than argued about: run it twice and nothing moves, an override
+// survives, and a plain pending row in the same place does not.
+//
+// It is the part of this session a test file could not cover. The expansion
+// arithmetic is verified in internal/materializer/expand_test.go; what happens
+// to rows inside a transaction is verified here.
+func reportMaterialization(ctx context.Context, st *store.Store, defaultTZ *time.Location, log *slog.Logger) error {
+	mat := materializer.New(log.With("component", "materializer"), st, defaultTZ)
+
+	item, err := seedFuzzyItem(ctx, st, defaultTZ.String())
+	if err != nil {
+		return err
+	}
+
+	loc, err := itemZone(ctx, st, item, defaultTZ)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nmaterialization  item %s  %q  resolves to %s\n", item.ID, item.Title, loc)
+
+	first, err := mat.All(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  run 1   items %d  inserted %d  deleted %d  kept %d\n",
+		first.Items, first.Applied.Inserted, first.Applied.Deleted, first.Applied.Kept)
+
+	// Invariant three. A second run over unchanged items writes nothing: every
+	// slot it wants is already filled, including the drawn ones, so the times
+	// already on the calendar do not reshuffle (D-005).
+	second, err := mat.All(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  run 2   items %d  inserted %d  deleted %d  kept %d   idempotent %s\n",
+		second.Items, second.Applied.Inserted, second.Applied.Deleted, second.Applied.Kept,
+		verdict(!second.Applied.Changed()))
+
+	if err := reportFuzzyPlacement(ctx, st, item, loc); err != nil {
+		return err
+	}
+	if err := reportOverrideSurvival(ctx, st, mat, item, loc); err != nil {
+		return err
+	}
+	if err := reportPause(ctx, st, mat, item); err != nil {
+		return err
+	}
+	if err := reportHorizon(ctx, st); err != nil {
+		return err
+	}
+	return reportBackfill(ctx, st, mat, log)
+}
+
+// reportPause enters vacation mode for three days, re-materializes, and counts
+// what is left in the window (I6).
+//
+// Both halves are the assertion. Occurrences inside the window go, which is what
+// makes "I'm away until Monday" one statement rather than eighteen skips; and
+// they come back when it is lifted, which is what says the pause suppressed them
+// rather than corrupting the schedule.
+func reportPause(ctx context.Context, st *store.Store, mat *materializer.Materializer, item domain.Item) error {
+	until := time.Now().Add(72 * time.Hour)
+
+	before, err := countBetween(ctx, st, item, time.Now(), until)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\n  global pause  until %s\n", domain.FormatTime(until))
+	fmt.Printf("    before   %d occurrence(s) in the window\n", before)
+
+	if err := st.SetGlobalPauseUntil(ctx, until); err != nil {
+		return err
+	}
+	if _, err := mat.All(ctx); err != nil {
+		return err
+	}
+	during, err := countBetween(ctx, st, item, time.Now(), until)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    paused   %d  %s\n", during, verdict(during == 0))
+
+	// Lifted by setting it into the past rather than deleting the key, which is
+	// what the agent does when a trip ends early.
+	if err := st.SetGlobalPauseUntil(ctx, time.Now().Add(-time.Second)); err != nil {
+		return err
+	}
+	if _, err := mat.All(ctx); err != nil {
+		return err
+	}
+	after, err := countBetween(ctx, st, item, time.Now(), until)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    lifted   %d  %s   (redrawn, so not the same times: D-005)\n",
+		after, verdict(after > 0))
+	return nil
+}
+
+// reportBackfill forces the horizon under the sweeper's floor and ticks it once.
+//
+// This is the backstop for a missed nightly run, and it is the one path in the
+// system with no other way to notice it is broken: a horizon that stops moving
+// looks exactly like a healthy one until the last materialized row fires.
+func reportBackfill(ctx context.Context, st *store.Store, mat *materializer.Materializer, log *slog.Logger) error {
+	short := time.Now().AddDate(0, 0, sweeper.MinHorizonDays-1)
+	if err := st.SetLastMaterializedThrough(ctx, short); err != nil {
+		return err
+	}
+
+	was, _, err := st.Horizon(ctx)
+	if err != nil {
+		return err
+	}
+
+	sw := sweeper.New(log.With("component", "sweeper"), st, mat)
+	if err := sw.Tick(ctx); err != nil {
+		return err
+	}
+
+	restored, _, err := st.Horizon(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\n  sweeper backfill  floor %d days\n", sweeper.MinHorizonDays)
+	fmt.Printf("    horizon forced to %d, after one tick %d  %s\n",
+		was, restored, verdict(restored >= sweeper.MinHorizonDays))
+
+	// And again, to show the check is a check and not an unconditional re-run.
+	if err := sw.Tick(ctx); err != nil {
+		return err
+	}
+	again, _, err := st.Horizon(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    second tick over a healthy horizon leaves it at %d  %s\n",
+		again, verdict(again == restored))
+	return nil
+}
+
+// countBetween counts an item's non-override occurrences in a window. Overrides
+// are excluded because they are exactly the rows a pause does not touch, and
+// counting them would hide the thing being checked.
+func countBetween(ctx context.Context, st *store.Store, item domain.Item, from, to time.Time) (int, error) {
+	occurrences, err := st.ListOccurrencesForItem(ctx, item.ID)
+	if err != nil {
+		return 0, err
+	}
+
+	n := 0
+	for _, occ := range occurrences {
+		if occ.IsOverride {
+			continue
+		}
+		if occ.StartsAt.After(from) && occ.StartsAt.Before(to) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// seedFuzzyItem creates the fuzzy item on first run and reuses it afterwards.
+// The schedule is docs/05-schedule-spec.md's own example, verbatim: three times
+// a week, weekdays, 09:00 to 21:00, at least twenty hours apart.
+func seedFuzzyItem(ctx context.Context, st *store.Store, tz string) (domain.Item, error) {
+	const title = "stretch"
+
+	existing, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return domain.Item{}, err
+	}
+	for _, it := range existing {
+		if it.Title == title {
+			return it, nil
+		}
+	}
+
+	return st.CreateItem(ctx, domain.NewItem{
+		Title:    title,
+		Schedule: json.RawMessage(specExamples[3]),
+		TZ:       tz,
+	})
+}
+
+// reportFuzzyPlacement prints what the placement loop produced: the gap to the
+// previous occurrence, which has to clear min_gap_hours, and the count per
+// calendar week, where the first week is partial and gets a scaled target.
+func reportFuzzyPlacement(ctx context.Context, st *store.Store, item domain.Item, loc *time.Location) error {
+	s, err := schedule.Parse(item.Schedule)
+	if err != nil {
+		return err
+	}
+	gap := time.Duration(*s.MinGapHours) * time.Hour
+
+	occurrences, err := st.ListOccurrencesForItem(ctx, item.ID)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\n  placement  %s  (min gap %s)\n", s, gap)
+
+	weeks := map[string]int{}
+	var previous time.Time
+	for _, occ := range occurrences {
+		if occ.StartsAt.Before(time.Now()) {
+			continue
+		}
+		local := occ.StartsAt.In(loc)
+
+		year, week := local.ISOWeek()
+		weeks[fmt.Sprintf("%d-W%02d", year, week)]++
+
+		// An override is neither the placement loop's output nor its input: it
+		// does not answer to the gap or the count, and measuring against one
+		// would report a violation the loop did not commit. So it is labelled
+		// and stepped over, and the gap column stays a claim about the placement
+		// loop alone. A week showing four is three placed plus one that
+		// survived, which is the override mechanism working.
+		if occ.IsOverride {
+			fmt.Printf("    %-28s %7s  %s\n", local.Format(localStamp), "", "override")
+			continue
+		}
+
+		mark, since := "      ", ""
+		if !previous.IsZero() {
+			d := local.Sub(previous)
+			since = fmt.Sprintf("%6.1fh", d.Hours())
+			mark = "ok"
+			if d < gap {
+				mark = "UNDER GAP"
+			}
+		}
+		fmt.Printf("    %-28s %7s  %s\n", local.Format(localStamp), since, mark)
+		previous = local
+	}
+
+	fmt.Printf("\n  per week   count %d; the first week is partial, so its target is scaled, floored, minimum one\n", *s.Count)
+	for _, key := range sortedKeys(weeks) {
+		fmt.Printf("    %-10s %d\n", key, weeks[key])
+	}
+	return nil
+}
+
+// reportOverrideSurvival plants two future pending rows no schedule asked for,
+// one marked is_override and one not, and re-materializes.
+//
+// The contrast is the assertion. Both rows are equally unwanted, the only
+// difference between them is the flag, and after the run the override is still
+// there and the plain row is gone. That is the whole mechanism behind "skip
+// tomorrow's" and behind snooze children, and it holds because of the WHERE
+// clause on the store's delete rather than because the planner remembered to be
+// careful.
+func reportOverrideSurvival(ctx context.Context, st *store.Store, mat *materializer.Materializer, item domain.Item, loc *time.Location) error {
+	// 04:00 and 05:00 local, outside the schedule's 09:00-21:00 window, so
+	// neither can be mistaken for a slot the schedule wanted filled.
+	day := time.Now().In(loc).AddDate(0, 0, 10)
+	planted := []struct {
+		hour     int
+		override bool
+	}{{4, true}, {5, false}}
+
+	fmt.Println("\n  override survival")
+
+	existing, err := st.ListOccurrencesForItem(ctx, item.ID)
+	if err != nil {
+		return err
+	}
+
+	ids := make([]string, 0, len(planted))
+	for _, p := range planted {
+		at, _ := schedule.Instant(schedule.LocalDateTime{
+			Year: day.Year(), Month: day.Month(), Day: day.Day(), Hour: p.hour,
+		}, loc)
+
+		// The override survives every run, so a second invocation of this
+		// command would stack a duplicate on top of it. Reusing it is both
+		// tidier and a stronger claim: the row being checked below is one that
+		// has already been through a materialization in an earlier process.
+		if occ := occurrenceAt(existing, at); occ != nil {
+			ids = append(ids, occ.ID)
+			fmt.Printf("    present  %-28s is_override %t\n", at.In(loc).Format(localStamp), p.override)
+			continue
+		}
+
+		occ, err := st.CreateOccurrence(ctx, domain.NewOccurrence{
+			ItemID:     item.ID,
+			StartsAt:   at,
+			IsOverride: p.override,
+		})
+		if err != nil {
+			return err
+		}
+		ids = append(ids, occ.ID)
+		fmt.Printf("    planted  %-28s is_override %t\n", at.In(loc).Format(localStamp), p.override)
+	}
+
+	if _, err := mat.All(ctx); err != nil {
+		return err
+	}
+
+	for i, id := range ids {
+		_, err := st.GetOccurrence(ctx, id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		survived := err == nil
+		fmt.Printf("    after    is_override %-5t  survived %-5t  %s\n",
+			planted[i].override, survived, verdict(survived == planted[i].override))
+	}
+	return nil
+}
+
+// reportHorizon prints what /healthz and navi_materializer_horizon_days now
+// read. Before this session both were absent; the point of printing it is that
+// the two are the same subtraction, made in one place.
+func reportHorizon(ctx context.Context, st *store.Store) error {
+	through, ok, err := st.LastMaterializedThrough(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Println("\n  horizon    absent (nothing has materialized yet)")
+		return nil
+	}
+
+	days, _, err := st.Horizon(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\n  horizon    through %s  =  %d days  (the sweeper re-runs under %d)\n",
+		domain.FormatTime(through), days, sweeper.MinHorizonDays)
+	return nil
+}
+
+// itemZone answers which location this item's wall clocks mean, the same way a
+// materialization run does.
+func itemZone(ctx context.Context, st *store.Store, item domain.Item, fallback *time.Location) (*time.Location, error) {
+	zones := schedule.Zones{Fallback: fallback}
+
+	name, ok, err := st.CurrentTZ(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		device, err := schedule.LoadLocation(name)
+		if err != nil {
+			return nil, err
+		}
+		zones.Device = device
+	}
+	return zones.For(item)
+}
+
+// occurrenceAt finds a row at exactly this instant, or nil.
+func occurrenceAt(occurrences []domain.Occurrence, at time.Time) *domain.Occurrence {
+	for i := range occurrences {
+		if occurrences[i].StartsAt.Equal(at) {
+			return &occurrences[i]
+		}
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// verdict renders a check, so a failure is greppable rather than something to be
+// worked out from the numbers beside it.
+func verdict(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "FAILED"
 }

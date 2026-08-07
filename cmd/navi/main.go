@@ -101,19 +101,24 @@ func run() error {
 	}()
 
 	m.RegisterPendingOverdue(func() float64 { return pendingOverdue(st, log) })
+	m.RegisterHorizonDays(func() float64 { return horizonDays(st, log) })
 
 	// Loops run under their own context so shutdown can drain HTTP first and
 	// cancel them second (D12).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
 	defer cancelLoops()
 
+	// The sweeper backfills the horizon by calling the materializer, so it holds
+	// the same instance the supervisor drives rather than one of its own.
+	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
+
 	sup := supervisor.New(log, h, m)
 	sup.Register(
-		materializer.New(log.With("loop", materializer.Name)).Loop(),
+		mat.Loop(),
 		scheduler.New(log.With("loop", scheduler.Name)).Loop(),
 		copywriter.New(log.With("loop", copywriter.Name)).Loop(),
 		reconciler.New(log.With("loop", reconciler.Name)).Loop(),
-		sweeper.New(log.With("loop", sweeper.Name)).Loop(),
+		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
 	)
 	sup.Start(loopCtx)
 
@@ -175,6 +180,25 @@ func pendingOverdue(st *store.Store, log *slog.Logger) float64 {
 		return math.NaN()
 	}
 	return float64(n)
+}
+
+// horizonDays answers navi_materializer_horizon_days at scrape time. NaN both
+// when the database cannot be reached and when nothing has ever been
+// materialized: a database with no horizon has no number to report, and zero is
+// the specific reading that means the horizon ran out.
+func horizonDays(st *store.Store, log *slog.Logger) float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
+	defer cancel()
+
+	days, ok, err := st.Horizon(ctx)
+	if err != nil {
+		log.Error("metrics: horizon", "err", err)
+		return math.NaN()
+	}
+	if !ok {
+		return math.NaN()
+	}
+	return float64(days)
 }
 
 // waitFor runs wait and reports whether it returned before the timeout.

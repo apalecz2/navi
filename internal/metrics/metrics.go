@@ -97,6 +97,24 @@ func (m *Metrics) RegisterPendingOverdue(f func() float64) {
 	}, f))
 }
 
+// RegisterHorizonDays publishes navi_materializer_horizon_days, on the same
+// callback pattern and for the same reason.
+//
+// It is the one number that says the materializer is still working. Every other
+// symptom of a stalled expansion is invisible for weeks: occurrences already
+// exist, reminders keep firing, and nothing goes wrong until the day the last
+// materialized row fires and the calendar is empty behind it. This gauge starts
+// falling the first night a run is missed.
+//
+// f should return NaN when nothing has ever been materialized, which is a
+// database with no horizon rather than a horizon of zero.
+func (m *Metrics) RegisterHorizonDays(f func() float64) {
+	m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "navi_materializer_horizon_days",
+		Help: "Whole days of occurrences materialized ahead of now.",
+	}, f))
+}
+
 // Handler serves the exposition format for this registry.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{

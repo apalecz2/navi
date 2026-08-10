@@ -3,10 +3,11 @@
 // constructs a collector, and nothing uses the default registry.
 //
 // The series are specified in docs/03-architecture.md#observability. Registered
-// so far: the two loop series and the two database-backed gauges, then the fire
+// so far: the two loop series and the two database-backed gauges, the fire
 // path's delivery latency, transitions, claim releases, and copywriter
-// fallbacks. The model counters are added as fields on this struct by the
-// session that produces them.
+// fallbacks, the inbound-message counters, and, since the model client
+// (session 9), llm_calls' live counterpart: calls by task/tier/outcome and
+// their latency by task/tier.
 //
 // Why this exists alongside /healthz: almost everything in this system degrades
 // silently by design. A plain-title notification looks fine, a stalled
@@ -16,6 +17,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -36,6 +38,9 @@ type Metrics struct {
 
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
+
+	llmCalls   *prometheus.CounterVec
+	llmLatency *prometheus.HistogramVec
 }
 
 // deliveryLatencyBuckets are explicit rather than exponential so that 60 is an
@@ -49,6 +54,12 @@ type Metrics struct {
 // p95 panel spikes afterwards. That is the histogram being honest, not a
 // regression.
 var deliveryLatencyBuckets = []float64{1, 5, 10, 15, 30, 45, 60, 90, 120, 300, 900, 1800}
+
+// llmLatencyBuckets run from a fast tier-one reply up past the longest
+// configured tier timeout (digest's tier 2, 60s in config/model.yaml), so a
+// call that hit its timeout and one that returned promptly land in
+// different, readable buckets rather than both landing in a +Inf tail.
+var llmLatencyBuckets = []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 45, 60, 90}
 
 // New builds the registry and registers every series.
 func New() *Metrics {
@@ -100,6 +111,15 @@ func New() *Metrics {
 			Name: "navi_inbound_messages_dropped_total",
 			Help: "Inbound messages rejected before being recorded, by reason.",
 		}, []string{"reason"}),
+		llmCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_llm_calls_total",
+			Help: "Model client calls, by task, tier and outcome.",
+		}, []string{"task", "tier", "outcome"}),
+		llmLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "navi_llm_latency_seconds",
+			Help:    "Seconds from a model call starting to Complete returning, by task and tier.",
+			Buckets: llmLatencyBuckets,
+		}, []string{"task", "tier"}),
 	}
 	reg.MustRegister(
 		m.loopTickInterval,
@@ -110,6 +130,8 @@ func New() *Metrics {
 		m.copywriterFallbacks,
 		m.inboundAccepted,
 		m.inboundDropped,
+		m.llmCalls,
+		m.llmLatency,
 	)
 	return m
 }
@@ -200,6 +222,25 @@ func (m *Metrics) RegisterInboundAccepted(transport string) {
 
 func (m *Metrics) RegisterInboundDropped(reason string) {
 	m.inboundDropped.WithLabelValues(reason)
+}
+
+// IncLLMCall counts one model-client attempt, tagged with its outcome —
+// "success" or an ErrorKind's string, e.g. "timeout".
+func (m *Metrics) IncLLMCall(task string, tier int, outcome string) {
+	m.llmCalls.WithLabelValues(task, strconv.Itoa(tier), outcome).Inc()
+}
+
+// ObserveLLMLatency records how long one Complete call took, start to
+// return, regardless of whether it succeeded.
+func (m *Metrics) ObserveLLMLatency(task string, tier int, seconds float64) {
+	m.llmLatency.WithLabelValues(task, strconv.Itoa(tier)).Observe(seconds)
+}
+
+// RegisterLLMCall creates the child series for a (task, tier) pair so it
+// exports a zero before it has ever been called, on the same
+// RegisterTransition argument.
+func (m *Metrics) RegisterLLMCall(task string, tier int) {
+	m.llmLatency.WithLabelValues(task, strconv.Itoa(tier))
 }
 
 // RegisterPendingOverdue publishes navi_pending_overdue, backed by a function

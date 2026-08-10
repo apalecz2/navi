@@ -2,7 +2,9 @@
 // log retention, and re-running materialization when the horizon has thinned
 // because a nightly run was missed.
 //
-// Only the horizon backfill exists in this session.
+// The horizon backfill and llm_calls retention (L7, 90 days per
+// 04-data-model.md) exist so far. conversations' own retention (180 days)
+// is not built yet.
 package sweeper
 
 import (
@@ -26,12 +28,18 @@ const Interval = time.Hour
 // without reacting to one.
 const MinHorizonDays = 25
 
+// LLMCallRetention is L7's retention policy for llm_calls, per
+// 04-data-model.md: 90 days, because it is the largest table by row count
+// within a month and nothing older is useful once the ladder is tuned.
+const LLMCallRetention = 90 * 24 * time.Hour
+
 // Store is the narrow view this loop needs. Declared here rather than taken as
-// the concrete type because the horizon is the only thing it asks the database
-// for, and saying so is what keeps the backstop from growing into a second
-// scheduler.
+// the concrete type because the horizon and llm_calls retention are the only
+// things it asks the database for, and saying so is what keeps the backstop
+// from growing into a second scheduler.
 type Store interface {
 	Horizon(ctx context.Context) (int, bool, error)
+	PruneLLMCalls(ctx context.Context, before time.Time) (int64, error)
 }
 
 // Materializer is the one call this loop makes into the expansion path. The
@@ -58,7 +66,8 @@ func (s *Sweeper) Loop() supervisor.Loop {
 	return supervisor.Loop{Name: Name, Interval: Interval, Tick: s.Tick}
 }
 
-// Tick re-runs materialization when the horizon has thinned.
+// Tick re-runs materialization when the horizon has thinned, then prunes
+// llm_calls rows past their retention window.
 //
 // An absent horizon counts as thin. A database that has never materialized is
 // either brand new or has had every nightly run since it was created fail, and
@@ -68,14 +77,20 @@ func (s *Sweeper) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if ok && days >= MinHorizonDays {
-		return nil
+	if !ok || days < MinHorizonDays {
+		res, err := s.mat.All(ctx)
+		if err != nil {
+			return err
+		}
+		s.log.Info("horizon backfilled", "was_days", days, "had_horizon", ok, "result", res)
 	}
 
-	res, err := s.mat.All(ctx)
+	pruned, err := s.store.PruneLLMCalls(ctx, time.Now().Add(-LLMCallRetention))
 	if err != nil {
 		return err
 	}
-	s.log.Info("horizon backfilled", "was_days", days, "had_horizon", ok, "result", res)
+	if pruned > 0 {
+		s.log.Info("llm_calls pruned", "rows", pruned)
+	}
 	return nil
 }

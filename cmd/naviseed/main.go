@@ -39,6 +39,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/metrics"
+	"github.com/aidenpaleczny/navi/internal/model"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/scheduler"
 	"github.com/aidenpaleczny/navi/internal/store"
@@ -119,7 +120,14 @@ func run() error {
 
 	// After fire, since it exercises the other direction — inbound rather
 	// than outbound — and needs nothing fire left behind.
-	return reportConversations(ctx, st, log)
+	if err := reportConversations(ctx, st, log); err != nil {
+		return err
+	}
+
+	// Last of all: the model client, against local fake tier endpoints
+	// rather than a real provider, needing nothing any earlier section left
+	// behind either.
+	return reportModelClient(ctx, st, log, cfg.Files.ModelRoutingPath())
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running
@@ -1424,4 +1432,236 @@ func (t *failingTransport) Capabilities() transport.Capabilities { return transp
 
 func (t *failingTransport) Send(context.Context, transport.Outbound) (string, error) {
 	return "", errors.New("failing: transport unreachable")
+}
+
+// reportModelClient exercises the model client's mechanism — tier
+// resolution, one HTTP round trip per attempt, error classification, and
+// the llm_calls row and metric observations every path (success or failure)
+// writes — against local httptest servers standing in for tier endpoints,
+// on the same fake-instead-of-real-network reasoning
+// recordingTransport/failingTransport give for the fire path, just at the
+// HTTP layer instead of a Go interface. Nothing here calls a real provider
+// or needs OPENROUTER_API_KEY.
+func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, routingPath string) error {
+	fmt.Printf("\nmodel client\n")
+
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"model": "naviseed-ok",
+			"choices": [{
+				"index": 0,
+				"message": {
+					"role": "assistant",
+					"content": "",
+					"tool_calls": [{
+						"id": "call_1",
+						"type": "function",
+						"function": {"name": "bulk_resolve", "arguments": "{\"resolutions\":[{\"occurrence_id\":\"occ_1\",\"status\":\"completed\"}]}"}
+					}]
+				},
+				"finish_reason": "tool_calls"
+			}],
+			"usage": {"prompt_tokens": 142, "completion_tokens": 23}
+		}`)
+	}))
+	defer okServer.Close()
+
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error": {"message": "upstream outage", "type": "server_error"}}`)
+	}))
+	defer failServer.Close()
+
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"too slow to matter"},"finish_reason":"stop"}]}`)
+	}))
+	defer slowServer.Close()
+
+	// A routing table built in Go rather than loaded from YAML, so each task
+	// can point at a fake server this function controls instead of a real
+	// provider. bulk_resolve has one tier that succeeds outright; crud fails
+	// at tier 1 and succeeds at tier 2, for the escalation check; reconcile's
+	// one tier is slower than its own timeout, for the timeout check.
+	routing := &model.Routing{
+		Tasks: map[model.Task]model.TaskRouting{
+			model.TaskBulkResolve: {
+				Tiers: []model.Tier{
+					{Model: "naviseed-tier1", BaseURL: okServer.URL, TimeoutSeconds: 5},
+				},
+			},
+			model.TaskCRUD: {
+				Thinking: true,
+				Tiers: []model.Tier{
+					{Model: "naviseed-tier1", BaseURL: failServer.URL, TimeoutSeconds: 5},
+					{Model: "naviseed-tier2", BaseURL: okServer.URL, TimeoutSeconds: 5},
+				},
+			},
+			model.TaskReconcile: {
+				Tiers: []model.Tier{
+					{Model: "naviseed-slow", BaseURL: slowServer.URL, TimeoutSeconds: 1},
+				},
+			},
+		},
+	}
+
+	m := metrics.New()
+	client := model.New(log.With("component", "model"), routing, "", st, m)
+	msgs := []model.Message{{Role: model.RoleUser, Content: "mark vitamins and stretching done"}}
+
+	// Tier 1 succeeds directly: a completion with tool calls, and an
+	// llm_calls row carrying token counts and latency.
+	res1, err1 := client.Complete(ctx, model.Request{Task: model.TaskBulkResolve, Tier: 1, Messages: msgs})
+	row1, err := lastLLMCall(ctx, st)
+	if err != nil {
+		return err
+	}
+	ok1 := err1 == nil && len(res1.Message.ToolCalls) == 1 &&
+		row1.PromptTokens != nil && *row1.PromptTokens > 0 &&
+		row1.CompletionTokens != nil && row1.LatencyMS != nil && row1.Error == nil
+	fmt.Printf("  tier-1 success                  tool_calls=%d tokens=%s/%s latency_ms=%s  %s\n",
+		len(res1.Message.ToolCalls), intOrNull(row1.PromptTokens), intOrNull(row1.CompletionTokens),
+		intOrNull(row1.LatencyMS), verdict(ok1))
+
+	// Tier 1 fails (the server returns 500), which must still write a row.
+	// Tier 2, called with Escalation set the way the ladder will next
+	// session, succeeds and its row carries the reason verbatim.
+	_, err2a := client.Complete(ctx, model.Request{Task: model.TaskCRUD, Tier: 1, Messages: msgs})
+	rowFail, err := lastLLMCall(ctx, st)
+	if err != nil {
+		return err
+	}
+	var kind2a model.ErrorKind
+	var mErr2a *model.Error
+	if errors.As(err2a, &mErr2a) {
+		kind2a = mErr2a.Kind
+	}
+
+	const reason = "tier 1 unavailable"
+	_, err2b := client.Complete(ctx, model.Request{
+		Task: model.TaskCRUD, Tier: 2, Messages: msgs,
+		Escalation: &model.Escalation{Reason: reason},
+	})
+	rowEscalated, err := lastLLMCall(ctx, st)
+	if err != nil {
+		return err
+	}
+	ok2 := err2a != nil && kind2a == model.KindUnavailable && rowFail.Error != nil &&
+		err2b == nil && rowEscalated.Escalated && strOrNull(rowEscalated.EscalationReason) == reason
+	fmt.Printf("  tier-1 failure then escalation  tier1_kind=%s tier1_row_error=%s escalated=%v reason=%q  %s\n",
+		kind2a, strOrNull(rowFail.Error), rowEscalated.Escalated, strOrNull(rowEscalated.EscalationReason), verdict(ok2))
+
+	// The tier's own timeout (1s) is shorter than the server's delay (3s):
+	// Complete must return well short of 3s, classified KindTimeout, with a
+	// row still written.
+	timeoutStart := time.Now()
+	_, err3 := client.Complete(ctx, model.Request{Task: model.TaskReconcile, Tier: 1, Messages: msgs})
+	elapsed := time.Since(timeoutStart)
+	rowTimeout, err := lastLLMCall(ctx, st)
+	if err != nil {
+		return err
+	}
+	var kind3 model.ErrorKind
+	var mErr3 *model.Error
+	if errors.As(err3, &mErr3) {
+		kind3 = mErr3.Kind
+	}
+	ok3 := err3 != nil && kind3 == model.KindTimeout && elapsed < 2*time.Second && rowTimeout.Error != nil
+	fmt.Printf("  timeout bounded                 elapsed=%s kind=%s row_latency_ms=%s  %s\n",
+		elapsed.Round(time.Millisecond), kind3, intOrNull(rowTimeout.LatencyMS), verdict(ok3))
+
+	// The two metric families, scraped the same way reportWebhook scrapes
+	// navi_inbound_messages_accepted_total: through the handler, not by
+	// reaching into the registry.
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, metricsReq)
+	metricsBody := metricsRec.Body.String()
+	hasCalls := strings.Contains(metricsBody, "navi_llm_calls_total")
+	hasLatency := strings.Contains(metricsBody, "navi_llm_latency_seconds")
+	fmt.Printf("  metrics                          navi_llm_calls_total=%v navi_llm_latency_seconds=%v  %s\n",
+		hasCalls, hasLatency, verdict(hasCalls && hasLatency))
+
+	// The real committed config/model.yaml, loaded and validated the way
+	// main will — independent of the fake routing table used above.
+	real, loadErr := model.LoadRouting(routingPath)
+	taskCount := 0
+	if real != nil {
+		taskCount = len(real.Tasks)
+	}
+	fmt.Printf("  %s                     tasks=%d  %s\n",
+		routingPath, taskCount, verdict(loadErr == nil && taskCount == 5))
+
+	// Retention, exercised directly against the store method the sweeper
+	// calls: a cutoff in the deep past deletes nothing that exists, a cutoff
+	// in the future deletes everything this section just wrote. This proves
+	// the WHERE clause both ways without backdating a row through the
+	// store's normal (always-time.Now()) write path.
+	before, err := countLLMCalls(ctx, st)
+	if err != nil {
+		return err
+	}
+	deletedNone, err := st.PruneLLMCalls(ctx, time.Now().Add(-365*24*time.Hour))
+	if err != nil {
+		return err
+	}
+	afterNone, err := countLLMCalls(ctx, st)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  retention: old cutoff            deleted=%d, before=%d, after=%d  %s\n",
+		deletedNone, before, afterNone, verdict(deletedNone == 0 && afterNone == before))
+
+	deletedAll, err := st.PruneLLMCalls(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		return err
+	}
+	afterAll, err := countLLMCalls(ctx, st)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  retention: future cutoff          deleted=%d, remaining=%d  %s\n",
+		deletedAll, afterAll, verdict(int(deletedAll) == afterNone && afterAll == 0))
+
+	return nil
+}
+
+// lastLLMCall returns the most recently written llm_calls row.
+func lastLLMCall(ctx context.Context, st *store.Store) (domain.LLMCall, error) {
+	rows, err := st.ListLLMCalls(ctx, 1)
+	if err != nil {
+		return domain.LLMCall{}, err
+	}
+	if len(rows) == 0 {
+		return domain.LLMCall{}, fmt.Errorf("naviseed: llm_calls is empty")
+	}
+	return rows[0], nil
+}
+
+// countLLMCalls counts every row. Fine at naviseed's scale; not a query this
+// codebase would run against a real deployment's table.
+func countLLMCalls(ctx context.Context, st *store.Store) (int, error) {
+	rows, err := st.ListLLMCalls(ctx, 100000)
+	if err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+// intOrNull and strOrNull render a nullable column for a report line, on the
+// same "null" convention presence() uses for a bool.
+func intOrNull(p *int) string {
+	if p == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%d", *p)
+}
+
+func strOrNull(p *string) string {
+	if p == nil {
+		return "null"
+	}
+	return *p
 }

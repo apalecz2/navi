@@ -1,0 +1,73 @@
+# Model routing. Transcribed from docs/06-agent-spec.md#model-routing, which is
+# the source of truth for the table; this file is the source of truth for the
+# running process (L1: model choice is configuration, not code).
+#
+# Every tier here points at OpenRouter (D-021: one key, automatic provider
+# failover), so base_url is the same across every entry today — it stays
+# per-tier rather than a single top-level value because a future tier hitting
+# a different backend directly is a config edit, not a code change. The key
+# itself is never in this file (D9/D10): it comes from OPENROUTER_API_KEY.
+#
+# The model ids below are OpenRouter's naming for the models the routing table
+# names by their plain names ("Gemma 4 31B", "Gemini 3.1 Flash Lite"). They are
+# not yet verified against a real key or a real account — same caveat
+# ops/restore-runbook.md gives R2: the first real call against this file
+# should confirm the ids resolve before anyone trusts it blind.
+#
+# Mounted read-only at /config, same as defaults.yaml: retuning the ladder is a
+# restart, not a rebuild.
+
+tasks:
+  crud:
+    thinking: true
+    tiers:
+      - model: "google/gemma-4-31b"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 20
+      - model: "google/gemini-3.1-flash-lite"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 30
+
+  bulk_resolve:
+    thinking: false
+    tiers:
+      - model: "google/gemma-4-31b"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 20
+      - model: "google/gemini-3.1-flash-lite"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 30
+
+  # No tier 2 (docs/06-agent-spec.md#model-routing): escalating a task whose
+  # failure mode is already acceptable — the plain-title fallback — spends
+  # money to avoid an outcome that is fine. Tier 1's timeout is the shortest
+  # of the five: the copywriter's whole failure story is giving up in time for
+  # the scheduler to send that plain title anyway.
+  copywriter:
+    thinking: false
+    tiers:
+      - model: "google/gemma-4-31b"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 15
+
+  reconcile:
+    thinking: false
+    tiers:
+      - model: "google/gemma-4-31b"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 20
+      - model: "google/gemini-3.1-flash-lite"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 30
+
+  # Weekly, and it actually reasons over statistics, so cost is negligible at
+  # that frequency and both tiers get more time than the others.
+  digest:
+    thinking: true
+    tiers:
+      - model: "google/gemini-3.1-flash-lite"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 45
+      - model: "google/gemini-3.1-pro"
+        base_url: "https://openrouter.ai/api/v1"
+        timeout_seconds: 60

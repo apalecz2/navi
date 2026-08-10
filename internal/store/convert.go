@@ -144,6 +144,28 @@ func toDomainConversation(row sqlc.Conversation) (domain.Conversation, error) {
 	}, nil
 }
 
+func toDomainLLMCall(row sqlc.LlmCall) (domain.LLMCall, error) {
+	createdAt, err := domain.ParseTime(row.CreatedAt)
+	if err != nil {
+		return domain.LLMCall{}, fmt.Errorf("llm call %s created_at: %w", row.ID, err)
+	}
+
+	return domain.LLMCall{
+		ID:               row.ID,
+		Task:             row.Task,
+		Tier:             int(row.Tier),
+		Model:            row.Model,
+		PromptTokens:     intPtr(row.PromptTokens),
+		CompletionTokens: intPtr(row.CompletionTokens),
+		LatencyMS:        intPtr(row.LatencyMs),
+		Escalated:        row.Escalated != 0,
+		EscalationReason: row.EscalationReason,
+		Error:            row.Error,
+		OccurrenceID:     row.OccurrenceID,
+		CreatedAt:        createdAt,
+	}, nil
+}
+
 // parseTimePtr reads a nullable timestamp column.
 func parseTimePtr(s *string) (*time.Time, error) {
 	if s == nil {

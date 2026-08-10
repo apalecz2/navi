@@ -33,6 +33,7 @@ type Config struct {
 	Schedule  Schedule
 	Transport Transport
 	Telegram  Telegram
+	Model     Model
 }
 
 // HTTP configures the API listener.
@@ -91,6 +92,14 @@ func (f Files) DefaultsPath() string {
 	return filepath.Join(f.ConfigDir, "defaults.yaml")
 }
 
+// ModelRoutingPath is the per-task tier list the model client reads (L1):
+// which model answers each task, in what order, against which base_url and
+// timeout. Edited without a rebuild on the same reasoning as defaults.yaml —
+// retuning the ladder is a config change, not a deploy.
+func (f Files) ModelRoutingPath() string {
+	return filepath.Join(f.ConfigDir, "model.yaml")
+}
+
 // PersonaPath is the voice definition (G5). Nothing reads it until P5; the
 // helper is here so that when something does, it does not invent a second way
 // to spell the path.
@@ -147,6 +156,20 @@ type Telegram struct {
 	BotToken        string
 	WebhookSecret   string
 	AllowedSenderID string
+}
+
+// Model holds the model client's one secret. OpenRouterAPIKey is borrowed and
+// comes from the environment with no default (D9), the same rule Telegram's
+// BotToken follows.
+//
+// Unlike Telegram's fields, this one is read unconditionally with envString
+// rather than promoted to the required set: nothing in cmd/navi constructs a
+// model.Client yet this session (no loop consumes it), and required-when-
+// consumed means the process must not demand a credential it has no use for.
+// The session that first wires a Client into a running loop is the one that
+// moves this to envRequiredString, in the same commit.
+type Model struct {
+	OpenRouterAPIKey string
 }
 
 // There is deliberately no Backup group here. Litestream runs as the
@@ -230,6 +253,8 @@ func Load() (Config, error) {
 	} else {
 		cfg.Telegram.WebhookSecret = envString("TELEGRAM_WEBHOOK_SECRET", "")
 	}
+
+	cfg.Model.OpenRouterAPIKey = envString("OPENROUTER_API_KEY", "")
 
 	return cfg, nil
 }

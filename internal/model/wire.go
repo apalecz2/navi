@@ -1,0 +1,161 @@
+package model
+
+import "encoding/json"
+
+// The types below are the OpenAI-compatible chat-completions wire format —
+// OpenRouter's own shape, and the shape D-021 asks this client to speak
+// without an SDK. They are private and JSON-tagged; the public Message,
+// Tool, ToolCall and Result types (model.go) never carry a wire tag, so
+// reshaping a provider quirk here never touches the public API.
+
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Tools    []chatTool    `json:"tools,omitempty"`
+
+	// Reasoning is OpenRouter's unified switch for thinking mode. Best
+	// effort: omitted entirely when the task's routing entry doesn't ask for
+	// it, and nothing yet reads it back out of the response.
+	Reasoning *chatReasoning `json:"reasoning,omitempty"`
+}
+
+type chatReasoning struct {
+	Enabled bool `json:"enabled"`
+}
+
+type chatMessage struct {
+	Role       string         `json:"role"`
+	Content    string         `json:"content,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatTool struct {
+	Type     string       `json:"type"`
+	Function chatFunction `json:"function"`
+}
+
+type chatFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type chatToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function chatFunctionCall `json:"function"`
+}
+
+type chatFunctionCall struct {
+	Name string `json:"name"`
+
+	// Arguments is a JSON-encoded string in the wire format, not an embedded
+	// object — the outer decode leaves it already unescaped, so casting it
+	// straight to json.RawMessage (fromWireMessage) is the whole conversion.
+	Arguments string `json:"arguments"`
+}
+
+type chatResponse struct {
+	Model   string       `json:"model"`
+	Choices []chatChoice `json:"choices"`
+	Usage   *chatUsage   `json:"usage"`
+	Error   *chatAPIErr  `json:"error"`
+}
+
+type chatChoice struct {
+	Index        int         `json:"index"`
+	Message      chatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason"`
+}
+
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
+// chatAPIErr is how OpenRouter (and most OpenAI-compatible providers) shape
+// a failure that still arrives as a 200 body, or as the body of a non-2xx
+// response.
+type chatAPIErr struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    any    `json:"code"`
+}
+
+// toWireRequest builds the request body for one attempt.
+func toWireRequest(model string, thinking bool, messages []Message, tools []Tool) chatRequest {
+	req := chatRequest{
+		Model:    model,
+		Messages: make([]chatMessage, len(messages)),
+	}
+	for i, m := range messages {
+		req.Messages[i] = toWireMessage(m)
+	}
+	if len(tools) > 0 {
+		req.Tools = make([]chatTool, len(tools))
+		for i, t := range tools {
+			req.Tools[i] = chatTool{
+				Type: "function",
+				Function: chatFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.Parameters,
+				},
+			}
+		}
+	}
+	if thinking {
+		req.Reasoning = &chatReasoning{Enabled: true}
+	}
+	return req
+}
+
+func toWireMessage(m Message) chatMessage {
+	wm := chatMessage{
+		Role:       string(m.Role),
+		Content:    m.Content,
+		ToolCallID: m.ToolCallID,
+	}
+	if len(m.ToolCalls) > 0 {
+		wm.ToolCalls = make([]chatToolCall, len(m.ToolCalls))
+		for i, tc := range m.ToolCalls {
+			wm.ToolCalls[i] = chatToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: chatFunctionCall{
+					Name:      tc.Name,
+					Arguments: string(tc.Arguments),
+				},
+			}
+		}
+	}
+	return wm
+}
+
+// fromWireMessage converts the assistant message of a chosen completion back
+// to the public shape.
+func fromWireMessage(wm chatMessage) Message {
+	m := Message{
+		Role:       Role(wm.Role),
+		Content:    wm.Content,
+		ToolCallID: wm.ToolCallID,
+	}
+	if len(wm.ToolCalls) > 0 {
+		m.ToolCalls = make([]ToolCall, len(wm.ToolCalls))
+		for i, tc := range wm.ToolCalls {
+			m.ToolCalls[i] = ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: json.RawMessage(tc.Function.Arguments),
+			}
+		}
+	}
+	return m
+}
+
+// empty reports whether a decoded chat message carries nothing usable — the
+// condition KindEmpty exists for.
+func (m chatMessage) empty() bool {
+	return m.Content == "" && len(m.ToolCalls) == 0
+}

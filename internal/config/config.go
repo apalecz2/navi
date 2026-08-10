@@ -162,12 +162,11 @@ type Telegram struct {
 // comes from the environment with no default (D9), the same rule Telegram's
 // BotToken follows.
 //
-// Unlike Telegram's fields, this one is read unconditionally with envString
-// rather than promoted to the required set: nothing in cmd/navi constructs a
-// model.Client yet this session (no loop consumes it), and required-when-
-// consumed means the process must not demand a credential it has no use for.
-// The session that first wires a Client into a running loop is the one that
-// moves this to envRequiredString, in the same commit.
+// Required whenever CHAT_TRANSPORT=telegram (session 11): that is the
+// commit that first wires a model.Client into a running loop (the
+// conversation loop), so required-when-consumed now means "consumed by
+// Chat." Optional otherwise, on the same required-when-consumed reasoning
+// every other borrowed credential in this struct follows.
 type Model struct {
 	OpenRouterAPIKey string
 }
@@ -222,10 +221,10 @@ func Load() (Config, error) {
 	notifiesTelegram := cfg.Transport.Notify == TelegramTransport
 	chatsTelegram := cfg.Transport.Chat == TelegramTransport
 
-	// BotToken: the scheduler's Send. The webhook never calls back out this
-	// session — no reply, no answerCallbackQuery, that's P2 — so Chat alone
-	// does not require it.
-	if notifiesTelegram {
+	// BotToken: the scheduler's Send, and — since session 11 — the
+	// conversation loop's reply. Either role configured independently as
+	// telegram requires it now that the webhook calls back out.
+	if notifiesTelegram || chatsTelegram {
 		if cfg.Telegram.BotToken, err = envRequiredString("TELEGRAM_BOT_TOKEN", ""); err != nil {
 			return Config{}, err
 		}
@@ -254,7 +253,16 @@ func Load() (Config, error) {
 		cfg.Telegram.WebhookSecret = envString("TELEGRAM_WEBHOOK_SECRET", "")
 	}
 
-	cfg.Model.OpenRouterAPIKey = envString("OPENROUTER_API_KEY", "")
+	// OpenRouterAPIKey: the conversation loop's model client, wired in this
+	// session. Required exactly when Chat is telegram, the same shape
+	// WebhookSecret uses — this is the commit that moves it off envString.
+	if chatsTelegram {
+		if cfg.Model.OpenRouterAPIKey, err = envRequiredString("OPENROUTER_API_KEY", ""); err != nil {
+			return Config{}, err
+		}
+	} else {
+		cfg.Model.OpenRouterAPIKey = envString("OPENROUTER_API_KEY", "")
+	}
 
 	return cfg, nil
 }

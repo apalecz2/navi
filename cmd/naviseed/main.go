@@ -36,6 +36,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/config"
+	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/materializer"
@@ -133,10 +134,15 @@ func run() error {
 		return err
 	}
 
-	// Last of all: the model client, against local fake tier endpoints
-	// rather than a real provider, needing nothing any earlier section left
-	// behind either.
-	return reportModelClient(ctx, st, log, cfg.Files.ModelRoutingPath())
+	// The model client, against local fake tier endpoints rather than a real
+	// provider, needing nothing any earlier section left behind either.
+	if err := reportModelClient(ctx, st, log, cfg.Files.ModelRoutingPath()); err != nil {
+		return err
+	}
+
+	// Last of all: the escalation ladder built on top of it - the session
+	// this repository is on right now.
+	return reportConversationLadder(ctx, st, table, cfg.Schedule.DefaultTZ, log)
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running
@@ -1118,12 +1124,32 @@ func reportConversations(ctx context.Context, st *store.Store, log *slog.Logger)
 	return reportWebhook(ctx, st, log)
 }
 
+// fakeDispatcher stands in for internal/conversation.Intake: it satisfies
+// telegram.Dispatcher without pulling a model client or an escalation
+// ladder into a webhook-only check. full simulates a saturated intake
+// buffer — Enqueue always returns false — without needing to actually fill
+// one.
+type fakeDispatcher struct {
+	full  bool
+	calls []transport.IncomingMessage
+}
+
+func (d *fakeDispatcher) Enqueue(msg transport.IncomingMessage) bool {
+	if d.full {
+		return false
+	}
+	d.calls = append(d.calls, msg)
+	return true
+}
+
 // reportWebhook drives telegram.Inbound.ServeHTTP directly, in process,
 // against the real store — the same "exercise the component without a
-// listener" style reportFire uses for the scheduler. It is what proves the
-// session's four "done when" cases by hand: secret rejection, allowlist
-// drop, acceptance, and update dedup through the actual handler rather than
-// only through the store method underneath it.
+// listener" style reportFire uses for the scheduler. It proves secret
+// rejection, allowlist drop, acceptance and update dedup through the actual
+// handler rather than only through the store method underneath it, and,
+// since session 11, that an accepted message is handed to the Dispatcher
+// exactly once — never on a deduped redelivery — and that a saturated
+// dispatcher still acknowledges the webhook while counting the drop.
 func reportWebhook(ctx context.Context, st *store.Store, log *slog.Logger) error {
 	fmt.Printf("\nwebhook  POST /webhook/telegram\n")
 
@@ -1135,47 +1161,60 @@ func reportWebhook(ctx context.Context, st *store.Store, log *slog.Logger) error
 	m := metrics.New()
 	m.RegisterInboundAccepted(telegram.Name)
 	m.RegisterInboundDropped("allowlist")
-	h := telegram.NewInbound(secret, allowedID, st, m, log.With("component", "webhook"))
+	m.RegisterInboundDropped("queue_full")
+	disp := &fakeDispatcher{}
+	h := telegram.NewInbound(secret, allowedID, st, disp, m, log.With("component", "webhook"))
 
-	post := func(secretHeader, body string) *httptest.ResponseRecorder {
+	post := func(handler http.Handler, secretHeader, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(body))
 		if secretHeader != "" {
 			req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secretHeader)
 		}
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req.WithContext(ctx))
+		handler.ServeHTTP(rec, req.WithContext(ctx))
 		return rec
 	}
 	update := func(id int, senderID, text string) string {
 		return fmt.Sprintf(`{"update_id":%d,"message":{"from":{"id":%s},"text":%q}}`, id, senderID, text)
 	}
 
-	wrong := post("wrong-secret", update(9001, allowedID, "hi"))
+	wrong := post(h, "wrong-secret", update(9001, allowedID, "hi"))
 	fmt.Printf("  wrong secret            status %d  %s\n",
 		wrong.Code, verdict(wrong.Code == http.StatusUnauthorized))
 
-	stranger := post(secret, update(9002, strangerID, "hi"))
+	stranger := post(h, secret, update(9002, strangerID, "hi"))
 	_, strangerErr := st.GetConversationByExternalID(ctx, telegram.Name, "9002")
 	strangerDropped := errors.Is(strangerErr, store.ErrNotFound)
 	fmt.Printf("  non-allowlisted sender  status %d  dropped, nothing stored %v  %s\n",
 		stranger.Code, strangerDropped, verdict(stranger.Code == http.StatusOK && strangerDropped))
 
-	accepted := post(secret, update(9003, allowedID, "naviseed webhook probe"))
+	accepted := post(h, secret, update(9003, allowedID, "naviseed webhook probe"))
 	row, err := st.GetConversationByExternalID(ctx, telegram.Name, "9003")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  allowlisted sender      status %d  content %q  %s\n",
-		accepted.Code, row.Content, verdict(accepted.Code == http.StatusOK && row.Content == "naviseed webhook probe"))
+	dispatched := len(disp.calls) == 1 && disp.calls[0].Text == "naviseed webhook probe"
+	fmt.Printf("  allowlisted sender      status %d  content %q  dispatched %v  %s\n",
+		accepted.Code, row.Content, dispatched,
+		verdict(accepted.Code == http.StatusOK && row.Content == "naviseed webhook probe" && dispatched))
 
-	redelivered := post(secret, update(9003, allowedID, "naviseed webhook probe, redelivered"))
+	redelivered := post(h, secret, update(9003, allowedID, "naviseed webhook probe, redelivered"))
 	again, err := st.GetConversationByExternalID(ctx, telegram.Name, "9003")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  duplicate update_id     status %d  same row %v, content unchanged %v  %s\n",
-		redelivered.Code, again.ID == row.ID, again.Content == row.Content,
-		verdict(redelivered.Code == http.StatusOK && again.ID == row.ID && again.Content == row.Content))
+	fmt.Printf("  duplicate update_id     status %d  same row %v, content unchanged %v, not re-dispatched %v  %s\n",
+		redelivered.Code, again.ID == row.ID, again.Content == row.Content, len(disp.calls) == 1,
+		verdict(redelivered.Code == http.StatusOK && again.ID == row.ID && again.Content == row.Content && len(disp.calls) == 1))
+
+	full := &fakeDispatcher{full: true}
+	hFull := telegram.NewInbound(secret, allowedID, st, full, m, log.With("component", "webhook"))
+	fullResp := post(hFull, secret, update(9004, allowedID, "queue full probe"))
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	queueFullCounted := strings.Contains(metricsRec.Body.String(), `navi_inbound_messages_dropped_total{reason="queue_full"} 1`)
+	fmt.Printf("  dispatcher queue full   status %d  drop counted %v  %s\n",
+		fullResp.Code, queueFullCounted, verdict(fullResp.Code == http.StatusOK && queueFullCounted))
 
 	return nil
 }
@@ -1673,6 +1712,292 @@ func strOrNull(p *string) string {
 		return "null"
 	}
 	return *p
+}
+
+// fakeSender stands in for the outbound Telegram transport: it records the
+// body of every reply the ladder sends instead of reaching a real chat.
+type fakeSender struct {
+	bodies []string
+}
+
+func (f *fakeSender) Send(ctx context.Context, msg transport.Outbound) (string, error) {
+	f.bodies = append(f.bodies, msg.Body)
+	return "fake-message-id", nil
+}
+
+func (f *fakeSender) last() string {
+	if len(f.bodies) == 0 {
+		return ""
+	}
+	return f.bodies[len(f.bodies)-1]
+}
+
+// toolCallServer answers every request with a single tool call, on the same
+// wire shape reportModelClient's okServer uses. argsJSON is the tool's raw
+// JSON arguments, marshaled here into the escaped string the
+// "arguments" field carries on the wire.
+func toolCallServer(toolName, argsJSON string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		argsEscaped, _ := json.Marshal(argsJSON)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":%q,"arguments":%s}}]},"finish_reason":"tool_calls"}]}`,
+			toolName, string(argsEscaped))
+	}))
+}
+
+// proseServer answers every request with plain content and no tool call —
+// the "no tool call when a write was expected" case (L4).
+func proseServer(text string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		textEscaped, _ := json.Marshal(text)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}]}`,
+			string(textEscaped))
+	}))
+}
+
+// authFailServer answers every request with the 401 a dead API key
+// produces against a real provider — classified model.KindMalformed, not
+// retryable, so the ladder should spend no wasted retry against it.
+func authFailServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error": {"message": "invalid api key", "type": "invalid_request_error"}}`)
+	}))
+}
+
+// truncate shortens s for a report line so a long confirmation or apology
+// doesn't wrap the table.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// reportConversationLadder drives internal/conversation.Ladder.Handle
+// directly against fake tier endpoints and a fake Sender - no real model
+// provider, no real Telegram bot - proving the escalation ladder's "done
+// when" bullets: a valid schedule creates the item and gets a reply; an
+// unsatisfiable one walks the whole ladder, writes nothing, and produces
+// four llm_calls rows; request_escalation jumps a tier and is recorded;
+// prose escalates rather than being accepted; a dead API key produces an
+// apology without a wasted retry; and one turn produces user, assistant and
+// tool rows in conversations.
+func reportConversationLadder(ctx context.Context, st *store.Store, table *defaults.Table, defaultTZ *time.Location, log *slog.Logger) error {
+	fmt.Println("\nconversation ladder")
+
+	mat := materializer.New(log.With("component", "materializer"), st, defaultTZ)
+	tools := agent.New(st, mat, table, defaultTZ)
+	m := metrics.New()
+	// The P5 persona slot, deliberately absent this session - GetPersona
+	// tolerates a missing file, so this path never needs to exist.
+	const personaPath = "config/persona.md.does-not-exist"
+
+	newLadder := func(tier1, tier2 *httptest.Server) (*conversation.Ladder, *fakeSender) {
+		tiers := []model.Tier{{Model: "naviseed-tier1", BaseURL: tier1.URL, TimeoutSeconds: 5}}
+		if tier2 != nil {
+			tiers = append(tiers, model.Tier{Model: "naviseed-tier2", BaseURL: tier2.URL, TimeoutSeconds: 5})
+		}
+		routing := &model.Routing{Tasks: map[model.Task]model.TaskRouting{
+			model.TaskCRUD: {Thinking: true, Tiers: tiers},
+		}}
+		client := model.New(log.With("component", "model"), routing, "", st, m)
+		sender := &fakeSender{}
+		return conversation.New(client, tools, routing, st, table, personaPath, defaultTZ, sender), sender
+	}
+
+	// 1. A tier-1 server that always returns a valid create_item call for
+	// "vitamins daily at 9am" - and, immediately after, read the turn back
+	// (done-when #6: one turn produces user, assistant, and tool rows).
+	{
+		userMsg := "Remind me to take vitamins daily at 9am"
+		if _, _, err := st.CreateConversation(ctx, domain.NewConversation{Role: domain.RoleUser, Content: userMsg}); err != nil {
+			return err
+		}
+
+		args := `{"title":"vitamins daily test","schedule":{"kind":"fixed","rrule":"FREQ=DAILY","at":"09:00"}}`
+		tier1 := toolCallServer("create_item", args)
+		defer tier1.Close()
+		ladder, sender := newLadder(tier1, nil)
+
+		err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: userMsg, Transport: telegram.Name})
+		if err != nil {
+			return err
+		}
+
+		items, err := st.ListActiveItems(ctx)
+		if err != nil {
+			return err
+		}
+		var created *domain.Item
+		for i := range items {
+			if items[i].Title == "vitamins daily test" {
+				created = &items[i]
+			}
+		}
+		var occCount int
+		if created != nil {
+			occs, oerr := st.ListOccurrencesForItem(ctx, created.ID)
+			if oerr != nil {
+				return oerr
+			}
+			occCount = len(occs)
+		}
+		ok1 := created != nil && occCount >= 3 && sender.last() != ""
+		fmt.Printf("  1  create end to end          item created=%v occurrences=%d reply=%q  %s\n",
+			created != nil, occCount, truncate(sender.last(), 60), verdict(ok1))
+
+		rows, err := st.ListRecentConversations(ctx, 10)
+		if err != nil {
+			return err
+		}
+		var hasUser, hasAssistant, hasTool bool
+		for _, r := range rows {
+			switch r.Role {
+			case domain.RoleUser:
+				hasUser = true
+			case domain.RoleAssistant:
+				hasAssistant = true
+			case domain.RoleTool:
+				hasTool = true
+			}
+		}
+		fmt.Printf("  6  conversations rows         user=%v assistant=%v tool=%v  %s\n",
+			hasUser, hasAssistant, hasTool, verdict(hasUser && hasAssistant && hasTool))
+	}
+
+	// 2. Both tiers always return an unsatisfiable schedule (the same
+	// gap-unsatisfiable fixture reportLayerRejections uses) - the whole
+	// ladder walks, four llm_calls rows, and nothing is written.
+	{
+		before, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		itemsBefore, err := st.ListActiveItems(ctx)
+		if err != nil {
+			return err
+		}
+
+		args := `{"title":"bad gap ladder test","schedule":{"kind":"fuzzy","period":"day","count":10,"min_gap_hours":8}}`
+		tier1 := toolCallServer("create_item", args)
+		defer tier1.Close()
+		tier2 := toolCallServer("create_item", args)
+		defer tier2.Close()
+		ladder, sender := newLadder(tier1, tier2)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "remind me about the impossible thing", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		after, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		itemsAfter, err := st.ListActiveItems(ctx)
+		if err != nil {
+			return err
+		}
+		callsMade := after - before
+		ok := callsMade == 4 && len(itemsAfter) == len(itemsBefore) &&
+			strings.Contains(strings.ToLower(sender.last()), "rephrase")
+		fmt.Printf("  2  ladder exhaustion          llm_calls +%d  items unchanged=%v  reply=%q  %s\n",
+			callsMade, len(itemsAfter) == len(itemsBefore), truncate(sender.last(), 60), verdict(ok))
+	}
+
+	// 3. request_escalation at tier 1, success at tier 2 - one retry
+	// skipped, the reason recorded verbatim.
+	{
+		before, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+
+		const reason = "the request references an item I cannot identify"
+		escArgs, _ := json.Marshal(map[string]string{"reason": reason})
+		tier1 := toolCallServer("request_escalation", string(escArgs))
+		defer tier1.Close()
+		createArgs := `{"title":"escalated create test","schedule":{"kind":"fixed","rrule":"FREQ=DAILY","at":"10:00"}}`
+		tier2 := toolCallServer("create_item", createArgs)
+		defer tier2.Close()
+		ladder, sender := newLadder(tier1, tier2)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "do the ambiguous thing", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		after, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		rows, err := st.ListLLMCalls(ctx, 1)
+		if err != nil {
+			return err
+		}
+		callsMade := after - before
+		escalatedOK := len(rows) == 1 && rows[0].Escalated && strOrNull(rows[0].EscalationReason) == reason
+		ok := callsMade == 2 && escalatedOK
+		fmt.Printf("  3  request_escalation         llm_calls +%d  escalation recorded=%v reply=%q  %s\n",
+			callsMade, escalatedOK, truncate(sender.last(), 60), verdict(ok))
+	}
+
+	// 4. Prose only, both tiers - escalates through the ladder rather than
+	// being accepted as an answer.
+	{
+		before, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		tier1 := proseServer("I'm not sure what you mean.")
+		defer tier1.Close()
+		tier2 := proseServer("Still not sure.")
+		defer tier2.Close()
+		ladder, sender := newLadder(tier1, tier2)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "hmm", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		after, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		callsMade := after - before
+		ok := callsMade == 4 && strings.Contains(strings.ToLower(sender.last()), "rephrase")
+		fmt.Printf("  4  prose escalates            llm_calls +%d  reply=%q  %s\n",
+			callsMade, truncate(sender.last(), 60), verdict(ok))
+	}
+
+	// 5. Both tiers return the 401 a dead OPENROUTER_API_KEY produces - no
+	// wasted retry (KindMalformed is not Retryable), an apology rather than
+	// a rephrase request, and nothing here touches the fire path: the
+	// scheduler package cannot import internal/model or internal/
+	// conversation at all, which is a compile-time property, not a runtime
+	// one - checkable independently with
+	// `go list -deps ./internal/scheduler | grep -c internal/model`.
+	{
+		before, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		tier1 := authFailServer()
+		defer tier1.Close()
+		tier2 := authFailServer()
+		defer tier2.Close()
+		ladder, sender := newLadder(tier1, tier2)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "remind me to do something", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		after, err := countLLMCalls(ctx, st)
+		if err != nil {
+			return err
+		}
+		callsMade := after - before
+		ok := callsMade == 2 && strings.Contains(strings.ToLower(sender.last()), "sorry")
+		fmt.Printf("  5  dead api key -> apology    llm_calls +%d  reply=%q  %s\n",
+			callsMade, truncate(sender.last(), 60), verdict(ok))
+	}
+
+	return nil
 }
 
 // reportAgentTools drives internal/agent.Tools with hand-written

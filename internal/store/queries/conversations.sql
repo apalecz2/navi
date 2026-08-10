@@ -13,3 +13,8 @@ WHERE id = ?;
 -- name: GetConversationByTransportExternalID :one
 SELECT * FROM conversations
 WHERE transport = ? AND external_id = ?;
+
+-- name: ListRecentConversations :many
+SELECT * FROM conversations
+ORDER BY created_at DESC, id DESC
+LIMIT ?;

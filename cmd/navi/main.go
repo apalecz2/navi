@@ -26,7 +26,9 @@ import (
 	// boundary.
 	_ "time/tzdata"
 
+	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/config"
+	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/copywriter"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
@@ -34,6 +36,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/httpapi"
 	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/metrics"
+	"github.com/aidenpaleczny/navi/internal/model"
 	"github.com/aidenpaleczny/navi/internal/reconciler"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/scheduler"
@@ -116,7 +119,15 @@ func run() error {
 			"notify_transport", notifier.Name())
 	}
 
-	chatWebhook, err := chatTransport(cfg.Transport.Chat, cfg.Telegram, st, m, log)
+	// The sweeper backfills the horizon by calling the materializer, so it holds
+	// the same instance the supervisor drives rather than one of its own.
+	// Built before chatTransport, which needs it too (the conversation
+	// loop's agent.Tools re-materializes on every write).
+	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
+
+	chatWebhook, chatIntake, err := chatTransport(cfg.Transport.Chat, cfg.Telegram,
+		cfg.Model.OpenRouterAPIKey, cfg.Files.ModelRoutingPath(), cfg.Files.PersonaPath(),
+		st, mat, table, cfg.Schedule.DefaultTZ, m, log)
 	if err != nil {
 		return err
 	}
@@ -126,16 +137,13 @@ func run() error {
 		// missing from the series entirely.
 		m.RegisterInboundAccepted(telegram.Name)
 		m.RegisterInboundDropped("allowlist")
+		m.RegisterInboundDropped("queue_full")
 	}
 
 	// Loops run under their own context so shutdown can drain HTTP first and
 	// cancel them second (D12).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
 	defer cancelLoops()
-
-	// The sweeper backfills the horizon by calling the materializer, so it holds
-	// the same instance the supervisor drives rather than one of its own.
-	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
 
 	// The scheduler's recovery window is measured back from now, which is process
 	// start (C9, Q-2).
@@ -150,13 +158,17 @@ func run() error {
 	m.RegisterTransition(string(domain.StatusPending), string(domain.StatusNotified), scheduler.Source)
 
 	sup := supervisor.New(log, h, m)
-	sup.Register(
+	loops := []supervisor.Loop{
 		mat.Loop(),
 		sched.Loop(),
 		copywriter.New(log.With("loop", copywriter.Name)).Loop(),
 		reconciler.New(log.With("loop", reconciler.Name)).Loop(),
 		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
-	)
+	}
+	if chatIntake != nil {
+		loops = append(loops, chatIntake.Loop())
+	}
+	sup.Register(loops...)
 	sup.Start(loopCtx)
 
 	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor, chatWebhook)
@@ -226,21 +238,41 @@ func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (schedul
 	}
 }
 
-// chatTransport resolves CHAT_TRANSPORT to an inbound webhook handler, or to
-// nil when nothing names it — today's default outside of P1 testing, in
-// which case /webhook/telegram is never registered (internal/httpapi.New).
+// chatTransport resolves CHAT_TRANSPORT to an inbound webhook handler and
+// the conversation loop that drains it, or to (nil, nil) when nothing names
+// it — today's default outside of P1 testing, in which case
+// /webhook/telegram is never registered (internal/httpapi.New) and no
+// conversation loop is ever started.
 //
 // An unknown non-empty name is a boot failure, same reasoning as
 // notifyTransport: a typo that quietly ran with no inbound route would be a
 // container that looks entirely healthy and simply never hears from anyone.
-func chatTransport(name string, tg config.Telegram, st telegram.ConversationStore, m telegram.Metrics, log *slog.Logger) (http.Handler, error) {
+//
+// Since session 11: building the webhook handler also builds the model
+// client, the tool catalog, and the escalation ladder behind it — the whole
+// conversational stack lives or dies with CHAT_TRANSPORT, on the same
+// required-when-consumed reasoning internal/config's OpenRouterAPIKey and
+// BotToken changes follow.
+func chatTransport(name string, tg config.Telegram, apiKey, routingPath, personaPath string,
+	st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location,
+	m *metrics.Metrics, log *slog.Logger) (http.Handler, *conversation.Intake, error) {
 	switch name {
 	case "":
-		return nil, nil
+		return nil, nil, nil
 	case config.TelegramTransport:
-		return telegram.NewInbound(tg.WebhookSecret, tg.AllowedSenderID, st, m, log.With("transport", telegram.Name)), nil
+		routing, err := model.LoadRouting(routingPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		client := model.New(log.With("component", "model"), routing, apiKey, st, m)
+		tools := agent.New(st, mat, table, defaultTZ)
+		chatSender := telegram.New(tg.BotToken, tg.AllowedSenderID)
+		ladder := conversation.New(client, tools, routing, st, table, personaPath, defaultTZ, chatSender)
+		intake := conversation.NewIntake(ladder)
+		inbound := telegram.NewInbound(tg.WebhookSecret, tg.AllowedSenderID, st, intake, m, log.With("transport", telegram.Name))
+		return inbound, intake, nil
 	default:
-		return nil, fmt.Errorf("config: CHAT_TRANSPORT %q is not a known adapter", name)
+		return nil, nil, fmt.Errorf("config: CHAT_TRANSPORT %q is not a known adapter", name)
 	}
 }
 

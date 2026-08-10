@@ -94,6 +94,14 @@ func (r *Routing) Validate() error {
 	return nil
 }
 
+// TierCount reports how many tiers task is configured with, 0 if the task
+// is not configured at all. tierFor only answers "is this one tier index
+// valid" - the escalation ladder needs to know when it has run out of tiers
+// to escalate to, which is a different question.
+func (r *Routing) TierCount(task Task) int {
+	return len(r.Tasks[task].Tiers)
+}
+
 // tierFor resolves (task, tier) to its configuration. tier is 1-indexed, to
 // match the "Tier 1" / "Tier 2" columns the routing table and llm_calls both
 // use. The returned error is always a *Error with Kind KindConfig — a

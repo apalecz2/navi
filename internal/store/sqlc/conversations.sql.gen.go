@@ -105,3 +105,42 @@ func (q *Queries) GetConversationByTransportExternalID(ctx context.Context, arg 
 	)
 	return i, err
 }
+
+const listRecentConversations = `-- name: ListRecentConversations :many
+SELECT id, role, content, tool_calls, tool_call_id, transport, external_id, context_ref, created_at FROM conversations
+ORDER BY created_at DESC, id DESC
+LIMIT ?
+`
+
+func (q *Queries) ListRecentConversations(ctx context.Context, limit int64) ([]Conversation, error) {
+	rows, err := q.db.QueryContext(ctx, listRecentConversations, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Conversation{}
+	for rows.Next() {
+		var i Conversation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Role,
+			&i.Content,
+			&i.ToolCalls,
+			&i.ToolCallID,
+			&i.Transport,
+			&i.ExternalID,
+			&i.ContextRef,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

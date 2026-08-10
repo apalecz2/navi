@@ -100,3 +100,23 @@ func (s *Store) GetConversationByExternalID(ctx context.Context, transport, exte
 	}
 	return toDomainConversation(row)
 }
+
+// ListRecentConversations returns the most recent conversation rows, newest
+// first, capped at limit — naviseed's way to inspect a turn's full
+// transcript, on the same shape ListLLMCalls uses. Nothing in the write or
+// fire path reads it.
+func (s *Store) ListRecentConversations(ctx context.Context, limit int) ([]domain.Conversation, error) {
+	rows, err := s.read.ListRecentConversations(ctx, int64(limit))
+	if err != nil {
+		return nil, fmt.Errorf("store: list recent conversations: %w", err)
+	}
+	out := make([]domain.Conversation, 0, len(rows))
+	for _, row := range rows {
+		c, err := toDomainConversation(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}

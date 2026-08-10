@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/transport"
 )
 
 // maxUpdateBytes bounds the body a webhook request is allowed to carry.
@@ -22,6 +24,16 @@ const maxUpdateBytes = 1 << 20 // 1 MiB
 // discipline internal/httpapi's own Store interface uses.
 type ConversationStore interface {
 	CreateConversation(ctx context.Context, n domain.NewConversation) (domain.Conversation, bool, error)
+}
+
+// Dispatcher hands an accepted inbound message to whatever processes it
+// next — internal/conversation.Intake, since P1. Optional: nil means
+// nothing is wired to consume messages, the same as before this session.
+// Enqueue must not block: the webhook has to return 2xx promptly, well
+// before a model call could finish, so it reports whether the message was
+// accepted rather than waiting for room.
+type Dispatcher interface {
+	Enqueue(msg transport.IncomingMessage) bool
 }
 
 // Metrics is this handler's slice of the registry.
@@ -43,13 +55,17 @@ type Inbound struct {
 	secret          string
 	allowedSenderID string
 	store           ConversationStore
+	dispatcher      Dispatcher
 	metrics         Metrics
 	log             *slog.Logger
 }
 
 // NewInbound returns the webhook handler for CHAT_TRANSPORT=telegram.
-func NewInbound(secret, allowedSenderID string, store ConversationStore, m Metrics, log *slog.Logger) *Inbound {
-	return &Inbound{secret: secret, allowedSenderID: allowedSenderID, store: store, metrics: m, log: log}
+// dispatcher may be nil, in which case an accepted message is recorded but
+// nothing is ever notified to process it — the state naviseed's
+// webhook-only checks still exercise.
+func NewInbound(secret, allowedSenderID string, store ConversationStore, dispatcher Dispatcher, m Metrics, log *slog.Logger) *Inbound {
+	return &Inbound{secret: secret, allowedSenderID: allowedSenderID, store: store, dispatcher: dispatcher, metrics: m, log: log}
 }
 
 // update is the subset of Telegram's Update this handler decodes: enough to
@@ -148,6 +164,24 @@ func (h *Inbound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if inserted {
 		h.metrics.IncInboundAccepted(Name)
+
+		// Only a genuinely new message is handed off — never a Telegram
+		// redelivery that hit the dedup path, which would otherwise
+		// process the same request twice. Enqueue is non-blocking, so a
+		// full queue never delays this response; the message is already
+		// durably recorded above regardless of whether it fits.
+		if h.dispatcher != nil {
+			msg := transport.IncomingMessage{
+				SenderID:   strconv.FormatInt(sender.ID, 10),
+				Text:       upd.Message.Text,
+				Transport:  Name,
+				ExternalID: externalID,
+				ReceivedAt: time.Now(),
+			}
+			if !h.dispatcher.Enqueue(msg) {
+				h.metrics.IncInboundDropped("queue_full")
+			}
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }

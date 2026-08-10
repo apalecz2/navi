@@ -33,6 +33,7 @@ var registrations = []registration{
 	{"create_item", "Create a new reminder or event with a schedule.", handleCreateItem, CreateItemArgs{}},
 	{"update_item", "Change an existing item's fields or schedule, at a chosen scope.", handleUpdateItem, UpdateItemArgs{}},
 	{"delete_item", "Archive an item and remove its pending occurrences. Requires confirmed=true.", handleDeleteItem, DeleteItemArgs{}},
+	{"request_escalation", "Terminate this turn and retry at the next tier. Call when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable. Writes nothing.", handleRequestEscalation, RequestEscalationArgs{}},
 }
 
 // Call looks a tool up by name and runs it. It is the whole of what

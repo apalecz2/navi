@@ -77,3 +77,10 @@ type DeleteItemArgs struct {
 	ItemID    string `json:"item_id" jsonschema:"required"`
 	Confirmed bool   `json:"confirmed"`
 }
+
+// RequestEscalationArgs is request_escalation's arguments - the escalation
+// ladder's own trigger (docs/06-agent-spec.md#escalation-ladder, L4), not
+// one of the four P1 CRUD tools. It writes nothing; see escalation.go.
+type RequestEscalationArgs struct {
+	Reason string `json:"reason" jsonschema:"required"`
+}

@@ -30,6 +30,39 @@ type request struct {
 	log *slog.Logger
 }
 
+// PlanFor computes the store.Plan for one item, given its schedule, a
+// resolved Run from Begin, and its existing future rows - request.plan made
+// reachable from outside this package for a caller that writes an item and
+// re-materializes it in the same transaction (internal/agent's create_item
+// and update_item, P1).
+//
+// It is pure: no I/O, safe to call from inside an open write transaction.
+// existing must come from inside that transaction, for the same staleness
+// reason MaterializeItem's own doc comment gives - a read taken before the
+// transaction opened can be stale by the time the writes land.
+//
+// sched is ignored when item is inactive or archived, mirroring m.one: an
+// item with no future occurrences at all needs no schedule to plan an empty
+// set, which is delete_item's whole mechanism (an archived item's PlanFor
+// call passes a zero schedule.Schedule).
+func (m *Materializer) PlanFor(item domain.Item, sched schedule.Schedule, r run, existing []domain.Occurrence) (store.Plan, error) {
+	loc, err := r.zones.For(item)
+	if err != nil {
+		return store.Plan{}, err
+	}
+
+	rq := request{
+		item:     item,
+		schedule: sched,
+		generate: item.Active && item.ArchivedAt == nil,
+		loc:      loc,
+		run:      r,
+		rnd:      m.newRand(),
+		log:      m.log,
+	}
+	return rq.plan(existing)
+}
+
 // plan decides what to delete and what to insert, given the item's future rows
 // as they are inside the write transaction.
 //

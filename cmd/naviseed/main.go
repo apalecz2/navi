@@ -34,6 +34,7 @@ import (
 	// zone, and a scratch image has no /usr/share/zoneinfo.
 	_ "time/tzdata"
 
+	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
@@ -109,6 +110,14 @@ func run() error {
 	// and the rows written here are the ones that move when it changes.
 	reportDST()
 	if err := reportMaterialization(ctx, st, cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// After materialization, since it needs a real materializer and defaults
+	// table, both already resolved by that point, and before fire, so the
+	// items and occurrences it writes are not noise the fire-path assertions
+	// have to account for.
+	if err := reportAgentTools(ctx, st, table, cfg.Schedule.DefaultTZ, log); err != nil {
 		return err
 	}
 
@@ -1664,4 +1673,446 @@ func strOrNull(p *string) string {
 		return "null"
 	}
 	return *p
+}
+
+// reportAgentTools drives internal/agent.Tools with hand-written
+// json.RawMessage, exactly as a model's tool call would arrive, and checks
+// every layer's rejection shape plus the one-transaction guarantee for real.
+// No model client exists yet - session 10's whole point is that nothing here
+// needs one (docs/06-agent-spec.md#tool-catalog).
+//
+// It runs after materialization, since it needs a real materializer and
+// defaults table, and before fire, so the items and occurrences it writes
+// are not noise the fire-path assertions have to account for.
+func reportAgentTools(ctx context.Context, st *store.Store, table *defaults.Table, defaultTZ *time.Location, log *slog.Logger) error {
+	mat := materializer.New(log.With("component", "materializer"), st, defaultTZ)
+	t := agent.New(st, mat, table, defaultTZ)
+
+	fmt.Println("\nagent tool catalog")
+	for _, tool := range t.Catalog() {
+		fmt.Printf("  %-14s %s\n", tool.Name, tool.Description)
+	}
+
+	if err := reportListItems(ctx, t); err != nil {
+		return err
+	}
+	if err := reportCreateItem(ctx, t, st); err != nil {
+		return err
+	}
+	if err := reportLayerRejections(ctx, t); err != nil {
+		return err
+	}
+	if err := reportUpdateScopes(ctx, t, st, mat); err != nil {
+		return err
+	}
+	return reportDeleteItem(ctx, t, st)
+}
+
+// callTool marshals args and drives them through Tools.Call, exactly as a
+// model's structured tool call would arrive on the wire.
+func callTool(ctx context.Context, t *agent.Tools, name string, args any) (agent.Result, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return agent.Result{}, err
+	}
+	return t.Call(ctx, name, raw)
+}
+
+// reportListItems is a smoke test: list_items with the default filter
+// returns without error over whatever is in the table by this point in the
+// run.
+func reportListItems(ctx context.Context, t *agent.Tools) error {
+	res, err := callTool(ctx, t, "list_items", agent.ListItemsArgs{})
+	fmt.Printf("\nagent list_items  %d item(s)  %s\n", len(res.Items), verdict(err == nil))
+	return err
+}
+
+// reportCreateItem drives create_item's happy path and its rejection path,
+// proving two of the session's "done when" bullets: a valid schedule writes
+// the item and its occurrences in one transaction and returns three real
+// timestamps, and a failing schedule leaves no item and no occurrences
+// behind.
+func reportCreateItem(ctx context.Context, t *agent.Tools, st *store.Store) error {
+	before, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return err
+	}
+
+	res, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "agent create test",
+		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("09:30")},
+	})
+	if err != nil {
+		return fmt.Errorf("naviseed: create_item happy path: %w", err)
+	}
+
+	timestampsOK := len(res.NextOccurrences) == 3
+	for _, occ := range res.NextOccurrences {
+		if _, err := domain.ParseTime(occ.StartsAt); err != nil {
+			timestampsOK = false
+		}
+	}
+	fmt.Println("\nagent create_item")
+	fmt.Printf("  valid schedule  item %s  next_occurrences %d  %s\n",
+		res.Item.ID, len(res.NextOccurrences), verdict(timestampsOK))
+
+	occs, err := st.ListOccurrencesForItem(ctx, res.Item.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    %d occurrence(s) written in the same transaction  %s\n",
+		len(occs), verdict(len(occs) >= 3))
+
+	// A schedule that fails Layer 2 (one_off in the past) must leave no item
+	// and no occurrences behind: Layer 3 never opens a transaction, because
+	// Layer 2 rejects first.
+	past := time.Now().AddDate(0, 0, -1).Format("2006-01-02T15:04:05")
+	_, err = callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "agent create bad",
+		Schedule: schedule.Schedule{Kind: schedule.KindOneOff, At: ptr(past)},
+	})
+	var ve *domain.ValidationError
+	rejected := errors.As(err, &ve)
+
+	after, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  failing schedule  rejected=%v rule=%s  active items %d -> %d  %s\n",
+		rejected, ruleOf(ve), len(before), len(after),
+		verdict(rejected && len(after) == len(before)+1))
+	return nil
+}
+
+// reportLayerRejections drives one rejection per layer, including the
+// unknown-field case Layer 1 owns, and checks each fires the named rule -
+// the shape 07-api-spec.md's error body specifies.
+func reportLayerRejections(ctx context.Context, t *agent.Tools) error {
+	cases := []struct {
+		label string
+		tool  string
+		raw   string
+		want  string
+	}{
+		{
+			"layer 1  unknown field",
+			"create_item",
+			`{"titel":"x","schedule":{"kind":"fixed","rrule":"FREQ=DAILY","at":"09:00"}}`,
+			"unknown_field",
+		},
+		{
+			"layer 1  bad enum",
+			"list_items",
+			`{"filter":"sometimes"}`,
+			"enum",
+		},
+		{
+			"layer 2  gap unsatisfiable",
+			"create_item",
+			`{"title":"bad gap","schedule":{"kind":"fuzzy","period":"day","count":10,"min_gap_hours":8}}`,
+			"gap_satisfiable",
+		},
+		{
+			"layer 2  item_id does not resolve",
+			"delete_item",
+			`{"item_id":"nonexistent","confirmed":true}`,
+			"item_exists",
+		},
+	}
+
+	fmt.Println("\nagent layer rejections")
+	for _, c := range cases {
+		_, err := t.Call(ctx, c.tool, json.RawMessage(c.raw))
+		var ve *domain.ValidationError
+		ok := errors.As(err, &ve) && ve.Rule == c.want
+		mark := ""
+		if !ok {
+			mark = "  !!"
+		}
+		fmt.Printf("  %-26s rule=%-18s field=%-14s %-60s %s%s\n",
+			c.label, ruleOf(ve), fieldOf(ve), messageOf(ve), verdict(ok), mark)
+	}
+	return nil
+}
+
+// reportUpdateScopes drives update_item through all three edit scopes plus
+// the field-level diff, against one item created for this section alone.
+func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, mat *materializer.Materializer) error {
+	created, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "agent update scopes",
+		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("07:00")},
+	})
+	if err != nil {
+		return err
+	}
+	itemID := created.Item.ID
+
+	fmt.Println("\nagent update_item scopes")
+
+	// future_all: every future pending row changes.
+	beforeIDs, err := pendingIDs(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	res, err := callTool(ctx, t, "update_item", agent.UpdateItemArgs{
+		ItemID: itemID,
+		Scope:  agent.ScopeFutureAll,
+		Changes: agent.ItemChanges{
+			Schedule: &schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("20:00")},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	afterIDs, err := pendingIDs(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  future_all  deleted=%d inserted=%d  every id changed=%v  %s\n",
+		res.Applied.Deleted, res.Applied.Inserted, disjoint(beforeIDs, afterIDs),
+		verdict(res.Applied.Deleted > 0 && res.Applied.Inserted > 0 && disjoint(beforeIDs, afterIDs)))
+
+	// from_date: rows before the date are untouched, rows after change.
+	from := time.Now().AddDate(0, 0, 7)
+	beforeRows, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	_, err = callTool(ctx, t, "update_item", agent.UpdateItemArgs{
+		ItemID:   itemID,
+		Scope:    agent.ScopeFromDate,
+		FromDate: ptr(from.Format(domain.DateLayout)),
+		Changes: agent.ItemChanges{
+			Schedule: &schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("21:15")},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	afterRows, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	beforeUntouched := true
+	for _, occ := range beforeRows {
+		if occ.StartsAt.After(from) {
+			continue
+		}
+		if !stillPresent(afterRows, occ) {
+			beforeUntouched = false
+		}
+	}
+	changedAfter := false
+	for _, occ := range afterRows {
+		if occ.StartsAt.After(from) && !stillPresent(beforeRows, occ) {
+			changedAfter = true
+		}
+	}
+	fmt.Printf("  from_date   %s  rows before untouched=%v  rows after changed=%v  %s\n",
+		from.Format(domain.DateLayout), beforeUntouched, changedAfter,
+		verdict(beforeUntouched && changedAfter))
+
+	// single: retime one occurrence, mark is_override, survive a full
+	// nightly pass.
+	rows, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("naviseed: update_item single: no pending occurrence to retime")
+	}
+	target := rows[0]
+	retimeAt := time.Now().Add(48 * time.Hour).Format("2006-01-02T15:04:05")
+	_, err = callTool(ctx, t, "update_item", agent.UpdateItemArgs{
+		ItemID:       itemID,
+		Scope:        agent.ScopeSingle,
+		OccurrenceID: ptr(target.ID),
+		Changes: agent.ItemChanges{
+			Schedule: &schedule.Schedule{Kind: schedule.KindOneOff, At: ptr(retimeAt)},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	retimed, err := st.GetOccurrence(ctx, target.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := mat.All(ctx); err != nil {
+		return err
+	}
+	survived, err := st.GetOccurrence(ctx, target.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  single      occurrence %s  is_override=%v  survives a materializer run=%v  %s\n",
+		target.ID, retimed.IsOverride, survived.StartsAt.Equal(retimed.StartsAt),
+		verdict(retimed.IsOverride && survived.StartsAt.Equal(retimed.StartsAt)))
+
+	// title-only: not one occurrence row is touched.
+	before2, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	_, err = callTool(ctx, t, "update_item", agent.UpdateItemArgs{
+		ItemID:  itemID,
+		Changes: agent.ItemChanges{Title: ptr("agent update scopes (renamed)")},
+	})
+	if err != nil {
+		return err
+	}
+	after2, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  title-only  occurrence set unchanged=%v  %s\n",
+		sameRows(before2, after2), verdict(sameRows(before2, after2)))
+	return nil
+}
+
+// reportDeleteItem drives delete_item's confirmation gate and its A7
+// mechanics: nothing is written without confirmed=true, and archiving
+// preserves resolved history.
+func reportDeleteItem(ctx context.Context, t *agent.Tools, st *store.Store) error {
+	created, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "agent delete test",
+		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("12:00")},
+	})
+	if err != nil {
+		return err
+	}
+	itemID := created.Item.ID
+
+	// Seed one resolved occurrence so history survival is a real check
+	// rather than an empty set trivially "surviving."
+	history, err := st.CreateOccurrence(ctx, domain.NewOccurrence{
+		ItemID:   itemID,
+		StartsAt: time.Now().Add(-time.Hour),
+		Status:   ptr(domain.StatusCompleted),
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("\nagent delete_item")
+
+	_, err = callTool(ctx, t, "delete_item", agent.DeleteItemArgs{ItemID: itemID, Confirmed: false})
+	var ve *domain.ValidationError
+	rejected := errors.As(err, &ve)
+	stillActive, err := st.GetItem(ctx, itemID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  unconfirmed  rejected=%v rule=%s  archived_at %s  %s\n",
+		rejected, ruleOf(ve), presence(stillActive.ArchivedAt != nil),
+		verdict(rejected && stillActive.ArchivedAt == nil))
+
+	_, err = callTool(ctx, t, "delete_item", agent.DeleteItemArgs{ItemID: itemID, Confirmed: true})
+	if err != nil {
+		return err
+	}
+	archived, err := st.GetItem(ctx, itemID)
+	if err != nil {
+		return err
+	}
+	pending, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return err
+	}
+	survivor, err := st.GetOccurrence(ctx, history.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  confirmed    archived_at %s  pending remaining=%d  history status=%s  %s\n",
+		presence(archived.ArchivedAt != nil), len(pending), survivor.Status,
+		verdict(archived.ArchivedAt != nil && len(pending) == 0 && survivor.Status == domain.StatusCompleted))
+	return nil
+}
+
+func ruleOf(ve *domain.ValidationError) string {
+	if ve == nil {
+		return ""
+	}
+	return ve.Rule
+}
+
+func fieldOf(ve *domain.ValidationError) string {
+	if ve == nil {
+		return ""
+	}
+	return ve.Field
+}
+
+func messageOf(ve *domain.ValidationError) string {
+	if ve == nil {
+		return ""
+	}
+	return ve.Message
+}
+
+func pendingRows(ctx context.Context, st *store.Store, itemID string) ([]domain.Occurrence, error) {
+	rows, err := st.ListOccurrencesForItem(ctx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Occurrence, 0, len(rows))
+	for _, occ := range rows {
+		if occ.Status == domain.StatusPending {
+			out = append(out, occ)
+		}
+	}
+	return out, nil
+}
+
+func pendingIDs(ctx context.Context, st *store.Store, itemID string) (map[string]bool, error) {
+	rows, err := pendingRows(ctx, st, itemID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool, len(rows))
+	for _, occ := range rows {
+		ids[occ.ID] = true
+	}
+	return ids, nil
+}
+
+// disjoint reports whether no id in after also appears in before - the
+// "every id changed" check for future_all, which deletes and reinserts
+// rather than updating in place.
+func disjoint(before, after map[string]bool) bool {
+	if len(after) == 0 {
+		return false
+	}
+	for id := range after {
+		if before[id] {
+			return false
+		}
+	}
+	return true
+}
+
+func stillPresent(rows []domain.Occurrence, target domain.Occurrence) bool {
+	for _, occ := range rows {
+		if occ.ID == target.ID && occ.StartsAt.Equal(target.StartsAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRows(a, b []domain.Occurrence) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	idx := make(map[string]time.Time, len(a))
+	for _, occ := range a {
+		idx[occ.ID] = occ.StartsAt
+	}
+	for _, occ := range b {
+		want, ok := idx[occ.ID]
+		if !ok || !want.Equal(occ.StartsAt) {
+			return false
+		}
+	}
+	return true
 }

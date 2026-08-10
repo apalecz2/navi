@@ -141,6 +141,13 @@ func (r run) paused(item domain.Item, at time.Time) bool {
 	return at.Before(r.pause) || item.IsPaused(at)
 }
 
+// Now returns the floor a Begin caller resolved, the counterpart read to
+// WithFloor's write - both exported so a caller outside this package (P1's
+// internal/agent) can use the same instant Validate and PlanFor both bound
+// against as the "now" it passes to the store, rather than taking a second,
+// possibly-different reading of the clock.
+func (r run) Now() time.Time { return r.now }
+
 // Tick runs the nightly materialization once per local day.
 //
 // The gate is here rather than in the ticker for the reason Interval records: a
@@ -227,6 +234,35 @@ func (m *Materializer) Item(ctx context.Context, id string) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Items: 1, Applied: applied, Through: r.to}, nil
+}
+
+// Begin resolves the clock, the horizon, which zone each item's wall clocks
+// mean, and where the global pause ends - exactly what a nightly or
+// single-item run resolves for itself, exported so a caller elsewhere in
+// this codebase (internal/agent's create_item and update_item, P1) can hold
+// the same values across a write it is about to make instead of re-deriving
+// "now" a second time. Pair it with PlanFor.
+//
+// It returns the unexported run type. A caller outside this package assigns
+// the result with := and passes it straight into PlanFor or WithFloor
+// without ever needing to spell the type's name - the same reason a sealed
+// interface's concrete type stays unexported while its methods do not.
+func (m *Materializer) Begin(ctx context.Context) (run, error) {
+	return m.begin(ctx)
+}
+
+// WithFloor returns a copy of r with its floor - the "now" that both
+// materializeTx's existing-row filter and expand()'s own window check bound
+// against - moved to at, leaving the horizon ceiling untouched.
+//
+// This is update_item's scope=from_date mechanism in its entirety
+// (05-schedule-spec.md#edit-scope): "bounded to start at a given date" is not
+// a second code path, it is future_all's own machinery run with the floor
+// moved forward, so nothing before at is read, planned, or touched by either
+// check - not just "not deleted."
+func (r run) WithFloor(at time.Time) run {
+	r.now = at
+	return r
 }
 
 // begin resolves everything a run holds fixed.

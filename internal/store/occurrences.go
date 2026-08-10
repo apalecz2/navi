@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -67,6 +68,57 @@ func (s *Store) GetOccurrence(ctx context.Context, id string) (domain.Occurrence
 		return domain.Occurrence{}, notFound("store: get occurrence", err)
 	}
 	return toDomainOccurrence(row)
+}
+
+// LiveOccurrence returns an occurrence that belongs to itemID and is still
+// an editable pending row, or a *domain.ValidationError naming why it is
+// not - update_item's scope=single Layer 2 check.
+func (s *Store) LiveOccurrence(ctx context.Context, occurrenceID, itemID string) (domain.Occurrence, error) {
+	occ, err := s.GetOccurrence(ctx, occurrenceID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.Occurrence{}, domain.Invalid("occurrence_exists", "occurrence_id",
+				"occurrence %q does not exist", occurrenceID)
+		}
+		return domain.Occurrence{}, fmt.Errorf("store: live occurrence: %w", err)
+	}
+	if occ.ItemID != itemID {
+		return domain.Occurrence{}, domain.Invalid("occurrence_exists", "occurrence_id",
+			"occurrence %q does not belong to item %q", occurrenceID, itemID)
+	}
+	if occ.Status != domain.StatusPending || occ.IsOverride {
+		return domain.Occurrence{}, domain.Invalid("occurrence_editable", "occurrence_id",
+			"occurrence %q is not an editable pending occurrence", occurrenceID)
+	}
+	return occ, nil
+}
+
+// UpdateOccurrenceOverride retimes exactly one of an item's pending, future,
+// non-override occurrences and marks it is_override, so the next
+// materialization run leaves it alone. This is update_item's scope=single
+// mechanism (docs/05-schedule-spec.md#edit-scope): "modify ... exactly one
+// occurrence, set is_override = 1." It bypasses materializeTx entirely,
+// since is_override rows are exempt from the plan/delete cycle by design -
+// the guard is the same shape as DeleteFuturePendingOccurrence's.
+func (s *Store) UpdateOccurrenceOverride(ctx context.Context, occurrenceID, itemID string, startsAt, now time.Time) (domain.Occurrence, error) {
+	var occ domain.Occurrence
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		row, err := q.OverrideFuturePendingOccurrence(ctx, sqlc.OverrideFuturePendingOccurrenceParams{
+			StartsAt:   domain.FormatTime(startsAt),
+			ID:         occurrenceID,
+			ItemID:     itemID,
+			StartsAt_2: domain.FormatTime(now),
+		})
+		if err != nil {
+			return notFound("store: override occurrence", err)
+		}
+		occ, err = toDomainOccurrence(row)
+		return err
+	})
+	if err != nil {
+		return domain.Occurrence{}, err
+	}
+	return occ, nil
 }
 
 // ListOccurrencesForItem returns an item's whole history in start order.

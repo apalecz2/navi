@@ -30,6 +30,29 @@ WHERE id = ?
   AND is_override = 0
   AND starts_at > ?;
 
+-- OverrideFuturePendingOccurrence is update_item's scope=single mechanism
+-- (05-schedule-spec.md#edit-scope): retime exactly one occurrence and mark it
+-- is_override, so the materializer's plan/delete cycle leaves it alone from
+-- then on. The guard mirrors DeleteFuturePendingOccurrence's exactly - only a
+-- pending, non-override, still-future row can be touched this way.
+--
+-- RETURNING spells out its column list rather than using *, and this comment
+-- is plain ASCII, matching items.sql's UpdateItem/ArchiveItem - see the
+-- comment there for the sqlc bug this avoids.
+--
+-- name: OverrideFuturePendingOccurrence :one
+UPDATE occurrences
+SET starts_at = ?, is_override = 1
+WHERE id = ?
+  AND item_id = ?
+  AND status = 'pending'
+  AND is_override = 0
+  AND starts_at > ?
+RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
+    snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
+    resolution_source, message_text, message_model, message_generated_at,
+    generation_attempts, generation_pass, created_at;
+
 -- name: CountPendingOverdue :one
 SELECT count(*) FROM occurrences o
 JOIN items i ON i.id = o.item_id

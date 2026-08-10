@@ -1,0 +1,79 @@
+package agent
+
+import (
+	"encoding/json"
+
+	"github.com/aidenpaleczny/navi/internal/schedule"
+)
+
+// The four P1 tool argument structs, from docs/06-agent-spec.md#tool-catalog.
+// Optional fields are pointers rather than zero values: 0 and omitted are the
+// same value for a plain int, and priority has a non-zero default, so a
+// caller that omits the field would otherwise silently get priority zero and
+// fail validation. This is also why CreateItemArgs.Priority is *int here
+// rather than the unpointered int the doc's own code sample shows - the
+// doc's prose says the pointer is the point, and the sample predates it (see
+// the session plan for the full note).
+//
+// jsonschema tags drive two independent readers off one string: schema.go's
+// generator, and decode.go's validateArgs. That is the whole reason to avoid
+// a second, differently-spelled tag namespace for validation.
+
+// ListItemsArgs is list_items' arguments.
+type ListItemsArgs struct {
+	Filter string `json:"filter,omitempty" jsonschema:"enum=active,enum=all,enum=paused,default=active"`
+}
+
+// CreateItemArgs is create_item's arguments.
+type CreateItemArgs struct {
+	Title              string            `json:"title" jsonschema:"required"`
+	Schedule           schedule.Schedule `json:"schedule" jsonschema:"required"`
+	Notes              *string           `json:"notes,omitempty"`
+	Kind               string            `json:"kind,omitempty" jsonschema:"enum=reminder,enum=event,default=reminder"`
+	TZ                 *string           `json:"tz,omitempty"`
+	TZMode             string            `json:"tz_mode,omitempty" jsonschema:"enum=fixed,enum=floating,default=floating"`
+	NotifyPolicy       string            `json:"notify_policy,omitempty" jsonschema:"enum=at_time,enum=silent,enum=digest,default=at_time"`
+	Priority           *int              `json:"priority,omitempty" jsonschema:"minimum=1,maximum=5,default=3"`
+	GracePeriodMinutes *int              `json:"grace_period_minutes,omitempty"`
+	ReconcileAt        *string           `json:"reconcile_at,omitempty"`
+}
+
+// Edit scopes, docs/05-schedule-spec.md#edit-scope.
+const (
+	ScopeFutureAll = "future_all"
+	ScopeFromDate  = "from_date"
+	ScopeSingle    = "single"
+)
+
+// UpdateItemArgs is update_item's arguments.
+type UpdateItemArgs struct {
+	ItemID       string      `json:"item_id" jsonschema:"required"`
+	Scope        string      `json:"scope,omitempty" jsonschema:"enum=future_all,enum=from_date,enum=single,default=future_all"`
+	FromDate     *string     `json:"from_date,omitempty"`
+	OccurrenceID *string     `json:"occurrence_id,omitempty"`
+	Changes      ItemChanges `json:"changes" jsonschema:"required"`
+}
+
+// ItemChanges is "only fields being changed" - not spelled out in
+// 06-agent-spec.md, designed here as an all-optional mirror of
+// CreateItemArgs, reusing schedule.Schedule directly for the nested
+// schedule (its own doc comment names exactly this reuse).
+type ItemChanges struct {
+	Title              *string            `json:"title,omitempty"`
+	Notes              *string            `json:"notes,omitempty"`
+	Schedule           *schedule.Schedule `json:"schedule,omitempty"`
+	Kind               *string            `json:"kind,omitempty" jsonschema:"enum=reminder,enum=event"`
+	TZ                 *string            `json:"tz,omitempty"`
+	TZMode             *string            `json:"tz_mode,omitempty" jsonschema:"enum=fixed,enum=floating"`
+	NotifyPolicy       *string            `json:"notify_policy,omitempty" jsonschema:"enum=at_time,enum=silent,enum=digest"`
+	Priority           *int               `json:"priority,omitempty" jsonschema:"minimum=1,maximum=5"`
+	GracePeriodMinutes *int               `json:"grace_period_minutes,omitempty"`
+	ReconcileAt        *string            `json:"reconcile_at,omitempty"`
+	Attrs              json.RawMessage    `json:"attrs,omitempty"`
+}
+
+// DeleteItemArgs is delete_item's arguments.
+type DeleteItemArgs struct {
+	ItemID    string `json:"item_id" jsonschema:"required"`
+	Confirmed bool   `json:"confirmed"`
+}

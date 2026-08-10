@@ -345,6 +345,68 @@ func (q *Queries) ListOccurrencesForItem(ctx context.Context, itemID string) ([]
 	return items, nil
 }
 
+const overrideFuturePendingOccurrence = `-- name: OverrideFuturePendingOccurrence :one
+UPDATE occurrences
+SET starts_at = ?, is_override = 1
+WHERE id = ?
+  AND item_id = ?
+  AND status = 'pending'
+  AND is_override = 0
+  AND starts_at > ?
+RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
+    snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
+    resolution_source, message_text, message_model, message_generated_at,
+    generation_attempts, generation_pass, created_at
+`
+
+type OverrideFuturePendingOccurrenceParams struct {
+	StartsAt   string
+	ID         string
+	ItemID     string
+	StartsAt_2 string
+}
+
+// OverrideFuturePendingOccurrence is update_item's scope=single mechanism
+// (05-schedule-spec.md#edit-scope): retime exactly one occurrence and mark it
+// is_override, so the materializer's plan/delete cycle leaves it alone from
+// then on. The guard mirrors DeleteFuturePendingOccurrence's exactly - only a
+// pending, non-override, still-future row can be touched this way.
+//
+// RETURNING spells out its column list rather than using *, and this comment
+// is plain ASCII, matching items.sql's UpdateItem/ArchiveItem - see the
+// comment there for the sqlc bug this avoids.
+func (q *Queries) OverrideFuturePendingOccurrence(ctx context.Context, arg OverrideFuturePendingOccurrenceParams) (Occurrence, error) {
+	row := q.db.QueryRowContext(ctx, overrideFuturePendingOccurrence,
+		arg.StartsAt,
+		arg.ID,
+		arg.ItemID,
+		arg.StartsAt_2,
+	)
+	var i Occurrence
+	err := row.Scan(
+		&i.ID,
+		&i.ItemID,
+		&i.StartsAt,
+		&i.EndsAt,
+		&i.Status,
+		&i.IsOverride,
+		&i.ParentOccurrenceID,
+		&i.SnoozeDepth,
+		&i.NotifiedAt,
+		&i.ReconciledAt,
+		&i.ResolvedAt,
+		&i.ResolutionNote,
+		&i.ResolutionSource,
+		&i.MessageText,
+		&i.MessageModel,
+		&i.MessageGeneratedAt,
+		&i.GenerationAttempts,
+		&i.GenerationPass,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const releaseClaimedOccurrence = `-- name: ReleaseClaimedOccurrence :execrows
 UPDATE occurrences
 SET status = 'pending', notified_at = NULL

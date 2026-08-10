@@ -67,6 +67,19 @@ func (q *Queries) CreateLLMCall(ctx context.Context, arg CreateLLMCallParams) (L
 	return i, err
 }
 
+const deleteLLMCallsOlderThan = `-- name: DeleteLLMCallsOlderThan :execrows
+DELETE FROM llm_calls
+WHERE created_at < ?
+`
+
+func (q *Queries) DeleteLLMCallsOlderThan(ctx context.Context, createdAt string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteLLMCallsOlderThan, createdAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const listLLMCalls = `-- name: ListLLMCalls :many
 SELECT id, task, tier, model, prompt_tokens, completion_tokens, latency_ms, escalated, escalation_reason, error, occurrence_id, created_at FROM llm_calls
 ORDER BY created_at DESC, id DESC
@@ -107,17 +120,4 @@ func (q *Queries) ListLLMCalls(ctx context.Context, limit int64) ([]LlmCall, err
 		return nil, err
 	}
 	return items, nil
-}
-
-const deleteLLMCallsOlderThan = `-- name: DeleteLLMCallsOlderThan :execrows
-DELETE FROM llm_calls
-WHERE created_at < ?
-`
-
-func (q *Queries) DeleteLLMCallsOlderThan(ctx context.Context, createdAt string) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteLLMCallsOlderThan, createdAt)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
 }

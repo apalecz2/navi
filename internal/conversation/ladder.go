@@ -35,10 +35,15 @@ const toolCallInstruction = "You must call exactly one of the available tools to
 // failure retries only when its ErrorKind reports Retryable(), and
 // terminates immediately when it reports !Escalatable() or no tier remains.
 func (l *Ladder) Handle(ctx context.Context, in transport.IncomingMessage) error {
-	messages := []model.Message{
-		{Role: model.RoleSystem, Content: l.buildSystemPrompt(ctx)},
-		{Role: model.RoleUser, Content: in.Text},
+	history, err := l.seedHistory(ctx, in)
+	if err != nil {
+		return err
 	}
+	messages := make([]model.Message, 0, len(history)+2)
+	messages = append(messages, model.Message{Role: model.RoleSystem, Content: l.buildSystemPrompt(ctx)})
+	messages = append(messages, history...)
+	messages = append(messages, model.Message{Role: model.RoleUser, Content: in.Text})
+
 	catalog := l.tools.Catalog()
 	tierCount := l.routing.TierCount(model.TaskCRUD)
 

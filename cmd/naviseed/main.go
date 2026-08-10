@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1745,6 +1746,60 @@ func toolCallServer(toolName, argsJSON string) *httptest.Server {
 	}))
 }
 
+// wireRequest is the minimal shape of the OpenAI-compatible chat request
+// body this file needs to inspect - just enough to find a message by role,
+// not the full internal/model wire format (which stays unexported there on
+// purpose; this is a second, deliberately narrower reader of the same JSON).
+type wireRequest struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+}
+
+// systemContent returns the request's one system message, so a test can
+// check what internal/conversation.Ladder actually assembled and sent
+// rather than only what came back in the reply.
+func (r wireRequest) systemContent() string {
+	for _, m := range r.Messages {
+		if m.Role == "system" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// countUserContent counts how many messages carry role "user" and exactly
+// this content - seedHistory's drop-the-duplicate rule should always leave
+// exactly one, never zero (dropped for good) and never two (never deduped).
+func (r wireRequest) countUserContent(text string) int {
+	n := 0
+	for _, m := range r.Messages {
+		if m.Role == "user" && m.Content == text {
+			n++
+		}
+	}
+	return n
+}
+
+// capturingToolCallServer behaves like toolCallServer but also records every
+// request body it receives, in order - used to inspect the system prompt
+// and the carried-over history Handle actually sent, not only what it wrote
+// back through the fake Sender.
+func capturingToolCallServer(toolName, argsJSON string, captured *[]wireRequest) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req wireRequest
+		if err := json.Unmarshal(body, &req); err == nil {
+			*captured = append(*captured, req)
+		}
+		argsEscaped, _ := json.Marshal(argsJSON)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":%q,"arguments":%s}}]},"finish_reason":"tool_calls"}]}`,
+			toolName, string(argsEscaped))
+	}))
+}
+
 // proseServer answers every request with plain content and no tool call —
 // the "no tool call when a write was expected" case (L4).
 func proseServer(text string) *httptest.Server {
@@ -1995,6 +2050,176 @@ func reportConversationLadder(ctx context.Context, st *store.Store, table *defau
 		ok := callsMade == 2 && strings.Contains(strings.ToLower(sender.last()), "sorry")
 		fmt.Printf("  5  dead api key -> apology    llm_calls +%d  reply=%q  %s\n",
 			callsMade, truncate(sender.last(), 60), verdict(ok))
+	}
+
+	// deviceZone mirrors Ladder.deviceZone exactly (internal/conversation/
+	// prompt.go): kv.current_tz if reportZones (session 3) has set it, else
+	// defaultTZ. Scenario 7 needs this to place a probe occurrence inside
+	// whatever local day the prompt renderer will actually query - reportZones
+	// runs earlier in this program and permanently sets kv.current_tz to
+	// Europe/Lisbon the first time naviseed is ever run against a given
+	// database, so assuming defaultTZ here would be wrong on every run after
+	// the first.
+	deviceZone := func() *time.Location {
+		if name, ok, _ := st.CurrentTZ(ctx); ok {
+			if loc, err := schedule.LoadLocation(name); err == nil {
+				return loc
+			}
+		}
+		return defaultTZ
+	}
+
+	// 7. Context injection (A3): an active item and a today's occurrence exist
+	// before the turn starts, and the system prompt actually sent - captured
+	// off the request the fake tier-1 server received, not just the reply -
+	// names both, using the schedule's compact summary and the occurrence's
+	// status.
+	{
+		loc := deviceZone()
+		probe, err := st.CreateItem(ctx, domain.NewItem{
+			Title:    "context injection probe",
+			Schedule: json.RawMessage(`{"kind":"fixed","rrule":"FREQ=DAILY","at":"08:15"}`),
+			TZ:       loc.String(),
+		})
+		if err != nil {
+			return err
+		}
+		today := time.Now().In(loc)
+		probeStart := time.Date(today.Year(), today.Month(), today.Day(), 8, 15, 0, 0, loc)
+		if _, err := st.CreateOccurrence(ctx, domain.NewOccurrence{ItemID: probe.ID, StartsAt: probeStart}); err != nil {
+			return err
+		}
+
+		var captured []wireRequest
+		tier1 := capturingToolCallServer("list_items", `{}`, &captured)
+		defer tier1.Close()
+		ladder, _ := newLadder(tier1, nil)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "what's on my list", Transport: telegram.Name}); err != nil {
+			return err
+		}
+
+		var prompt string
+		if len(captured) > 0 {
+			prompt = captured[0].systemContent()
+		}
+		hasItem := strings.Contains(prompt, probe.ID) &&
+			strings.Contains(prompt, `"context injection probe"`) &&
+			strings.Contains(prompt, "fixed FREQ=DAILY at 08:15")
+		hasOccurrence := strings.Contains(prompt, "context injection probe") && strings.Contains(prompt, "pending")
+		ok7 := hasItem && hasOccurrence
+		fmt.Printf("  7  context injection           item in prompt=%v  occurrence in prompt=%v  %s\n",
+			hasItem, hasOccurrence, verdict(ok7))
+	}
+
+	// 8. Last touched (A9): create_item sets kv.last_touched_item, and a
+	// second, unrelated turn's system prompt names it - the referent "make it
+	// more like five times" resolves against without the model re-naming the
+	// item. A fake tier-1 server cannot demonstrate a real model doing that
+	// resolution; this proves the plumbing it would resolve against exists.
+	{
+		createArgs := `{"title":"last touched probe","schedule":{"kind":"fixed","rrule":"FREQ=DAILY","at":"07:00"}}`
+		tier1a := toolCallServer("create_item", createArgs)
+		defer tier1a.Close()
+		ladderA, _ := newLadder(tier1a, nil)
+		if err := ladderA.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "remind me about the last touched probe daily at 7am", Transport: telegram.Name}); err != nil {
+			return err
+		}
+
+		items, err := st.ListActiveItems(ctx)
+		if err != nil {
+			return err
+		}
+		var probeID string
+		for _, it := range items {
+			if it.Title == "last touched probe" {
+				probeID = it.ID
+			}
+		}
+
+		storedID, ok, err := st.LastTouchedItemID(ctx)
+		if err != nil {
+			return err
+		}
+		okStore := ok && probeID != "" && storedID == probeID
+
+		var captured []wireRequest
+		tier1b := capturingToolCallServer("list_items", `{}`, &captured)
+		defer tier1b.Close()
+		ladderB, _ := newLadder(tier1b, nil)
+		if err := ladderB.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "what's on my list", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		var prompt string
+		if len(captured) > 0 {
+			prompt = captured[0].systemContent()
+		}
+		okPrompt := probeID != "" && strings.Contains(prompt, fmt.Sprintf("Last touched: %s", probeID))
+
+		ok8 := okStore && okPrompt
+		fmt.Printf("  8  last touched               kv.last_touched_item=%v  in next prompt=%v  %s\n",
+			okStore, okPrompt, verdict(ok8))
+	}
+
+	// 9. Inferred parameters reach the confirmation (A5, D-015): a fuzzy
+	// schedule naming only count and period gets its window, days_allowed and
+	// min_gap_hours filled from defaults.yaml, the write happens without any
+	// clarifying question, and the reply states what was assumed - the
+	// "periodically through the week" exit criterion.
+	{
+		args := `{"title":"call my grandmother","schedule":{"kind":"fuzzy","period":"week","count":3}}`
+		tier1 := toolCallServer("create_item", args)
+		defer tier1.Close()
+		ladder, sender := newLadder(tier1, nil)
+
+		if err := ladder.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: "remind me to call my grandmother periodically through the week", Transport: telegram.Name}); err != nil {
+			return err
+		}
+		reply := sender.last()
+		ok9 := strings.Contains(reply, "I assumed") && strings.Contains(reply, "window") &&
+			!strings.Contains(reply, "?")
+		fmt.Printf("  9  inferred fields confirmed  reply=%q  %s\n", truncate(reply, 90), verdict(ok9))
+	}
+
+	// 10. Cross-turn history (A10): a second turn's outgoing request carries
+	// the first turn's user message forward, and the current turn's own
+	// message - already durably persisted before Handle runs, exactly as the
+	// webhook persists it - appears exactly once rather than being duplicated
+	// by seedHistory's own load (history.go's drop-the-duplicate rule).
+	{
+		firstText := "remind me about the history carryover probe daily at 6am"
+		if _, _, err := st.CreateConversation(ctx, domain.NewConversation{Role: domain.RoleUser, Content: firstText}); err != nil {
+			return err
+		}
+		args := `{"title":"history carryover probe","schedule":{"kind":"fixed","rrule":"FREQ=DAILY","at":"06:00"}}`
+		tier1a := toolCallServer("create_item", args)
+		defer tier1a.Close()
+		ladderA, _ := newLadder(tier1a, nil)
+		if err := ladderA.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: firstText, Transport: telegram.Name}); err != nil {
+			return err
+		}
+
+		secondText := "what's on my list"
+		if _, _, err := st.CreateConversation(ctx, domain.NewConversation{Role: domain.RoleUser, Content: secondText}); err != nil {
+			return err
+		}
+		var captured []wireRequest
+		tier1b := capturingToolCallServer("list_items", `{}`, &captured)
+		defer tier1b.Close()
+		ladderB, _ := newLadder(tier1b, nil)
+		if err := ladderB.Handle(ctx, transport.IncomingMessage{SenderID: "111", Text: secondText, Transport: telegram.Name}); err != nil {
+			return err
+		}
+
+		var carriedFirst bool
+		var secondCount int
+		if len(captured) > 0 {
+			carriedFirst = captured[0].countUserContent(firstText) == 1
+			secondCount = captured[0].countUserContent(secondText)
+		}
+		ok10 := carriedFirst && secondCount == 1
+		fmt.Printf("  10 history carried forward   prior turn present=%v  current turn copies=%d  %s\n",
+			carriedFirst, secondCount, verdict(ok10))
 	}
 
 	return nil

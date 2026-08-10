@@ -93,3 +93,20 @@ SET status = 'pending', notified_at = NULL
 WHERE id = ?
   AND status = 'notified'
   AND notified_at = ?;
+
+-- ListOccurrencesInRange is the agent's "today's occurrences" context block
+-- (docs/06-agent-spec.md#context-injection): every occurrence, across every
+-- item, starting inside [?, ?). Callers pass the device timezone's local-day
+-- bounds converted to instants, so "today" here always means the same day
+-- the rest of the injected context does. archived_at IS NULL excludes stale
+-- history left behind by a deleted item.
+--
+-- name: ListOccurrencesInRange :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       i.title
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.starts_at >= ?
+  AND o.starts_at < ?
+  AND i.archived_at IS NULL
+ORDER BY o.starts_at, o.id;

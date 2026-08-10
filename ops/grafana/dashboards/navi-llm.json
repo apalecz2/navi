@@ -1,0 +1,107 @@
+{
+  "uid": "navi-llm",
+  "title": "Navi — model calls",
+  "description": "Is the escalation ladder's tier-1 model actually adequate, or is every turn paying for a tier-2 call? L6's whole point is that this becomes a query instead of a guess after two weeks of real use, and the routing table (docs/06-agent-spec.md#model-routing) gets rewritten from what this dashboard shows, not from instinct.",
+  "tags": ["navi"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Tier-1 success rate — crud",
+      "description": "Share of tier-1 crud calls (the conversational agent's own task) that got a usable response from the provider, over the visible time range. A call here counts as a success purely at the model.Client.Complete level - the HTTP round trip returned a real completion, not a timeout, rate limit, or malformed body. It does not by itself mean the tool call that came back passed Layer 2/3 validation; a low number means the provider is the bottleneck, a healthy number here with a lot of tier-2 traffic on the ladder-exhaustion side means validation is the bottleneck instead.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.7 },
+              { "color": "green", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum(increase(navi_llm_calls_total{task=\"crud\",tier=\"1\",outcome=\"success\"}[24h])) / clamp_min(sum(increase(navi_llm_calls_total{task=\"crud\",tier=\"1\"}[24h])), 1)",
+          "legendFormat": "tier-1 success"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tier-1 success rate by task",
+      "description": "The same ratio as the stat panel, per task, tracked over time rather than as a single number. A task whose line sits well below the others is the one whose tier-1 model, prompt, or tool schema is worth revisiting first.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (task) (rate(navi_llm_calls_total{tier=\"1\",outcome=\"success\"}[1h])) / clamp_min(sum by (task) (rate(navi_llm_calls_total{tier=\"1\"}[1h])), 0.0001)",
+          "legendFormat": "{{task}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Calls by task, tier, outcome (visible range)",
+      "description": "Raw counts behind the ratios above. outcome=\"success\" is a completion the provider returned; every other value is a model.ErrorKind (timeout, malformed, unavailable, rate_limited, empty, config) - see internal/model/error.go. A task with all its volume on tier 2 is a tier-1 model that is effectively never used.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        { "id": "labelsToFields", "options": {} }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (task, tier, outcome) (increase(navi_llm_calls_total[$__range]))",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    }
+  ]
+}

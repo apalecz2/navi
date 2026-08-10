@@ -345,6 +345,69 @@ func (q *Queries) ListOccurrencesForItem(ctx context.Context, itemID string) ([]
 	return items, nil
 }
 
+const listOccurrencesInRange = `-- name: ListOccurrencesInRange :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       i.title
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.starts_at >= ?
+  AND o.starts_at < ?
+  AND i.archived_at IS NULL
+ORDER BY o.starts_at, o.id
+`
+
+type ListOccurrencesInRangeParams struct {
+	StartsAt   string
+	StartsAt_2 string
+}
+
+type ListOccurrencesInRangeRow struct {
+	ID               string
+	ItemID           string
+	StartsAt         string
+	Status           string
+	ResolvedAt       *string
+	ResolutionSource *string
+	Title            string
+}
+
+// ListOccurrencesInRange is the agent's "today's occurrences" context block
+// (docs/06-agent-spec.md#context-injection): every occurrence, across every
+// item, starting inside [?, ?). Callers pass the device timezone's local-day
+// bounds converted to instants, so "today" here always means the same day
+// the rest of the injected context does. archived_at IS NULL excludes stale
+// history left behind by a deleted item.
+func (q *Queries) ListOccurrencesInRange(ctx context.Context, arg ListOccurrencesInRangeParams) ([]ListOccurrencesInRangeRow, error) {
+	rows, err := q.db.QueryContext(ctx, listOccurrencesInRange, arg.StartsAt, arg.StartsAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOccurrencesInRangeRow{}
+	for rows.Next() {
+		var i ListOccurrencesInRangeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.Status,
+			&i.ResolvedAt,
+			&i.ResolutionSource,
+			&i.Title,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const overrideFuturePendingOccurrence = `-- name: OverrideFuturePendingOccurrence :one
 UPDATE occurrences
 SET starts_at = ?, is_override = 1

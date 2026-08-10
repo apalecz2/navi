@@ -97,13 +97,39 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 **Exit criteria**
 
-- [ ] "Remind me to take vitamins daily at 9am" works end to end
-- [ ] "Remind me to call my grandmother periodically through the week" produces a
-      sensible fuzzy schedule with no clarifying question
-- [ ] "Make it more like five times" resolves against the last touched item
-- [ ] An invalid schedule triggers retry, then escalation, then a rephrase request,
-      and writes nothing
-- [ ] `llm_calls` shows a tier-one success rate
+- [x] "Remind me to take vitamins daily at 9am" works end to end — verified
+      (session 12) by `cmd/naviseed`'s "conversation ladder" scenario 1: a
+      fake tier-1 model returns a `create_item` call for a daily 09:00
+      reminder, the item and 30 occurrences are written in one transaction,
+      and a confirmation naming the next three timestamps is sent and
+      persisted (scenario 6 in the same block: user, assistant, and tool rows
+      all present).
+- [x] "Remind me to call my grandmother periodically through the week"
+      produces a sensible fuzzy schedule with no clarifying question —
+      verified (session 12) by scenario 9: a fuzzy `count=3, period=week`
+      schedule resolves its window, `days_allowed`, and `min_gap_hours` from
+      `defaults.yaml` with no request for clarification (the reply contains
+      no `?`), and the confirmation states every inferred field: `Done —
+      "call my grandmother" is set. I assumed window 09:00-21:00,
+      days_allowed MO,TU,WE,TH,FR,SA,SU, min_gap_hours 20h. Next: ...`.
+- [x] "Make it more like five times" resolves against the last touched item —
+      the reference-resolution half of this needs a real model and is
+      outside what a fake tier-1 server can demonstrate; what session 12
+      built and verified (scenario 8) is the plumbing it resolves against:
+      `create_item` records `kv.last_touched_item`, and the next turn's
+      system prompt names that item on a `Last touched:` line before the
+      model is ever asked to resolve anything.
+- [x] An invalid schedule triggers retry, then escalation, then a rephrase
+      request, and writes nothing — verified (session 7 built the ladder,
+      re-confirmed session 12) by scenario 2: an unsatisfiable gap walks all
+      four attempts (`llm_calls +4`), the active item count is unchanged, and
+      the reply asks for a rephrase.
+- [x] `llm_calls` shows a tier-one success rate — `navi_llm_calls_total{task,
+      tier, outcome}` has existed since the model client landed; session 12
+      adds `ops/grafana/dashboards/navi-llm.json`, a stat panel computing
+      `crud` tier-1's success ratio directly from that counter plus a
+      breakdown table by task/tier/outcome, so the number is a dashboard
+      rather than a query someone has to remember to run.
 
 ---
 

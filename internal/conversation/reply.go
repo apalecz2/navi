@@ -6,13 +6,14 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/schedule"
 )
 
 // buildConfirmation renders a plain-language reply naming up to the next
-// three concrete timestamps (A5) straight from agent.Result.NextOccurrences,
-// which is already domain.FormatTime'd - no second model call. toolName
-// picks the shape: "a plain confirmation is enough this session"; the full
-// stated-assumptions format (D-015) is next session's job.
+// three concrete timestamps and every inferred parameter (A5) straight from
+// agent.Result - NextOccurrences is already domain.FormatTime'd and Inferred
+// is resolveSchedule's own return value, so neither costs a second model
+// call. toolName picks the shape.
 func buildConfirmation(toolName string, res agent.Result) string {
 	switch toolName {
 	case "list_items":
@@ -20,7 +21,7 @@ func buildConfirmation(toolName string, res agent.Result) string {
 	case "delete_item":
 		return fmt.Sprintf("Archived %q.", itemTitle(res.Item))
 	default: // create_item, update_item
-		return renderNextOccurrences(res.Item, res.NextOccurrences)
+		return renderNextOccurrences(res.Item, res.NextOccurrences, res.Inferred)
 	}
 }
 
@@ -42,12 +43,20 @@ func renderItemList(items []domain.Item) string {
 	return fmt.Sprintf("You have %d item(s): %s.", len(items), strings.Join(titles, ", "))
 }
 
-func renderNextOccurrences(item *domain.Item, occs []agent.Occurrence) string {
+// renderNextOccurrences states the write in plain language, followed by
+// every inferred parameter (A5: "a default applied silently is a wrong
+// schedule nobody has a reason to look at") and the next concrete
+// timestamps.
+func renderNextOccurrences(item *domain.Item, occs []agent.Occurrence, inferred []schedule.Inference) string {
 	name := itemTitle(item)
-	if len(occs) == 0 {
-		return fmt.Sprintf("Done - %q is set. No upcoming occurrences to show yet.", name)
+	clause := ""
+	if desc := schedule.Describe(inferred); desc != "" {
+		clause = fmt.Sprintf(" I assumed %s.", desc)
 	}
-	return fmt.Sprintf("Done - %q is set. Next: %s.", name, formatTimestamps(occs))
+	if len(occs) == 0 {
+		return fmt.Sprintf("Done - %q is set.%s No upcoming occurrences to show yet.", name, clause)
+	}
+	return fmt.Sprintf("Done - %q is set.%s Next: %s.", name, clause, formatTimestamps(occs))
 }
 
 func formatTimestamps(occs []agent.Occurrence) string {

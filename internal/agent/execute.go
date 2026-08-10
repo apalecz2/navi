@@ -70,7 +70,7 @@ func handleCreateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	}
 	now := r.Now()
 
-	resolved, _, err := resolveSchedule(args.Schedule, t.defaults, now, loc)
+	resolved, inferred, err := resolveSchedule(args.Schedule, t.defaults, now, loc)
 	if err != nil {
 		return Result{}, err
 	}
@@ -113,7 +113,10 @@ func handleCreateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Item: &item, NextOccurrences: next, Applied: applied}, nil
+	if err := t.store.SetLastTouchedItem(ctx, item.ID); err != nil {
+		return Result{}, err
+	}
+	return Result{Item: &item, NextOccurrences: next, Inferred: inferred, Applied: applied}, nil
 }
 
 func handleUpdateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Result, error) {
@@ -167,14 +170,16 @@ func handleUpdateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 
 	patch := patchFrom(args.Changes)
 
+	var inferred []schedule.Inference
 	var rematerialize func(domain.Item, []domain.Occurrence) (store.Plan, error)
 	if needsRematerialize(args.Changes) {
 		var effective schedule.Schedule
 		if args.Changes.Schedule != nil {
-			resolved, _, err := resolveSchedule(*args.Changes.Schedule, t.defaults, now, loc)
+			resolved, inf, err := resolveSchedule(*args.Changes.Schedule, t.defaults, now, loc)
 			if err != nil {
 				return Result{}, err
 			}
+			inferred = inf
 			effective = resolved
 			sj, err := resolved.Marshal()
 			if err != nil {
@@ -206,7 +211,10 @@ func handleUpdateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Item: &updated, NextOccurrences: next, Applied: applied}, nil
+	if err := t.store.SetLastTouchedItem(ctx, updated.ID); err != nil {
+		return Result{}, err
+	}
+	return Result{Item: &updated, NextOccurrences: next, Inferred: inferred, Applied: applied}, nil
 }
 
 // updateSingle is scope=single: retime exactly one occurrence
@@ -255,6 +263,9 @@ func (t *Tools) updateSingle(ctx context.Context, item domain.Item, args UpdateI
 	if err != nil {
 		return Result{}, err
 	}
+	if err := t.store.SetLastTouchedItem(ctx, item.ID); err != nil {
+		return Result{}, err
+	}
 	_ = occ // read back for symmetry with the other scopes; not part of Result this session
 	return Result{Item: &updated, NextOccurrences: next}, nil
 }
@@ -288,6 +299,13 @@ func handleDeleteItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 		})
 	if err != nil {
 		return Result{}, wrapValidation(err)
+	}
+	// Recorded even though the item is now archived: a later reference to it
+	// fails store.LiveItem's own "item is archived" check rather than needing
+	// a separate invalidation path (internal/store/kv.go's own doc comment on
+	// LastTouchedItemID).
+	if err := t.store.SetLastTouchedItem(ctx, archived.ID); err != nil {
+		return Result{}, err
 	}
 	return Result{Item: &archived, Applied: applied}, nil
 }

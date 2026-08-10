@@ -406,6 +406,68 @@ func (s *Store) ClaimDue(ctx context.Context, upper, floor time.Time, limit int)
 	return claimedAt, claimed, nil
 }
 
+// TodayOccurrence is one row of the agent's "today's occurrences" context
+// block (docs/06-agent-spec.md#context-injection) - narrow, like Due, because
+// the prompt renderer needs an id, a title, a start time and a resolution and
+// nothing else about the row.
+type TodayOccurrence struct {
+	ID        string
+	ItemID    string
+	ItemTitle string
+
+	StartsAt time.Time
+	Status   domain.Status
+
+	ResolvedAt       *time.Time
+	ResolutionSource *domain.ResolutionSource
+}
+
+// TodaysOccurrences returns every occurrence starting inside loc's current
+// local calendar day, across every unarchived item, oldest first. loc is the
+// same device timezone the rest of the injected context resolves
+// (Ladder.deviceZone), so "today" here and "today" in "Current time" above it
+// in the prompt never disagree.
+func (s *Store) TodaysOccurrences(ctx context.Context, loc *time.Location) ([]TodayOccurrence, error) {
+	now := time.Now().In(loc)
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	end := start.AddDate(0, 0, 1)
+
+	rows, err := s.read.ListOccurrencesInRange(ctx, sqlc.ListOccurrencesInRangeParams{
+		StartsAt:   domain.FormatTime(start),
+		StartsAt_2: domain.FormatTime(end),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: list today's occurrences: %w", err)
+	}
+
+	out := make([]TodayOccurrence, 0, len(rows))
+	for _, row := range rows {
+		startsAt, err := domain.ParseTime(row.StartsAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: list today's occurrences: %w", err)
+		}
+		resolvedAt, err := parseTimePtr(row.ResolvedAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: list today's occurrences: %w", err)
+		}
+		var source *domain.ResolutionSource
+		if row.ResolutionSource != nil {
+			src := domain.ResolutionSource(*row.ResolutionSource)
+			source = &src
+		}
+		out = append(out, TodayOccurrence{
+			ID:               row.ID,
+			ItemID:           row.ItemID,
+			ItemTitle:        row.Title,
+			StartsAt:         startsAt,
+			Status:           domain.Status(row.Status),
+			ResolvedAt:       resolvedAt,
+			ResolutionSource: source,
+		})
+	}
+	return out, nil
+}
+
 // ReleaseClaims returns claimed occurrences to pending, and reports how many it
 // actually moved.
 //

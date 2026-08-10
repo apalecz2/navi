@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/store"
 )
 
@@ -19,12 +20,18 @@ type Occurrence struct {
 }
 
 // Result is what every handler returns. Fields are populated per tool:
-// list_items sets Items; create_item and update_item set Item, Applied and
-// NextOccurrences; delete_item sets Item and Applied only.
+// list_items sets Items; create_item and update_item set Item, Applied,
+// NextOccurrences and Inferred; delete_item sets Item and Applied only.
 type Result struct {
 	Item            *domain.Item  `json:"item,omitempty"`
 	Items           []domain.Item `json:"items,omitempty"`
 	NextOccurrences []Occurrence  `json:"next_occurrences,omitempty"`
+
+	// Inferred is the vocabulary-default fields resolveSchedule filled in
+	// that the caller did not supply - A5's "state every inferred
+	// parameter." Empty when the schedule was fully specified, or for a
+	// handler that never resolves a schedule at all.
+	Inferred []schedule.Inference `json:"inferred,omitempty"`
 
 	// Applied is diagnostic only - naviseed and future logging read it, a
 	// model never sees it.

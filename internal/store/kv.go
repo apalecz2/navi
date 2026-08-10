@@ -34,6 +34,12 @@ const (
 
 	// KeyGlobalPauseUntil is vacation mode (I6).
 	KeyGlobalPauseUntil = "global_pause_until"
+
+	// KeyLastTouchedItem is A9's "most recently touched item" - the referent
+	// for a follow-up like "make it more like five times" that never renames
+	// the item. Holds a bare item id; empty or absent both mean "nothing
+	// touched yet."
+	KeyLastTouchedItem = "last_touched_item"
 )
 
 // getKV returns a raw value and whether it was present. Absence is not an
@@ -166,4 +172,27 @@ func (s *Store) CurrentTZ(ctx context.Context) (string, bool, error) {
 // which the caller does, because this writes one row and nothing else.
 func (s *Store) SetCurrentTZ(ctx context.Context, tz string) error {
 	return s.setKV(ctx, KeyCurrentTZ, tz)
+}
+
+// LastTouchedItemID returns the item a create_item, update_item or
+// delete_item call last resolved to, and whether one has ever been recorded.
+// An empty stored value reads the same as absent - the two never need telling
+// apart, since both mean "the model has nothing to resolve 'it' against."
+//
+// A touched item is not guaranteed live: delete_item still records the id it
+// archived, deliberately (see internal/agent/execute.go). A later reference to
+// it fails the ordinary store.LiveItem check with a plain "item is archived"
+// error, which is enough for the ladder to work with - there is no separate
+// invalidation path.
+func (s *Store) LastTouchedItemID(ctx context.Context) (string, bool, error) {
+	id, ok, err := s.getKV(ctx, KeyLastTouchedItem)
+	if err != nil || !ok || id == "" {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
+// SetLastTouchedItem records the item a write just resolved to (A9).
+func (s *Store) SetLastTouchedItem(ctx context.Context, itemID string) error {
+	return s.setKV(ctx, KeyLastTouchedItem, itemID)
 }

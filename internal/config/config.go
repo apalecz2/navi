@@ -158,9 +158,27 @@ type Telegram struct {
 	AllowedSenderID string
 }
 
-// Model holds the model client's one secret. OpenRouterAPIKey is borrowed and
-// comes from the environment with no default (D9), the same rule Telegram's
-// BotToken follows.
+// OpenRouterProvider routes every tier through OpenRouter (D-021's default
+// path): one key, automatic provider failover, right for free-tier hosting.
+// It is MODEL_PROVIDER's default, matching what config/model.yaml ships
+// pointed at.
+const OpenRouterProvider = "openrouter"
+
+// GeminiProvider sends every tier straight to Google's own OpenAI-compatible
+// endpoint with one Google API key — trading OpenRouter's cross-provider
+// failover for one fewer account, right when every tier in use is already a
+// Google model (Gemma, Gemini Flash) and OpenRouter's fan-out buys nothing.
+const GeminiProvider = "gemini"
+
+// Model holds which upstream the model client talks to and the one secret it
+// authenticates with. Provider and APIKey are two independent places to say
+// "which provider" — this one, and config/model.yaml's per-tier base_url —
+// and internal/model.Routing.ValidateProvider is what keeps a flip of one
+// from silently disagreeing with the other.
+//
+// APIKey is borrowed and comes from the environment with no default (D9),
+// the same rule Telegram's BotToken follows: OPENROUTER_API_KEY when
+// Provider is OpenRouterProvider, GOOGLE_API_KEY when it is GeminiProvider.
 //
 // Required whenever CHAT_TRANSPORT=telegram (session 11): that is the
 // commit that first wires a model.Client into a running loop (the
@@ -168,7 +186,8 @@ type Telegram struct {
 // Chat." Optional otherwise, on the same required-when-consumed reasoning
 // every other borrowed credential in this struct follows.
 type Model struct {
-	OpenRouterAPIKey string
+	Provider string
+	APIKey   string
 }
 
 // There is deliberately no Backup group here. Litestream runs as the
@@ -253,15 +272,33 @@ func Load() (Config, error) {
 		cfg.Telegram.WebhookSecret = envString("TELEGRAM_WEBHOOK_SECRET", "")
 	}
 
-	// OpenRouterAPIKey: the conversation loop's model client, wired in this
-	// session. Required exactly when Chat is telegram, the same shape
-	// WebhookSecret uses — this is the commit that moves it off envString.
+	// Provider: which upstream config/model.yaml's base_urls are expected to
+	// point at. Defaults to the shape this repository ships with; an
+	// unrecognized value fails the boot rather than silently sending a key
+	// to a provider nobody chose, same reasoning as NOTIFY_TRANSPORT.
+	if cfg.Model.Provider, err = envRequiredString("MODEL_PROVIDER", OpenRouterProvider); err != nil {
+		return Config{}, err
+	}
+	var apiKeyVar string
+	switch cfg.Model.Provider {
+	case OpenRouterProvider:
+		apiKeyVar = "OPENROUTER_API_KEY"
+	case GeminiProvider:
+		apiKeyVar = "GOOGLE_API_KEY"
+	default:
+		return Config{}, fmt.Errorf("config: MODEL_PROVIDER %q is not a known provider (want %q or %q)",
+			cfg.Model.Provider, OpenRouterProvider, GeminiProvider)
+	}
+
+	// APIKey: the conversation loop's model client, wired in session 11.
+	// Required exactly when Chat is telegram, the same shape WebhookSecret
+	// uses — which underlying variable is required depends on Provider above.
 	if chatsTelegram {
-		if cfg.Model.OpenRouterAPIKey, err = envRequiredString("OPENROUTER_API_KEY", ""); err != nil {
+		if cfg.Model.APIKey, err = envRequiredString(apiKeyVar, ""); err != nil {
 			return Config{}, err
 		}
 	} else {
-		cfg.Model.OpenRouterAPIKey = envString("OPENROUTER_API_KEY", "")
+		cfg.Model.APIKey = envString(apiKeyVar, "")
 	}
 
 	return cfg, nil
@@ -283,6 +320,12 @@ func (c Config) LogValue() slog.Value {
 		// value looks exactly like a working system, so it goes in the line that
 		// gets read when someone asks why their phone is quiet.
 		slog.String("notify_transport", c.Transport.Notify),
+
+		// Same reasoning: a MODEL_PROVIDER flip that isn't paired with a
+		// config/model.yaml edit fails boot (internal/model.ValidateProvider),
+		// but which provider was chosen still belongs in the line an operator
+		// reads first.
+		slog.String("model_provider", c.Model.Provider),
 	)
 }
 

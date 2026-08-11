@@ -165,7 +165,7 @@ type Client struct {
 }
 
 // New returns a Client. routing is typically model.LoadRouting's result,
-// loaded once in main; apiKey is Config.Model.OpenRouterAPIKey and may be
+// loaded once in main; apiKey is Config.Model.APIKey and may be
 // empty in development, in which case every call fails at the provider with
 // an authentication error classified KindUnavailable — there is no
 // preflight check, on the same reasoning telegram.New gives for not

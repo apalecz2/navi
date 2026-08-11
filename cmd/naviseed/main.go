@@ -1643,6 +1643,17 @@ func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, r
 	fmt.Printf("  %s                     tasks=%d  %s\n",
 		routingPath, taskCount, verdict(loadErr == nil && taskCount == 5))
 
+	// The committed file ships pointed at OpenRouter (config.OpenRouterProvider
+	// is MODEL_PROVIDER's default) — this is the same check main runs before
+	// wiring a Client, so a base_url edited without updating MODEL_PROVIDER
+	// (or vice versa) fails here on a clean checkout, not on a live boot.
+	var providerErr error
+	if real != nil {
+		providerErr = real.ValidateProvider(model.ProviderOpenRouter)
+	}
+	fmt.Printf("  %s provider=openrouter  %s\n",
+		routingPath, verdict(real != nil && providerErr == nil))
+
 	// Retention, exercised directly against the store method the sweeper
 	// calls: a cutoff in the deep past deletes nothing that exists, a cutoff
 	// in the future deletes everything this section just wrote. This proves

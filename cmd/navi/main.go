@@ -126,7 +126,7 @@ func run() error {
 	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
 
 	chatWebhook, chatIntake, err := chatTransport(cfg.Transport.Chat, cfg.Telegram,
-		cfg.Model.OpenRouterAPIKey, cfg.Files.ModelRoutingPath(), cfg.Files.PersonaPath(),
+		cfg.Model.Provider, cfg.Model.APIKey, cfg.Files.ModelRoutingPath(), cfg.Files.PersonaPath(),
 		st, mat, table, cfg.Schedule.DefaultTZ, m, log)
 	if err != nil {
 		return err
@@ -251,9 +251,9 @@ func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (schedul
 // Since session 11: building the webhook handler also builds the model
 // client, the tool catalog, and the escalation ladder behind it — the whole
 // conversational stack lives or dies with CHAT_TRANSPORT, on the same
-// required-when-consumed reasoning internal/config's OpenRouterAPIKey and
+// required-when-consumed reasoning internal/config's Model.APIKey and
 // BotToken changes follow.
-func chatTransport(name string, tg config.Telegram, apiKey, routingPath, personaPath string,
+func chatTransport(name string, tg config.Telegram, provider, apiKey, routingPath, personaPath string,
 	st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location,
 	m *metrics.Metrics, log *slog.Logger) (http.Handler, *conversation.Intake, error) {
 	switch name {
@@ -263,6 +263,13 @@ func chatTransport(name string, tg config.Telegram, apiKey, routingPath, persona
 		routing, err := model.LoadRouting(routingPath)
 		if err != nil {
 			return nil, nil, err
+		}
+		// MODEL_PROVIDER and config/model.yaml's base_urls are two
+		// independent places to say "which provider" — this is what keeps a
+		// flip of one from silently sending the other's key to the wrong
+		// host (internal/model.ValidateProvider).
+		if err := routing.ValidateProvider(model.Provider(provider)); err != nil {
+			return nil, nil, fmt.Errorf("config: MODEL_PROVIDER %q: %w", provider, err)
 		}
 		client := model.New(log.With("component", "model"), routing, apiKey, st, m)
 		tools := agent.New(st, mat, table, defaultTZ)

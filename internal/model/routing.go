@@ -3,6 +3,7 @@ package model
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -88,6 +89,53 @@ func (r *Routing) Validate() error {
 			}
 			if tier.TimeoutSeconds <= 0 {
 				return fmt.Errorf("task %q tier %d: timeout_seconds must be positive, got %d", task, i+1, tier.TimeoutSeconds)
+			}
+		}
+	}
+	return nil
+}
+
+// Provider names which upstream a routing table's base_urls are expected to
+// point at. Defined here with the same string values internal/config's
+// OpenRouterProvider/GeminiProvider constants use — value-aligned by
+// convention rather than imported, the same way internal/transport/logging's
+// Name and config.LoggingTransport agree without either package importing
+// the other. internal/model cannot import internal/config without inverting
+// the dependency direction the package layout requires.
+type Provider string
+
+const (
+	ProviderOpenRouter Provider = "openrouter"
+	ProviderGemini     Provider = "gemini"
+)
+
+// providerHost is the one host each known provider's OpenAI-compatible
+// endpoint answers at. A provider with more than one valid host is not a
+// case this needs to handle yet.
+var providerHost = map[Provider]string{
+	ProviderOpenRouter: "openrouter.ai",
+	ProviderGemini:     "generativelanguage.googleapis.com",
+}
+
+// ValidateProvider checks that every configured tier's base_url resolves to
+// the host provider is expected to use. MODEL_PROVIDER (internal/config)
+// picks which API key gets sent; config/model.yaml's base_url picks who
+// receives it — two independent places to say "which provider," and D-016
+// means the second one is hand-edited without a rebuild. Without this check,
+// a MODEL_PROVIDER flip that isn't paired with a model.yaml edit sends a
+// live key to the wrong host silently instead of failing the boot the way
+// every other configuration mismatch in this repository does.
+func (r *Routing) ValidateProvider(provider Provider) error {
+	host, ok := providerHost[provider]
+	if !ok {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	for task, tr := range r.Tasks {
+		for i, tier := range tr.Tiers {
+			u, err := url.Parse(tier.BaseURL)
+			if err != nil || u.Host != host {
+				return fmt.Errorf("task %q tier %d: base_url %q does not match provider %q (want host %q) — update config/model.yaml or MODEL_PROVIDER",
+					task, i+1, tier.BaseURL, provider, host)
 			}
 		}
 	}

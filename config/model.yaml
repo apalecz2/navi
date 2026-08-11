@@ -18,12 +18,23 @@
 # against this file should confirm the ids resolve before anyone trusts it
 # blind.
 #
+# thinking: true is off for every task here, deliberately, unlike the
+# OpenRouter version of this file. internal/model's Reasoning field
+# (wire.go) is OpenRouter's own unified switch for thinking mode
+# ("reasoning": {"enabled": true}) — Google's OpenAI-compatible endpoint does
+# strict schema validation and 400s the whole request on it ("Unknown name
+# \"reasoning\": Cannot find field", confirmed against a real key). Thinking
+# is documented as best-effort and not load-bearing (internal/model/routing.go),
+# so turning it off here costs nothing functional; flip it back to true only
+# if this file is ever pointed at a provider whose OpenAI-compat layer
+# actually accepts that field.
+#
 # Mounted read-only at /config, same as defaults.yaml: retuning the ladder is a
 # restart, not a rebuild.
 
 tasks:
   crud:
-    thinking: true
+    thinking: false
     tiers:
       - model: "gemma-4-31b"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -67,7 +78,7 @@ tasks:
   # Weekly, and it actually reasons over statistics, so cost is negligible at
   # that frequency and both tiers get more time than the others.
   digest:
-    thinking: true
+    thinking: false
     tiers:
       - model: "gemini-3.6-flash"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"

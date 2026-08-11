@@ -73,8 +73,14 @@ func (c *Client) Complete(ctx context.Context, req Request) (Result, error) {
 
 	var wireResp chatResponse
 	if err := json.Unmarshal(data, &wireResp); err != nil {
+		// A body that fails to decode is exactly the case apiErr/emptyErr
+		// below can't extract anything useful from — the raw bytes are the
+		// only diagnostic left, so they travel in the error (and therefore
+		// into llm_calls.error) rather than being read once and discarded.
+		// Bounded so one oversized body doesn't blow up a log line or a
+		// column.
 		mErr := &Error{Kind: KindMalformed, Task: req.Task, Tier: req.Tier, Model: tier.Model,
-			Err: fmt.Errorf("decode response (status %d): %w", resp.StatusCode, err)}
+			Err: fmt.Errorf("decode response (status %d): %w; body: %s", resp.StatusCode, err, truncateBody(data))}
 		c.record(ctx, req, tier.Model, nil, mErr, start)
 		return Result{}, mErr
 	}
@@ -201,4 +207,18 @@ func emptyErr(resp chatResponse) error {
 
 func isRefusal(finishReason string) bool {
 	return finishReason == "content_filter"
+}
+
+// truncateBody bounds how much of a raw, undecodable response body an error
+// carries — enough to diagnose a wire-format surprise (an unexpected array,
+// an HTML error page, a provider whose error shape isn't the OpenAI one)
+// without letting one oversized body dominate an llm_calls.error column or a
+// log line.
+const maxBodyInError = 500
+
+func truncateBody(b []byte) string {
+	if len(b) <= maxBodyInError {
+		return string(b)
+	}
+	return string(b[:maxBodyInError]) + "…"
 }

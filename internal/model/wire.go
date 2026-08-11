@@ -45,6 +45,11 @@ type chatToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function chatFunctionCall `json:"function"`
+
+	// ExtraContent is Google's own extension point on a tool call
+	// (extra_content.google.thought_signature) — opaque to this file,
+	// carried through unmodified. See ToolCall.Extra for why it exists.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type chatFunctionCall struct {
@@ -127,6 +132,7 @@ func toWireMessage(m Message) chatMessage {
 					Name:      tc.Name,
 					Arguments: string(tc.Arguments),
 				},
+				ExtraContent: tc.Extra,
 			}
 		}
 	}
@@ -148,6 +154,7 @@ func fromWireMessage(wm chatMessage) Message {
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
 				Arguments: json.RawMessage(tc.Function.Arguments),
+				Extra:     tc.ExtraContent,
 			}
 		}
 	}

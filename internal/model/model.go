@@ -84,6 +84,22 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments json.RawMessage
+
+	// Extra is an opaque, provider-specific payload attached to a tool call,
+	// carried through unmodified rather than parsed. Google's Gemini API is
+	// the reason this exists: every function-call part comes back with
+	// extra_content.google.thought_signature, and Gemini requires that exact
+	// value echoed back when the call is replayed into a later turn's
+	// history — a request that omits it is rejected outright (400,
+	// "Function call is missing a thought_signature..."). The OpenAI wire
+	// format this client otherwise speaks has no concept of it, and neither
+	// does this package: bytes in, same bytes back out on replay, the
+	// mechanism-not-policy shape D-021 asks for. Nil for providers
+	// (OpenRouter included) that never set it. Persisted for free — the
+	// conversations.tool_calls column is already this struct marshaled as
+	// JSON (internal/conversation/ladder.go's persistToolRung), so this
+	// field round-trips through cross-turn history with no migration.
+	Extra json.RawMessage
 }
 
 // Escalation is supplied by the caller on a retried or escalated attempt. It

@@ -13,10 +13,12 @@
 # loudly instead of sending the key to the wrong host.
 #
 # The model ids below are Google's own naming — no "google/" prefix, unlike
-# OpenRouter's. They are not yet verified against a real key or a real
-# account — same caveat ops/restore-runbook.md gives R2: the first real call
-# against this file should confirm the ids resolve before anyone trusts it
-# blind.
+# OpenRouter's, and Gemma needs the "-it" (instruction-tuned) suffix Google's
+# own model listing uses that OpenRouter's naming drops. Verified for real
+# against a live GOOGLE_API_KEY (2026-08-11): GET .../v1beta/openai/models
+# confirmed every id below resolves, and a real Complete() round trip
+# (single-turn tool call, then that same call replayed into a second turn's
+# history, ToolCall.Extra intact) succeeded end to end.
 #
 # thinking: true is off for every task here, deliberately, unlike the
 # OpenRouter version of this file. internal/model's Reasoning field
@@ -36,7 +38,7 @@ tasks:
   crud:
     thinking: false
     tiers:
-      - model: "gemma-4-31b"
+      - model: "gemma-4-31b-it"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 120
       - model: "gemini-3.5-flash-lite"
@@ -46,7 +48,7 @@ tasks:
   bulk_resolve:
     thinking: false
     tiers:
-      - model: "gemma-4-31b"
+      - model: "gemma-4-31b-it"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 120
       - model: "gemini-3.5-flash-lite"
@@ -61,14 +63,14 @@ tasks:
   copywriter:
     thinking: false
     tiers:
-      - model: "gemma-4-31b"
+      - model: "gemma-4-31b-it"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 120
 
   reconcile:
     thinking: false
     tiers:
-      - model: "gemma-4-31b"
+      - model: "gemma-4-31b-it"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 120
       - model: "gemini-3.5-flash-lite"

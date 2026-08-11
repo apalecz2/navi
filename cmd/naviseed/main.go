@@ -137,7 +137,7 @@ func run() error {
 
 	// The model client, against local fake tier endpoints rather than a real
 	// provider, needing nothing any earlier section left behind either.
-	if err := reportModelClient(ctx, st, log, cfg.Files.ModelRoutingPath()); err != nil {
+	if err := reportModelClient(ctx, st, log, cfg.Files.ModelRoutingPath(), cfg.Model.Provider); err != nil {
 		return err
 	}
 
@@ -1491,7 +1491,7 @@ func (t *failingTransport) Send(context.Context, transport.Outbound) (string, er
 // recordingTransport/failingTransport give for the fire path, just at the
 // HTTP layer instead of a Go interface. Nothing here calls a real provider
 // or needs OPENROUTER_API_KEY.
-func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, routingPath string) error {
+func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, routingPath, provider string) error {
 	fmt.Printf("\nmodel client\n")
 
 	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1643,16 +1643,18 @@ func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, r
 	fmt.Printf("  %s                     tasks=%d  %s\n",
 		routingPath, taskCount, verdict(loadErr == nil && taskCount == 5))
 
-	// The committed file ships pointed at OpenRouter (config.OpenRouterProvider
-	// is MODEL_PROVIDER's default) — this is the same check main runs before
-	// wiring a Client, so a base_url edited without updating MODEL_PROVIDER
-	// (or vice versa) fails here on a clean checkout, not on a live boot.
+	// Checked against whichever MODEL_PROVIDER this run is actually
+	// configured with — the same check main runs before wiring a Client —
+	// rather than a hardcoded default, so a deployment that has deliberately
+	// switched to Gemini sees this pass, not a false FAILED against a
+	// provider it never chose. A base_url edited without updating
+	// MODEL_PROVIDER (or vice versa) still fails here on a clean checkout.
 	var providerErr error
 	if real != nil {
-		providerErr = real.ValidateProvider(model.ProviderOpenRouter)
+		providerErr = real.ValidateProvider(model.Provider(provider))
 	}
-	fmt.Printf("  %s provider=openrouter  %s\n",
-		routingPath, verdict(real != nil && providerErr == nil))
+	fmt.Printf("  %s provider=%s  %s\n",
+		routingPath, provider, verdict(real != nil && providerErr == nil))
 
 	// Retention, exercised directly against the store method the sweeper
 	// calls: a cutoff in the deep past deletes nothing that exists, a cutoff

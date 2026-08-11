@@ -2,17 +2,21 @@
 # the source of truth for the table; this file is the source of truth for the
 # running process (L1: model choice is configuration, not code).
 #
-# Every tier here points at OpenRouter (D-021: one key, automatic provider
-# failover), so base_url is the same across every entry today — it stays
-# per-tier rather than a single top-level value because a future tier hitting
-# a different backend directly is a config edit, not a code change. The key
-# itself is never in this file (D9/D10): it comes from OPENROUTER_API_KEY.
+# Every tier here points at Google's own OpenAI-compatible endpoint
+# (MODEL_PROVIDER=gemini in internal/config), so base_url is the same across
+# every entry today — it stays per-tier rather than a single top-level value
+# because a future tier hitting a different backend is a config edit, not a
+# code change. The key itself is never in this file (D9/D10): it comes from
+# GOOGLE_API_KEY. internal/model.ValidateProvider checks every base_url below
+# actually agrees with MODEL_PROVIDER at boot, so an edit here that misses a
+# tier (or a MODEL_PROVIDER flip that isn't paired with an edit here) fails
+# loudly instead of sending the key to the wrong host.
 #
-# The model ids below are OpenRouter's naming for the models the routing table
-# names by their plain names ("Gemma 4 31B", "Gemini 3.1 Flash Lite"). They are
-# not yet verified against a real key or a real account — same caveat
-# ops/restore-runbook.md gives R2: the first real call against this file
-# should confirm the ids resolve before anyone trusts it blind.
+# The model ids below are Google's own naming — no "google/" prefix, unlike
+# OpenRouter's. They are not yet verified against a real key or a real
+# account — same caveat ops/restore-runbook.md gives R2: the first real call
+# against this file should confirm the ids resolve before anyone trusts it
+# blind.
 #
 # Mounted read-only at /config, same as defaults.yaml: retuning the ladder is a
 # restart, not a rebuild.
@@ -22,10 +26,10 @@ tasks:
     thinking: true
     tiers:
       - model: "gemma-4-31b"
-        base_url: "https://openrouter.ai/api/v1"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 120
-      - model: "gemini-3.1-flash-lite"
-        base_url: "https://openrouter.ai/api/v1"
+      - model: "gemini-3.5-flash-lite"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 130
 
   bulk_resolve:

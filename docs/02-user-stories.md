@@ -321,3 +321,66 @@ The evidence says lock-screen actions are worth having, so notifications move to
 - [ ] The scheduler keeps emitting the same abstract Done, Snooze, and Skip actions [T3]
 - [ ] Code that already branched on `supports_native_notification_actions` starts taking the other path without being edited [T5]
 - [ ] Reconciliation and delivery stop sharing a single point of failure
+
+---
+
+## Epic 10: Goals and the morning briefing (P3.5)
+
+Not yet built. See [11-goals-spec.md](11-goals-spec.md).
+
+### US-10.1 Set a goal tied to an existing reminder
+I message "I want to hit the gym four times this week".
+
+- [ ] A goal is created linked to the gym item, with `target_count = 4` and a
+      weekly period [O1, O2]
+- [ ] Progress is read from `chains`, with no separate tracking write [O4]
+- [ ] Asking "how's the gym goal going" returns a number that matches what the
+      dashboard would show [O4]
+
+### US-10.2 Set a goal with no underlying reminder
+I message "goal for the week: ship the Q3 report".
+
+- [ ] A freestanding goal is created with no `item_id` [O2]
+- [ ] The agent does not ask what item to attach it to [A4-style: apply the
+      documented shape, do not force a fit]
+
+### US-10.3 Report progress on a freestanding goal
+I message "report's at about 60%, first draft is done".
+
+- [ ] An append-only `goal_updates` row is written [O3]
+- [ ] The goal's displayed progress is this update, not a separately
+      maintained percentage [O3]
+- [ ] A message with neither a percentage nor a note is rejected before any
+      write [O3]
+
+### US-10.4 A goal resolves at period end
+A weekly item-linked goal's period ends.
+
+- [ ] The goal becomes `met` or `missed` based on the count against `chains`,
+      evaluated by a scheduled pass rather than by the date rolling over [O5]
+- [ ] A terminal goal is retained, not deleted [Principle 2, applied to goals]
+
+### US-10.5 Get a morning briefing that expects a reply
+It is the configured local time.
+
+- [ ] A message arrives stating what today includes: due items, active goal
+      progress, anything that broke from the normal routine [O6]
+- [ ] No model call happens at send time — the text was composed ahead of
+      schedule [O6, Principle 1]
+- [ ] If generation failed, a plain templated summary arrives instead of
+      silence [O7]
+
+### US-10.6 Ignore the morning briefing
+I do not reply.
+
+- [ ] After the grace window, the briefing is recorded as unanswered [O8]
+- [ ] Nothing about an occurrence or an item changes state because of this —
+      a briefing has no state machine of its own [O8]
+- [ ] What happens next is deliberately unspecified here — see
+      [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing) [O9]
+
+### US-10.7 See goal progress and velocity on the dashboard
+- [ ] Item-linked and freestanding goals both appear on the statistics view [O10]
+- [ ] A weekdays-only item's streak is not penalized for weekends it was never
+      scheduled on [V7]
+- [ ] The agent's numbers for a goal match the dashboard's numbers exactly [O4]

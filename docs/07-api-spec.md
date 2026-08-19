@@ -230,12 +230,61 @@ Item-scoped and global respectively.
 
 ---
 
+## Goals
+
+**Status: specified, not built** — P3.5, see [11-goals-spec.md](11-goals-spec.md).
+
+### `GET /api/goals?filter=active|all`
+
+### `POST /api/goals`
+
+```json
+{
+  "title": "gym four times this week",
+  "period_kind": "week",
+  "item_id": "itm_01H...",
+  "target_count": 4
+}
+```
+
+`item_id` and `target_count` are set together for an item-linked goal, and both
+omitted for a freestanding one. `400` on validation failure, same shape as
+`POST /api/items` — the specific rule that failed, named in the body, because
+that text is what the escalation ladder reads.
+
+### `PATCH /api/goals/{id}`
+
+Title, period bounds, or status (`abandoned` only — `met`/`missed` are set only
+by evaluation, never by direct write).
+
+### `POST /api/goals/{id}/progress`
+
+Freestanding goals only. `409` on an item-linked goal — its progress has no
+write path, it is a read over `chains`.
+
+```json
+{ "progress_pct": 60, "note": "first draft done" }
+```
+
+Appends a `goal_updates` row. At least one of `progress_pct` or `note` is
+required.
+
+### `GET /api/goals/{id}/progress`
+
+The full `goal_updates` history for a freestanding goal, or the `chains`-derived
+progress series for an item-linked one — same response shape either way, so a
+chart component does not need to know which kind of goal it is rendering.
+
+---
+
 ## Statistics
 
 ### `GET /api/stats/summary?range=week|month|quarter|all`
 
 Completion rate, current and longest streak per item, median lag from notification
-to resolution, totals by status.
+to resolution, totals by status. Once P3.5 lands, includes goal rows: progress
+toward target and velocity for item-linked goals, latest `progress_pct` for
+freestanding ones.
 
 ### `GET /api/stats/timeseries?range=&bucket=day|week`
 
@@ -243,8 +292,10 @@ to resolution, totals by status.
 
 Completions bucketed by day of week and hour of day.
 
-All three read the `chains` view, so a snooze chain counts once and the agent's
-`get_stats` tool returns numbers identical to the dashboard.
+All three read the `chains` view (and, once P3.5 lands, `goals`/`goal_updates`
+alongside it), so a snooze chain counts once, a goal's numbers are computed the
+same way regardless of caller, and the agent's `get_stats` tool returns numbers
+identical to the dashboard.
 
 ---
 

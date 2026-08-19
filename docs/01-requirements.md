@@ -16,7 +16,7 @@ Priority levels:
 |---|---|---|
 | S1 | M | Single user. No multi-tenancy, no user table, no per-user configuration. Deferred rather than rejected: the product today is single-tenant and the commercialization shape, if any, is undecided. See [10-open-questions.md](10-open-questions.md#q-13-commercialization-shape). |
 | S2 | M | No automated test suite required. Rough edges are acceptable; unreliable reminder delivery is not. One carve-out is under discussion, in [Q-14](10-open-questions.md#q-14-rrule-and-dst-expansion-correctness). |
-| S3 | M | Scope is reminders and, later, calendar events. Not a general-purpose assistant. |
+| S3 | M | Scope is reminders, calendar events, and personal goal tracking — a work/productivity companion, not a general-purpose assistant. Goals are a first-class entity alongside items, not a third item kind. See [D-024](08-decisions.md#d-024-goals-are-a-first-class-entity-not-a-third-item-kind). |
 | S4 | L | Calendar events supported as a first-class item kind with duration, sharing all conversational actions with reminders. |
 
 ## D. Deployment and infrastructure
@@ -170,6 +170,22 @@ Priority levels:
 | V4 | M | A calendar view of upcoming occurrences, backed by a single date-range query, colour-coded by item and status. |
 | V5 | M | A statistics view covering completion rate over time, current and longest streak per item, median lag from notification to resolution, and a time-of-day completion heatmap. |
 | V6 | S | Statistics shown to the user and statistics available to the agent come from the same aggregation code. |
+| V7 | S | A streak is computed only over the days an item's own schedule was active, so a weekdays-only item's streak is not broken by weekends it was never scheduled to fire on. No separate "weekday mode" — this falls out of streaks already being computed over `occurrences`, which only has rows for days the schedule produced. |
+
+## O. Goals and briefing
+
+| ID | Pri | Requirement |
+|---|---|---|
+| O1 | M | Goals can be set at flexible periods: daily, weekly, monthly, or a custom date range. |
+| O2 | M | A goal is either item-linked (a target count against an existing item's `chains` over the goal's period) or freestanding (independent of any item, progress reported conversationally). Both are the same entity, not two features. |
+| O3 | M | Freestanding goal progress is recorded through an explicit tool call, append-only. It is never inferred from other activity. |
+| O4 | M | Goal progress and velocity are computed from the same aggregation source item statistics already use (`chains`) wherever a goal is item-linked, so the agent's numbers and the dashboard's numbers cannot diverge. Same rule as V6, applied to goals. |
+| O5 | S | A goal resolves to `met`, `missed`, or `abandoned` at period end, evaluated by a scheduled pass rather than by the clock passing the boundary — the same principle K6 already applies to `missed` occurrences. |
+| O6 | M | A daily morning briefing sends at a configured local time, composed ahead of send time from the same context the agent's system prompt uses (active items, today's occurrences, active goals). No model call occurs at send time — same rule as N2. |
+| O7 | M | If briefing generation fails, a plain templated summary sends instead. Delivery never depends on an LLM call succeeding — same rule as N3. |
+| O8 | M | Whether the morning briefing was replied to is tracked, and evaluated after a grace window — the same shape K6 and the reconciler already use for `missed`, applied to a proactive message rather than an occurrence. |
+| O9 | L | Tone strategy for an unanswered morning briefing is deliberately undecided, and is in tension with G8 (never guilt, never scold). See [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing). |
+| O10 | S | Velocity — rate of progress toward an item-linked goal's target, not just current streak — is tracked and shown visually, per V5. |
 
 ## X. Calendar integration
 

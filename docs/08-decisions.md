@@ -476,3 +476,62 @@ against extra moving parts. The tension is real and resolves cleanly: they are
 sidecars, not components. Nothing in the fire path reads them, scraping is pull-
 based so a dead Prometheus cannot block the app, and if both die every reminder
 still fires. That is the same degradation rule as everything else here.
+
+---
+
+## D-024: Goals are a first-class entity, not a third item kind
+
+**Decision.** A new `goals` table, separate from `items`. A goal is either
+item-linked (a target count against an existing item's `chains` over a
+period) or freestanding (no underlying item, progress reported
+conversationally and logged append-only to `goal_updates`). Both shapes live
+in the same table and the same tool catalog rather than being built as two
+features.
+
+**Forced by.** `items.kind` is generic over "a thing that expands into
+occurrence rows with a fire instant" (D-017's whole point), and a goal is
+neither of those things — it does not fire, is never notified, and is not
+resolved once. Bending the materializer, scheduler, and status state machine
+to accommodate an entity with no instant would cost more than a second table,
+and would put a `CHECK (kind IN (...))` conditional in every one of them for a
+concept that shares none of their machinery.
+
+The item-linked/freestanding split was the harder call. Item-linked-only
+would be cheap — it is a read against data that already exists — but cannot
+represent "ship the report by Friday," which has no underlying reminder and
+was one of the two examples that motivated this document. Freestanding-only
+would handle everything but throw away the automatic tracking `chains`
+already provides for anything that *is* a recurring item. Building both as one
+entity rather than choosing is what keeps "goals" one concept instead of two
+half-features that happen to share a name.
+
+**Cost.** A second write path alongside items and occurrences, with its own
+validation table and its own evaluation pass. `goal_updates` duplicates the
+shape of `conversations` (an append-only log standing in for a mutable
+current-value column) rather than reusing it, because a goal update is not a
+conversation turn and conflating them would make `toModelMessage`-style replay
+logic (see P1's history handling) responsible for a second row shape it does
+not otherwise need to know about.
+
+---
+
+## D-025: Goals and the morning briefing are sequenced after reconciliation, not built alongside resolution
+
+**Decision.** [P3.5](09-roadmap.md#p35-goals--briefing) — goals, goal
+evaluation, and the morning briefing — lands after P3 (reconciliation), not
+alongside P2 (resolution) or earlier.
+
+**Forced by.** The same reasoning the roadmap already states for why P3 comes
+before P4 and P5: "data before analysis." Goal evaluation and a briefing that
+reports "things that broke from your normal routine" are both statements
+about completion history, and before P2 and P3 exist that history is sparse —
+resolutions only happen when someone remembers to report them, because
+nothing is asking yet. Building goal evaluation against sparse data produces
+the same failure P4/P5 were sequenced to avoid: a feature that looks broken
+because it had nothing to work with, when the actual defect is sequencing.
+
+**Cost.** The morning briefing — arguably the single most visible new
+feature in this document — waits for three phases it does not otherwise
+depend on technically. Accepted for the same reason P5 waits: better to build
+it once, on real data, than to build it early and have its first weeks of
+output misdiagnose the design.

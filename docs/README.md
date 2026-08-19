@@ -1,9 +1,11 @@
 # Navi
 
-A self-hosted, single-user reminder service with a conversational agent front end.
-Reminders are created and resolved by messaging the agent in natural language, or by
-tapping a button on the reminder itself, or by checking a box in a small web app.
-The system is built so that calendar events can be added later without restructuring.
+A self-hosted, single-user reminder and goal-tracking companion with a
+conversational agent front end. Reminders are created and resolved by messaging
+the agent in natural language, or by tapping a button on the reminder itself, or
+by checking a box in a small web app. Goals sit alongside reminders as their own
+entity, evaluated against the same completion history. The system is built so
+that calendar events can be added later without restructuring.
 
 
 ## Status
@@ -35,6 +37,7 @@ and [D-023](08-decisions.md#d-023-metrics-and-dashboards-are-part-of-the-system-
 | [08-decisions.md](08-decisions.md) | Decision records with rationale and consequences |
 | [09-roadmap.md](09-roadmap.md) | Phased build plan with exit criteria |
 | [10-open-questions.md](10-open-questions.md) | Deferred decisions and known unknowns |
+| [11-goals-spec.md](11-goals-spec.md) | Goals, progress tracking, velocity, and the morning briefing (P3.5, not yet built) |
 
 ## Glossary
 
@@ -62,6 +65,17 @@ day and asks about it in a single message, rather than nagging per item.
 
 **Copywriter.** The job that generates the personalized text attached to an
 occurrence shortly before it fires.
+
+**Goal.** A target over a period (day, week, month, or custom range) — not a
+recurring thing with a fire instant, so it is its own entity rather than a
+third item kind. Either item-linked (a count against an existing item's
+`chains`) or freestanding (progress reported conversationally). See
+[11-goals-spec.md](11-goals-spec.md).
+
+**Briefing.** The daily proactive message, sent at a configured local time,
+that states what today should look like and expects a reply. The one
+proactive surface in this system that has opinions about being ignored — see
+[11-goals-spec.md](11-goals-spec.md#the-morning-briefing).
 
 **Transport.** A messaging channel adapter. Two roles exist: notification
 transport (outbound pushes carrying action buttons) and conversation transport

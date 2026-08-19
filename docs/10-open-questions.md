@@ -120,6 +120,42 @@ done" message is the kind of thing that is pleasant for a week and then noise.
 
 ---
 
+## Needs an answer before P3.5
+
+### Q-16: Tone for an unanswered morning briefing
+
+The morning briefing (O6-O9, [11-goals-spec.md](11-goals-spec.md#the-morning-briefing))
+is explicitly meant to expect a reply and to have opinions about not getting
+one. `persona.md`'s existing hard rule — never guilt, never scold (G8) — was
+written for reminder copy and the reconciler's end-of-day question, both of
+which are about one task going unanswered for a few hours. Whether a
+proactive, daily, reply-expecting message is allowed a different, firmer
+register than that rule currently permits is genuinely unresolved, and it is
+the one place this expansion of scope pushes directly against an existing
+hard rule rather than extending it.
+
+Three shapes it could take, none chosen:
+
+- **The G8 rule wins outright.** The briefing gets firmer phrasing on repeated
+  non-response (shrink-the-ask style, same move the tone ladder already makes
+  for consecutive misses) but never anything a reasonable reading would call
+  guilt or scolding. Consistent with the rest of the persona design; may not
+  be what "gets mad if I don't respond" was actually asking for.
+- **The briefing is a scoped exception.** `persona.md` gains a second,
+  stricter register that applies only to unanswered briefings, with its own
+  explicit bounds on what "firm" is allowed to say — decided in a persona.md
+  draft, not in the abstract.
+- **Escalating firmness is enough and "mad" was shorthand for that.** No
+  scoped exception; O9's tension resolves by re-reading the original request
+  as wanting consequence and directness, not anger.
+
+**Resolve by:** during P3.5, once there is a `persona.md` draft with worked
+examples to react to — the same way G7's tone ladder states were only really
+legible once they existed as example copy rather than a table of rules. Not
+worth deciding from first principles before that draft exists.
+
+---
+
 ## Needs an answer before P5
 
 ### Q-7: How long "enough history" is

@@ -184,6 +184,47 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 ---
 
+## P3.5: Goals & Briefing
+
+**Goal.** The app tracks what you're working toward, not just what's scheduled,
+and it starts the day by telling you what it should look like.
+
+Numbered out of sequence deliberately — it lands after P3 and before P4, and a
+decimal keeps every reference to P4 through P7 elsewhere in this repository
+stable rather than triggering a renumbering pass for a phase added later. See
+[D-025](08-decisions.md#d-025-goals-and-the-morning-briefing-are-sequenced-after-reconciliation-not-built-alongside-resolution)
+for why it waits this long, and [11-goals-spec.md](11-goals-spec.md) for the
+full design.
+
+- `goals` and `goal_updates` tables: item-linked and freestanding goals as one
+  entity (D-024)
+- Tool catalog additions: `create_goal`, `update_goal`, `list_goals`,
+  `log_goal_progress`
+- Goal evaluation: a sweeper-timed pass, not the clock, assigns `met` or
+  `missed` at period end (same principle as K6)
+- Velocity for item-linked goals, computed from `chains`, never a stored
+  counter
+- Morning briefing loop: composed ahead of send time (invariant 1), plain-
+  template fallback, no new occurrence kind
+- Response tracking for the briefing: `kv.awaiting_response:{date}` and a
+  grace-window evaluation, reusing reconciliation's shape
+- `persona.md` gains whatever Q-16 resolves to before this phase ships
+
+**Exit criteria**
+
+- [ ] A weekly item-linked goal ("gym four times this week") tracks progress
+      from `chains` automatically, with no separate write
+- [ ] A freeform goal ("ship the report by Friday") accepts a conversational
+      progress update and evaluates `met`/`missed` at period end
+- [ ] The morning briefing arrives at the configured time with no model call
+      in the firing path, and degrades to a plain summary on generation failure
+- [ ] A briefing that gets no reply is detected after its grace window, the
+      same shape as an occurrence going `missed`
+- [ ] Goal progress and velocity numbers from the agent match the dashboard's
+      numbers exactly, same as V6 already requires for item statistics
+
+---
+
 ## P4: Interfaces
 
 **Goal.** A screen that is faster than typing.
@@ -194,6 +235,8 @@ it is the wrong one to rush. Everything after it is recoverable.
 - Calendar view over `/api/occurrences`, colour-coded by item and status
 - Statistics: completion rate over time, streaks, median lag, time-of-day heatmap,
   charted with uPlot
+- Goal progress and velocity charts, same view, reading the same aggregation
+  as `get_stats` (O4, O10)
 - `get_stats` tool reading the same `chains` view
 - Cloudflare Access on `/app` and `/api`
 
@@ -337,3 +380,8 @@ imagination rather than data.
 The one deliberate inversion is that P3 comes before the dashboards, even though
 dashboards feel more visible. Reconciliation is what makes the completion data
 dense rather than sparse, and sparse data makes both P4 and P5 look broken.
+
+P3.5 is the same rule applied to a phase added later rather than planned from
+the start: goal evaluation and a briefing that reports on your routine are
+both statements about completion history, and they wait for the same reason
+P4 and P5 do. See D-025.

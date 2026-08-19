@@ -9,6 +9,7 @@ modes.
 | **Conversational agent** | On inbound message | Tell the user, write nothing | Seconds, user is waiting |
 | **Copywriter** | Ahead of each occurrence | Fall back to plain title | Minutes, nobody is waiting |
 | **Reconciler composer** | Once daily | Fall back to a templated list | Seconds |
+| **Briefing composer** (P3.5, not yet built) | Once daily, ahead of `BRIEFING_AT` | Fall back to a plain template built from context injection | Minutes, nobody is waiting |
 
 ## Conversational agent
 
@@ -88,6 +89,31 @@ type ProposeChangeArgs struct {
 type RequestEscalationArgs struct {
     Reason string `json:"reason" jsonschema:"required"`
 }
+
+// P3.5, not yet built — see 11-goals-spec.md
+type CreateGoalArgs struct {
+    Title       string `json:"title" jsonschema:"required"`
+    PeriodKind  string `json:"period_kind" jsonschema:"required,enum=day,enum=week,enum=month,enum=custom"`
+    PeriodStart *string `json:"period_start,omitempty"` // defaults to today
+    PeriodEnd   *string `json:"period_end,omitempty"`   // required when period_kind=custom
+    ItemID      *string `json:"item_id,omitempty"`      // set for an item-linked goal
+    TargetCount *int    `json:"target_count,omitempty"` // required when item_id is set
+}
+
+type UpdateGoalArgs struct {
+    GoalID  string      `json:"goal_id" jsonschema:"required"`
+    Changes GoalChanges `json:"changes" jsonschema:"required"`
+}
+
+type ListGoalsArgs struct {
+    Filter string `json:"filter,omitempty"` // active | all, default active
+}
+
+type LogGoalProgressArgs struct {
+    GoalID      string  `json:"goal_id" jsonschema:"required"`
+    ProgressPct *int    `json:"progress_pct,omitempty" jsonschema:"minimum=0,maximum=100"`
+    Note        *string `json:"note,omitempty"`
+}
 ```
 
 Returns: `CreateItemArgs` and `UpdateItemArgs` yield a result carrying the next
@@ -116,6 +142,12 @@ schedule and not allowed to act on them. An assistant that silently moves a
 reminder because it inferred you would prefer 08:00 is a trust-destroying bug that
 presents itself as a feature.
 
+**`log_goal_progress` is a conversational turn, not a resolution (P3.5).** It
+requires at least one of `progress_pct` or `note` and writes an append-only
+`goal_updates` row rather than going through `bulk_resolve` or the status
+state machine — a goal is not an occurrence, and "put the report at about
+60%" has no terminal state to reach. See [11-goals-spec.md](11-goals-spec.md#progress-tracking).
+
 ### Context injection
 
 Every turn carries:
@@ -136,8 +168,13 @@ Today's occurrences:
   occ_01H..  07:30  morning stretch  pending
   occ_01H..  18:40  evening walk     pending
 
+Active goals:                                    [P3.5, not yet built]
+  gol_01H..  "gym 4x this week"   item-linked  2/4 this period
+  gol_01H..  "ship the report"    freestanding 60%, updated 2026-08-04
+
 Last touched: itm_01H.. ("evening walk")
 Context ref:  reconcile:2026-08-05   [present only when replying to a check-in]
+Context ref:  briefing:2026-08-05    [present only when replying to a briefing, P3.5]
 ```
 
 Today's occurrences with status are the addition that makes "everything except the
@@ -146,6 +183,12 @@ outstanding today, so "everything" would be unresolvable.
 
 `Last touched` is what makes "make it more like five times" resolve without
 naming the item again.
+
+Active goals is read from the same `internal/conversation.Store` interface as
+active items — a widened method, not a second read path — and is the block
+both the agent and the (P3.5) briefing composer read, so a goal mentioned in
+the morning briefing and a goal the agent discusses mid-conversation are
+looking at identical numbers.
 
 ### System prompt structure
 
@@ -248,6 +291,7 @@ when shown the error text, and it is far cheaper than a tier-two call.
 | `copywriter` | Gemma 4 31B | none | off | Failure is invisible thanks to the plain-title fallback, so no tier 2 |
 | `reconcile` | Gemma 4 31B | Gemini 3.1 Flash Lite | off | Composing one short question from a list |
 | `digest` | Gemini 3.1 Flash Lite | larger | on | Weekly, actually reasons over statistics, cost is negligible at that frequency |
+| `briefing` (P3.5) | Gemma 4 31B | Gemini 3.1 Flash Lite | off | Same shape as `reconcile`: composing one message from a list, not reasoning over it |
 
 Thinking mode off for copywriting is deliberate. Reasoning tokens help with
 "weekdays but not the week of the 14th" and do nothing for a one-line nudge except
@@ -390,6 +434,40 @@ Rules:
 - The reply is handled by `bulk_resolve`, so reconciliation and batch completion
   are the same code path.
 
+## Briefing composer (P3.5, not yet built)
+
+Runs once daily, roughly 30 minutes ahead of the configured `BRIEFING_AT`,
+reusing the copywriter's shape rather than inventing a third generation
+pattern: a safety-net pass with time to spare, no refresh pass, and a plain
+fallback on failure. Composed from the same context blob context injection
+assembles for the agent — active items, today's occurrences, active goals and
+their current progress — not a second read of the same data.
+
+```
+Wednesday. Vitamins and the evening walk are on deck; morning stretch is
+silent so it won't ping. Gym goal is at 2 of 4 for the week. Anything else
+you want today to include?
+```
+
+Rules:
+
+- States what today looks like, not a generic greeting — the point is
+  information, and "what should today include" is a real question expecting
+  a real answer, not a rhetorical one.
+- Names anything that broke from the normal routine explicitly: an item
+  resuming from a pause, a schedule changed since yesterday, a goal at risk
+  of missing its period. This is the one place the briefing goes beyond what
+  the reconciler or copywriter already state, because it is the one surface
+  looking a full day ahead rather than at a single item or a single day's
+  leftovers.
+- Sent with `context_ref = briefing:{date}`, mirroring reconciliation's
+  `context_ref = reconcile:{date}`, so a reply is recognised as answering the
+  briefing rather than starting a new request.
+- Falls back to a plain templated summary if the model call fails — the same
+  item and goal lists, rendered without a model, never silence.
+- Tone on non-response is [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing),
+  unresolved. Nothing about composition or fallback depends on the answer.
+
 ## Proactive behaviour
 
 Triggers are deterministic conditions evaluated in code. Responses are generated.
@@ -403,6 +481,8 @@ unpredictable behaviour.
 | 3 snoozes on one occurrence | `propose_change` suggesting a different time |
 | 14 days dormant on an active item | Ask whether to keep it |
 | Weekly, Sunday evening | Digest with statistics and one observation |
+| Morning briefing unanswered past grace (P3.5) | Whatever [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing) resolves to |
+| Goal at risk of missing its period, P3.5 | Named in the next morning briefing, not a separate interruption |
 
 Cap unprompted messages at three per day, tracked in `kv.proactive_count:{date}`.
 Personality is the feature most likely to charm for a fortnight and then get

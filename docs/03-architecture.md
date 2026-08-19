@@ -77,7 +77,8 @@ a day and every added moving part is another thing that can silently stop.
 | **Scheduler** | 30s | Claims due occurrences, sends notifications, marks `notified` |
 | **Copywriter** | 60s | Generates occurrence message text on a two-pass schedule |
 | **Reconciler** | 60s (acts at configured local times) | Sends the daily check-in, then applies `missed` after grace |
-| **Sweeper** | hourly | Snooze-cap enforcement, log retention, backfill of missed materialization |
+| **Sweeper** | hourly | Snooze-cap enforcement, log retention, backfill of missed materialization, goal evaluation at period end (P3.5) |
+| **Briefing** | 60s (composes ahead of `BRIEFING_AT`, sends at `BRIEFING_AT`, evaluates response after grace) | Composes and sends the morning briefing, tracks whether it was answered — **P3.5, not yet built**, see [11-goals-spec.md](11-goals-spec.md#the-morning-briefing) |
 
 Running these in-process rather than as separate containers is deliberate. They
 share the SQLite connection pool, they are all trivially small, and a single
@@ -177,6 +178,29 @@ agent bulk_resolve  ┘        │
 Three surfaces, one endpoint, one state machine. This is what keeps the statuses
 coherent and makes idempotency a property of the design rather than a feature
 bolted on per surface.
+
+### Briefing path (P3.5, not yet built)
+
+```
+briefing loop, ~30 min before BRIEFING_AT
+  → compose from the same context blob the agent's system prompt uses
+      (active items, today's occurrences, active goals and progress)
+  → store the text; on generation failure, fall back to a plain template
+      built from the same context with no model call
+
+briefing loop, at BRIEFING_AT
+  → send the stored text via the conversation transport
+  → context_ref = briefing:{date}; kv.awaiting_response:{date} = sent_at
+
+briefing loop, at grace expiry
+  → if kv.awaiting_response:{date} is still set, evaluate as unanswered
+  → any reply with context_ref = briefing:{date} clears it first
+```
+
+No model call at send time, same as the fire path. Unlike the fire path there
+is no occurrence row to claim — a single daily message with no per-item
+variation is a `kv` flag, not a reason to route a global event through the
+occurrence table. See [11-goals-spec.md](11-goals-spec.md#the-morning-briefing).
 
 ## Transport abstraction
 
@@ -448,6 +472,7 @@ Each row states what breaks, what the user notices, and what the system does.
 | Cloudflare Tunnel down | No web app | Local firing continues, and outbound Telegram is unaffected because it dials out. Inbound depends on the adapter mode: webhook delivery stalls until Telegram's retries succeed, `getUpdates` long-polling does not care at all |
 | Materializer misses a night | Occurrences thin out beyond the horizon | Hourly sweeper detects a horizon shorter than 25 days and re-runs |
 | SQLite file lost | Total | Litestream restore |
+| Briefing generation fails (P3.5) | Morning message is a plain template, not personalized | Same fallback rule as N3 and the copywriter, applied to the briefing composer |
 
 The pattern across all of these: the reminder still happens, or the reconciliation
 pass catches what was dropped. Reconciliation is not just a UX feature, it is the

@@ -149,7 +149,7 @@ it turns escalation tuning into a query rather than a guess.
 ```sql
 CREATE TABLE llm_calls (
   id                 TEXT PRIMARY KEY,
-  task               TEXT NOT NULL,       -- 'crud' | 'copywriter' | 'digest' | 'reconcile'
+  task               TEXT NOT NULL,       -- 'crud' | 'copywriter' | 'digest' | 'reconcile' | 'briefing' (P3.5)
   tier               INTEGER NOT NULL,
   model              TEXT NOT NULL,
   prompt_tokens      INTEGER,
@@ -165,6 +165,48 @@ CREATE TABLE llm_calls (
 
 Retention: 90 days. It will be the largest table by row count within a month and
 nothing older is useful once the ladder is tuned.
+
+### `goals` and `goal_updates`
+
+**Status: specified, not built** — see [11-goals-spec.md](11-goals-spec.md),
+scheduled for [P3.5](09-roadmap.md#p35-goals--briefing). A goal is a target
+over a period, not a recurring thing with a fire instant, which is why it is
+its own table rather than a third `items.kind` ([D-024](08-decisions.md#d-024-goals-are-a-first-class-entity-not-a-third-item-kind)).
+
+```sql
+CREATE TABLE goals (
+  id            TEXT PRIMARY KEY,
+  title         TEXT NOT NULL,
+  period_kind   TEXT NOT NULL CHECK (period_kind IN ('day', 'week', 'month', 'custom')),
+  period_start  TEXT NOT NULL,             -- ISO date, local
+  period_end    TEXT NOT NULL,             -- ISO date, local, inclusive
+
+  item_id       TEXT REFERENCES items(id), -- NULL for freestanding goals
+  target_count  INTEGER,                   -- required when item_id is set
+
+  status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'met', 'missed', 'abandoned')),
+
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE goal_updates (
+  id            TEXT PRIMARY KEY,
+  goal_id       TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  note          TEXT,
+  progress_pct  INTEGER CHECK (progress_pct BETWEEN 0 AND 100),
+  source        TEXT NOT NULL CHECK (source IN ('agent', 'web', 'briefing')),
+  created_at    TEXT NOT NULL
+);
+```
+
+An item-linked goal's progress is always a query over `chains`, never a stored
+counter. A freestanding goal's progress is its most recent `goal_updates` row
+— an append-only log standing in for a mutable current-value column, the same
+pattern `conversations` already uses instead of a single "last message"
+field. See [11-goals-spec.md](11-goals-spec.md#schema) for the validation
+rules this schema is paired with.
 
 ### `kv`
 
@@ -187,6 +229,8 @@ Keys in use:
 | `last_reconcile_date` | Prevents a duplicate check-in after a restart |
 | `proactive_count:{date}` | Daily cap on unprompted agent messages |
 | `global_pause_until` | Vacation mode |
+| `awaiting_response:{date}` | Set when the morning briefing sends, cleared on reply; read by the grace-window pass (P3.5, 11-goals-spec.md) |
+| `last_briefing_date` | Prevents a duplicate briefing after a restart, same role as `last_reconcile_date` (P3.5) |
 
 Every key in that table except `last_materialized_through` is *per-person* state
 stored as a singleton, which is correct under S1 and is the assumption that would
@@ -329,6 +373,11 @@ CREATE INDEX idx_llm_created ON llm_calls(created_at DESC);
 -- transport/external_id and is never a dedup candidate.
 CREATE UNIQUE INDEX idx_conv_dedup ON conversations(transport, external_id)
   WHERE transport IS NOT NULL AND external_id IS NOT NULL;
+
+-- P3.5: active goals, the set the briefing and context injection both read
+CREATE INDEX idx_goals_active ON goals(status) WHERE status = 'active';
+CREATE INDEX idx_goals_item ON goals(item_id) WHERE item_id IS NOT NULL;
+CREATE INDEX idx_goal_updates_goal ON goal_updates(goal_id, created_at DESC);
 ```
 
 Partial indexes matter more than usual here. `status = 'pending'` is a small
@@ -344,6 +393,8 @@ seconds for the life of the system.
 | `conversations` | 180 days |
 | `llm_calls` | 90 days |
 | `kv` | Manual |
+| `goals` | Never deleted once terminal (`met`/`missed`/`abandoned`), same reasoning as `items.archived_at` |
+| `goal_updates` | Retained with the goal, since it is the only record of trend for a freestanding goal |
 
 The hourly sweeper enforces these. Occurrence retention being unbounded is fine:
 a dozen items firing daily produces roughly four thousand rows a year, which

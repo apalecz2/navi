@@ -184,20 +184,35 @@ func (s *Store) Ping(ctx context.Context) error {
 	return nil
 }
 
-// tx runs fn inside one BEGIN IMMEDIATE transaction on the writer. It is the
-// only place BeginTx appears, so no caller can start a transaction that is not
-// immediate and none can hold one open across a return.
-//
-// The deferred Rollback is a no-op after a successful Commit, and is what
-// releases the single writer connection when fn returns an error or panics.
+// tx runs fn inside one BEGIN IMMEDIATE transaction on the writer. It is what
+// almost every write in this package uses, and it hands out only the generated
+// queries, so a caller cannot reach the transaction itself without saying so.
 func (s *Store) tx(ctx context.Context, fn func(*sqlc.Queries) error) error {
+	return s.txConn(ctx, func(q *sqlc.Queries, _ *sql.Tx) error { return fn(q) })
+}
+
+// txConn is the same transaction with the handle exposed, for the one kind of
+// statement sqlc cannot generate.
+//
+// That is the chains view and only the chains view: sqlc's SQLite analyzer
+// cannot resolve a recursive CTE's column list and rejects the migration
+// outright, so sqlc.yaml omits it and records that a P2 query against it is
+// hand-written with database/sql inside this package. Rolling the chain up
+// inside the same transaction as the write it reports on is why the handle has
+// to come out at all — a read taken after the commit is a different snapshot.
+//
+// It is the only place BeginTx appears, so no caller can start a transaction
+// that is not immediate and none can hold one open across a return. The
+// deferred Rollback is a no-op after a successful Commit, and is what releases
+// the single writer connection when fn returns an error or panics.
+func (s *Store) txConn(ctx context.Context, fn func(*sqlc.Queries, *sql.Tx) error) error {
 	tx, err := s.writer.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := fn(sqlc.New(tx)); err != nil {
+	if err := fn(sqlc.New(tx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

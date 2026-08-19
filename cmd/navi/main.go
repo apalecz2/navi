@@ -170,6 +170,16 @@ func run() error {
 		}
 	}
 
+	// Snooze is registered separately rather than folded into the loop above,
+	// because snoozed is reachable only from notified: adding it to that `to`
+	// list would export a zero for pending -> snoozed, an edge the transition
+	// table forbids. Same argument the block's own comment makes about the two
+	// sources with no caller — a series for something that cannot happen
+	// misreports the system just as surely as a missing one does.
+	for _, src := range []domain.ResolutionSource{domain.ResolvedByWeb, domain.ResolvedByAgent} {
+		m.RegisterTransition(string(domain.StatusNotified), string(domain.StatusSnoozed), string(src))
+	}
+
 	sup := supervisor.New(log, h, m)
 	loops := []supervisor.Loop{
 		mat.Loop(),
@@ -184,7 +194,7 @@ func run() error {
 	sup.Register(loops...)
 	sup.Start(loopCtx)
 
-	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor, chatWebhook)
+	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)

@@ -402,6 +402,39 @@ Relative terms resolve against the item's timezone and window, not by naive
 arithmetic. "Tomorrow" on a 07:00 reminder means 07:00 tomorrow, not this time
 tomorrow.
 
+**"The item's normal time" is per kind**, and the two drawn kinds resolve
+against the window rather than to a flat 09:00:
+
+| Kind | Normal time |
+|---|---|
+| `one_off` | the `HH:MM` inside `at` |
+| `fixed` | `at` |
+| `windowed` | the window's start |
+| `fuzzy` | the window's start |
+
+The drawn kinds have no single time — that is what drawn means — so the
+window's opening is the nearest honest answer, and it is what R9's "resolved
+against the item's timezone *and window*" asks for. It also agrees with the
+table above for the ordinary case: the default window in `defaults.yaml` opens
+at 09:00, so an unspecified item still snoozes to 09:00 tomorrow. What changes
+is the specified one — an item with a 17:00-22:00 evening window snoozes into an
+evening it actually fires in rather than into a morning it never does.
+
+The literal 09:00 is therefore a last resort and not the windowed/fuzzy answer.
+It applies only when the stored schedule names no time this can read: an
+unparseable `at`, or a windowed/fuzzy column with no `window` at all. `Resolve`
+fills the window on every write path, so a row written by this service cannot
+reach it.
+
+`10m` and `1h` are arithmetic **on the instant** and the other two are wall
+clocks, and conflating them is the bug this split exists to prevent. Ten minutes
+from now is ten real minutes, so 01:55 + 1h on a spring-forward night is 03:55
+local and that is correct. `tonight` and `tomorrow` go through
+[`schedule.Instant`](#dst) instead, never through `now + 24h`: "09:00 tomorrow"
+across a spring-forward boundary is 23 hours away, and naive arithmetic puts the
+reminder at 10:00. A wall clock landing inside the gap takes the same forward
+shift every other materialized time does.
+
 ### Why a child row
 
 Mutating `starts_at` in place would be simpler and is wrong. It destroys the

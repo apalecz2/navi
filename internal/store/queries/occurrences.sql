@@ -112,6 +112,27 @@ SET status = ?, resolved_at = ?, resolution_note = ?, resolution_source = ?
 WHERE id = ?
   AND status = ?;
 
+-- ChildOccurrence is the row a snooze wrote for its parent - the live link of
+-- a chain, one step down.
+--
+-- It is :one because a snoozed row has exactly one child by construction: the
+-- second snooze of the same row is "already in the requested terminal state",
+-- which domain.Transition answers OutcomeNoop and which writes nothing. So a
+-- double-tapped Snooze button reads the child that already exists rather than
+-- minting a second one. idx_occ_parent covers the lookup.
+--
+-- The column list is spelled out rather than *, and this comment is plain
+-- ASCII, matching OverrideFuturePendingOccurrence above - see items.sql's
+-- UpdateItem for the sqlc truncation bug both avoid.
+--
+-- name: ChildOccurrence :one
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
+    snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
+    resolution_source, message_text, message_model, message_generated_at,
+    generation_attempts, generation_pass, created_at
+FROM occurrences
+WHERE parent_occurrence_id = ?;
+
 -- ListOccurrencesInRange is the agent's "today's occurrences" context block
 -- (docs/06-agent-spec.md#context-injection): every occurrence, across every
 -- item, starting inside [?, ?). Callers pass the device timezone's local-day

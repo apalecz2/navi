@@ -32,6 +32,16 @@ type Store interface {
 	// handler maps an outcome onto a status code and judges nothing itself.
 	ResolveOccurrence(ctx context.Context, id string, to domain.Status, note *string,
 		source domain.ResolutionSource, now time.Time) (store.Resolution, error)
+
+	// SnoozeOccurrence is the same arrangement one row wider: the state
+	// machine, the cap, the parent write and the child write all happen inside
+	// it, and at is the pure callback that answers when the child starts.
+	SnoozeOccurrence(ctx context.Context, id string, source domain.ResolutionSource,
+		now time.Time, at func(domain.Item, domain.Occurrence) (time.Time, error)) (store.Snooze, error)
+
+	// CurrentTZ is read once per snooze, before the transaction opens, so the
+	// delta resolves against the zone the device is actually in (C6).
+	CurrentTZ(ctx context.Context) (string, bool, error)
 }
 
 // Server holds what the handlers read. Nothing in this struct is written after
@@ -47,6 +57,13 @@ type Server struct {
 	// never moves; passing it in is what makes /healthz count exactly what the
 	// scheduler would claim.
 	claimFloor time.Time
+
+	// defaultTZ is cfg.Schedule.DefaultTZ, the bottom rung of schedule.Zones —
+	// where a floating item's wall clock resolves when kv.current_tz has never
+	// been set and the item carries no zone of its own. A plain value for the
+	// same reason claimFloor is one: it never changes for the life of the
+	// process, and a second config group would suggest it might.
+	defaultTZ *time.Location
 }
 
 // New builds the http.Server. It takes the HTTP config group rather than the
@@ -60,18 +77,26 @@ type Server struct {
 // names nothing (still the default outside P1 testing), in which case the
 // route is never registered and a POST to it 404s from the mux itself rather
 // than reaching a handler with nothing configured to verify against.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time, chatWebhook http.Handler) *http.Server {
-	s := &Server{log: log, health: h, metrics: m, store: st, claimFloor: claimFloor}
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler) *http.Server {
+	s := &Server{
+		log: log, health: h, metrics: m, store: st,
+		claimFloor: claimFloor, defaultTZ: defaultTZ,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
-	// The first /api route. Everything under /api is authenticated by
-	// Cloudflare Access at the tunnel edge, one-time PIN
-	// (docs/07-api-spec.md#authentication, ops/cloudflared-ingress.md) — there
-	// is no in-process check here because there is no session for one to read,
-	// and D-014's "auth is resolved before the handler runs" is that decision.
+	// Everything under /api is authenticated by Cloudflare Access at the tunnel
+	// edge, one-time PIN (docs/07-api-spec.md#authentication,
+	// ops/cloudflared-ingress.md) — there is no in-process check here because
+	// there is no session for one to read, and D-014's "auth is resolved before
+	// the handler runs" is that decision.
+	//
+	// Two routes, one state machine. Resolve is every terminal status; snooze is
+	// the one edge that also writes a row, because the chain continues in a
+	// child rather than in the row that was asked about (D-010).
 	mux.HandleFunc("POST /api/occurrences/{id}/resolve", s.handleResolveOccurrence)
+	mux.HandleFunc("POST /api/occurrences/{id}/snooze", s.handleSnoozeOccurrence)
 
 	// /metrics is served on the same listener but is deliberately absent from
 	// the tunnel ingress table: it carries no secrets, but it describes usage

@@ -154,8 +154,21 @@ it is the wrong one to rush. Everything after it is recoverable.
 - [ ] The message updates in place to show the outcome, leaving one message in the
       chat rather than two
 - [ ] Double-tapping Done does not double-record
-- [ ] Snooze creates a child, the chain completes once, the streak survives
-- [ ] Hitting the snooze cap resolves the chain as missed
+- [x] Snooze creates a child, the chain completes once, the streak survives —
+      verified (session 14) by `cmd/naviseed`'s snooze section: a notified row
+      snoozed through `POST /api/occurrences/{id}/snooze` keeps its `starts_at`
+      byte for byte and gains a `pending`, `is_override` child at
+      `snooze_depth 1`; completing that child makes `chains` read
+      `was_completed=true, snooze_count=1` from either end of the chain, with
+      the parent still `snoozed` and never rewritten. Double-tapping the snooze
+      returns the same child rather than a second one, and a real
+      `scheduler.Fire` pass afterwards sends the snoozed original zero times.
+- [x] Hitting the snooze cap resolves the chain as missed — verified (session
+      14) by the same section: a chain walked to `snooze_cap` and asked for one
+      more returns `409` `snooze_cap_reached` with `current_state: "missed"`,
+      writes no fourth child, and leaves the chain reading `snooze_count=3,
+      was_completed=false` with its terminal link `missed`. This is the only
+      caller of `missed` in the tree until P3's reconciler.
 - [ ] "Did my stretching already" at 07:00 cancels the 18:00 notification
 
 ---

@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/store"
 )
 
 // errorBody is the error envelope docs/07-api-spec.md#errors specifies, plus
@@ -61,6 +62,29 @@ func writeTransitionError(w http.ResponseWriter, log *slog.Logger, te *domain.Tr
 		Error:        "transition_illegal",
 		Message:      te.Message,
 		CurrentState: string(te.From),
+	})
+}
+
+// writeSnoozeCapReached renders an exhausted snooze chain as 409, reporting the
+// state the occurrence is now in — missed, because the cap resolved the chain
+// rather than refusing and leaving it hanging (R8).
+//
+// It is a separate writer from writeTransitionError because it is a separate
+// situation: nothing illegal was asked for and nothing was rejected. The
+// transition was legal, a precondition on it was not met, and the write that
+// followed is the one current_state reports. The message is the one
+// domain.CheckSnoozeCap composed, so it names the depth and the cap the way
+// every other message field in this API names its values.
+func writeSnoozeCapReached(w http.ResponseWriter, log *slog.Logger, res store.Snooze) {
+	message := "the snooze cap has been reached and the chain is now missed"
+	if res.Parent.ResolutionNote != nil {
+		message = *res.Parent.ResolutionNote
+	}
+
+	writeJSON(w, log, http.StatusConflict, errorBody{
+		Error:        "snooze_cap_reached",
+		Message:      message,
+		CurrentState: string(res.Parent.Status),
 	})
 }
 

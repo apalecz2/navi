@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -525,6 +526,19 @@ type Resolution struct {
 	Occurrence domain.Occurrence
 	Outcome    domain.Outcome
 	Previous   domain.Status
+
+	// Chain is the snooze chain this occurrence belongs to, rolled up after
+	// the write and inside the same transaction. It is the side effect
+	// docs/07-api-spec.md lists as "rolls the snooze chain up", and it is a
+	// read: completing a link never writes to its ancestors, which are snoozed
+	// and therefore terminal, and history is immutable (invariant 2). The view
+	// already is D-011 — any completed link completes the chain — so reading it
+	// is the whole roll-up.
+	//
+	// It is filled on Applied and on Noop, and is the zero value on a rejected
+	// transition, where the transaction rolled back and there is nothing to
+	// report but the state machine's answer.
+	Chain Chain
 }
 
 // ResolveOccurrence resolves one occurrence through the shared state machine
@@ -562,7 +576,7 @@ func (s *Store) ResolveOccurrence(
 ) (Resolution, error) {
 	var res Resolution
 
-	err := s.tx(ctx, func(q *sqlc.Queries) error {
+	err := s.txConn(ctx, func(q *sqlc.Queries, tx *sql.Tx) error {
 		row, err := q.GetOccurrence(ctx, id)
 		if err != nil {
 			return notFound("store: resolve occurrence", err)
@@ -594,30 +608,15 @@ func (s *Store) ResolveOccurrence(
 			return err
 		}
 		if outcome != domain.OutcomeApplied {
-			return nil
+			// Nothing was written, but the chain is still what the caller
+			// asked about, and a double tap should report the same numbers the
+			// first tap did rather than none.
+			res.Chain, err = chainFrom(ctx, tx, id)
+			return err
 		}
 
-		resolvedAt := domain.FormatTime(now)
-		sourceText := string(source)
-		n, err := q.ResolveOccurrence(ctx, sqlc.ResolveOccurrenceParams{
-			Status:           string(to),
-			ResolvedAt:       &resolvedAt,
-			ResolutionNote:   note,
-			ResolutionSource: &sourceText,
-			ID:               id,
-			Status_2:         string(res.Previous),
-		})
-		if err != nil {
-			return fmt.Errorf("store: resolve occurrence: %w", err)
-		}
-		if n == 0 {
-			// The guard refused it. Nothing else can have moved the row — this
-			// is inside the write transaction on the only writer — so this is a
-			// bug surfacing rather than a case with a story, and it is worth an
-			// error instead of a silent no-op that would report 200.
-			s.log.Warn("resolve: refused update", "occurrence", id,
-				"from", res.Previous, "to", to)
-			return fmt.Errorf("store: resolve occurrence %s: guard refused the update", id)
+		if err := s.writeResolutionTx(ctx, q, id, res.Previous, to, note, source, now); err != nil {
+			return err
 		}
 
 		// Mirror what the statement wrote, so the caller can render the new
@@ -627,7 +626,12 @@ func (s *Store) ResolveOccurrence(
 		res.Occurrence.ResolvedAt = &resolved
 		res.Occurrence.ResolutionNote = note
 		res.Occurrence.ResolutionSource = &source
-		return nil
+
+		// Last, so the roll-up reflects the write above it. This is what makes
+		// "completing the child completes the chain" a number the caller can
+		// report rather than a property it has to infer.
+		res.Chain, err = chainFrom(ctx, tx, id)
+		return err
 	})
 	if err != nil {
 		var te *domain.TransitionError
@@ -639,4 +643,256 @@ func (s *Store) ResolveOccurrence(
 		return Resolution{}, err
 	}
 	return res, nil
+}
+
+// Snooze is what one call to SnoozeOccurrence decided.
+//
+// It is a sibling of Resolution rather than a reuse of it, because a snooze
+// touches two rows and a resolution touches one — and a caller has to report
+// both, since R6's whole point is that the original keeps its timestamp while
+// the child carries the new one.
+type Snooze struct {
+	// Parent is the occurrence that was snoozed, after the write: snoozed on
+	// Applied, missed when the cap was reached, untouched on a no-op. Its
+	// StartsAt is never modified, by any path (R6, D-010).
+	Parent domain.Occurrence
+
+	// Child is the live link the chain continues in. On Applied it is the row
+	// just written; on a no-op it is the one the first snooze wrote, read back
+	// rather than duplicated. It is the zero value only when the cap was
+	// reached, since that path writes no child at all.
+	Child domain.Occurrence
+
+	Outcome  domain.Outcome
+	Previous domain.Status
+
+	// CapReached says the chain had already been snoozed as many times as the
+	// item allows, so it resolved as missed instead (R8).
+	//
+	// It is a field rather than an error because nothing failed: the cap is a
+	// precondition domain.CheckSnoozeCap answered, and the missed write that
+	// follows it is a real committed transition the caller has to count and
+	// report. An error return would mean discarding a write that happened.
+	CapReached bool
+
+	Chain Chain
+}
+
+// SnoozeOccurrence snoozes one occurrence: the original is marked snoozed and
+// keeps its true timestamp, and a child is written at the resolved time with an
+// incremented depth and the override flag (R6, D-010).
+//
+// at resolves the child's start time. It is a callback, and pure, for the same
+// reason MaterializeItem's plan is: the answer depends on the item's schedule
+// and zone, which is internal/schedule's business rather than this package's,
+// and it has to be computed against the row as it stands inside the transaction
+// rather than against one read before it opened. The caller resolves its zones
+// once, up front, and hands down a closure that touches nothing.
+//
+// The four answers, all of them the state machine's:
+//
+//   - notified -> snoozed under the cap: OutcomeApplied, both rows written.
+//   - snoozed -> snoozed: OutcomeNoop, nothing written, and the existing child
+//     read back, so a double-tapped button reports what the first tap produced
+//     instead of minting a second child.
+//   - at the cap: the same row goes notified -> missed instead, CapReached set.
+//     This is the only path in this repository that assigns missed, and it is
+//     the one 04-data-model's chain rule blesses by name — "a chain is missed if
+//     the terminal link is missed, including snooze-cap exhaustion". Everything
+//     else waits for P3's reconciler (D-008, K6).
+//   - anything else: a *domain.TransitionError carrying the current state.
+//     pending -> snoozed lands here, because the table has no such edge: a
+//     reminder that has not fired has nothing to be pushed back from.
+func (s *Store) SnoozeOccurrence(
+	ctx context.Context,
+	id string,
+	source domain.ResolutionSource,
+	now time.Time,
+	at func(item domain.Item, occ domain.Occurrence) (time.Time, error),
+) (Snooze, error) {
+	var res Snooze
+
+	err := s.txConn(ctx, func(q *sqlc.Queries, tx *sql.Tx) error {
+		row, err := q.GetOccurrence(ctx, id)
+		if err != nil {
+			return notFound("store: snooze occurrence", err)
+		}
+		occ, err := toDomainOccurrence(row)
+		if err != nil {
+			return err
+		}
+		res.Parent = occ
+		res.Previous = occ.Status
+
+		// The kind decides the valid status set and snooze_cap is the item's,
+		// so both come from the one in-transaction read.
+		itemRow, err := q.GetItem(ctx, occ.ItemID)
+		if err != nil {
+			return notFound("store: snooze occurrence: item", err)
+		}
+		item, err := toDomainItem(itemRow)
+		if err != nil {
+			return err
+		}
+
+		outcome, err := domain.Transition(item.Kind, occ.Status, domain.StatusSnoozed)
+		res.Outcome = outcome
+		if err != nil {
+			return err
+		}
+		if outcome != domain.OutcomeApplied {
+			childRow, err := q.ChildOccurrence(ctx, &occ.ID)
+			if err != nil {
+				return notFound("store: snooze occurrence: child", err)
+			}
+			if res.Child, err = toDomainOccurrence(childRow); err != nil {
+				return err
+			}
+			res.Chain, err = chainFrom(ctx, tx, id)
+			return err
+		}
+
+		if capErr := domain.CheckSnoozeCap(occ.SnoozeDepth, item.SnoozeCap); capErr != nil {
+			return s.missChainTx(ctx, q, tx, &res, item, id, source, now, capErr)
+		}
+
+		startsAt, err := at(item, occ)
+		if err != nil {
+			return err
+		}
+
+		// The parent's write is the resolution statement, unchanged. starts_at
+		// is not in its SET list and never has been, which is what makes "does
+		// not mutate the original timestamp" a property of the SQL rather than
+		// of this function remembering to leave it alone.
+		//
+		// resolution_note stays null: a snooze is not a resolution anyone
+		// attaches a reason to, and the endpoint's body carries no note field.
+		if err := s.writeResolutionTx(ctx, q, id, occ.Status, domain.StatusSnoozed, nil, source, now); err != nil {
+			return err
+		}
+		resolved := now
+		res.Parent.Status = domain.StatusSnoozed
+		res.Parent.ResolvedAt = &resolved
+		res.Parent.ResolutionSource = &source
+
+		depth := occ.SnoozeDepth + 1
+		child, err := insertOccurrence(ctx, q, domain.NewOccurrence{
+			ItemID:   occ.ItemID,
+			StartsAt: startsAt,
+
+			// An override, so the next materialization run leaves it alone.
+			// NewOccurrence.Validate refuses a child that is not one, so this
+			// cannot be dropped silently.
+			IsOverride:         true,
+			ParentOccurrenceID: &occ.ID,
+			SnoozeDepth:        &depth,
+		}, item.Kind)
+		if err != nil {
+			return err
+		}
+		res.Child = child
+
+		res.Chain, err = chainFrom(ctx, tx, id)
+		return err
+	})
+	if err != nil {
+		var te *domain.TransitionError
+		if errors.As(err, &te) {
+			// The state machine answered; res.Parent holds the row whose status
+			// the 409 reports.
+			return res, err
+		}
+		return Snooze{}, err
+	}
+	return res, nil
+}
+
+// missChainTx is the snooze-cap branch: the chain has run out of snoozes, so
+// the same row resolves as missed rather than acquiring another child (R8).
+//
+// It goes through domain.Transition like everything else. The cap is a
+// precondition on an edge and not an edge of its own, so notified -> missed has
+// to be asked for in the ordinary way — a direct write here would be the second
+// copy of the transition table that D-014 bought a single endpoint to avoid.
+func (s *Store) missChainTx(
+	ctx context.Context,
+	q *sqlc.Queries,
+	tx *sql.Tx,
+	res *Snooze,
+	item domain.Item,
+	id string,
+	source domain.ResolutionSource,
+	now time.Time,
+	capErr error,
+) error {
+	outcome, err := domain.Transition(item.Kind, res.Previous, domain.StatusMissed)
+	res.Outcome = outcome
+	if err != nil {
+		return err
+	}
+	if outcome != domain.OutcomeApplied {
+		// Unreachable from a row that has just answered Applied for snoozed,
+		// since both edges leave notified. Worth refusing rather than assuming.
+		return fmt.Errorf("store: snooze occurrence %s: cap reached but %s -> missed is %s",
+			id, res.Previous, outcome)
+	}
+
+	// The cap message names the depth and the limit, and it is what the 409's
+	// message field carries — the same contract every other user-facing message
+	// in this codebase keeps. It is stored as the resolution_note too, so the
+	// row says why it was missed rather than leaving it to be inferred from a
+	// snooze_depth that happens to equal the cap.
+	note := capErr.Error()
+	if err := s.writeResolutionTx(ctx, q, id, res.Previous, domain.StatusMissed, &note, source, now); err != nil {
+		return err
+	}
+
+	resolved := now
+	res.CapReached = true
+	res.Parent.Status = domain.StatusMissed
+	res.Parent.ResolvedAt = &resolved
+	res.Parent.ResolutionNote = &note
+	res.Parent.ResolutionSource = &source
+
+	res.Chain, err = chainFrom(ctx, tx, id)
+	return err
+}
+
+// writeResolutionTx runs the guarded resolution statement, which is the one
+// write behind every terminal status this service assigns. It is factored out
+// of ResolveOccurrence's body so that snooze reaches the same statement rather
+// than a second one that could drift from it.
+func (s *Store) writeResolutionTx(
+	ctx context.Context,
+	q *sqlc.Queries,
+	id string,
+	from, to domain.Status,
+	note *string,
+	source domain.ResolutionSource,
+	now time.Time,
+) error {
+	resolvedAt := domain.FormatTime(now)
+	sourceText := string(source)
+
+	n, err := q.ResolveOccurrence(ctx, sqlc.ResolveOccurrenceParams{
+		Status:           string(to),
+		ResolvedAt:       &resolvedAt,
+		ResolutionNote:   note,
+		ResolutionSource: &sourceText,
+		ID:               id,
+		Status_2:         string(from),
+	})
+	if err != nil {
+		return fmt.Errorf("store: resolve occurrence: %w", err)
+	}
+	if n == 0 {
+		// The guard refused it. Nothing else can have moved the row — this is
+		// inside the write transaction on the only writer — so this is a bug
+		// surfacing rather than a case with a story, and it is worth an error
+		// instead of a silent no-op that would report 200.
+		s.log.Warn("resolve: refused update", "occurrence", id, "from", from, "to", to)
+		return fmt.Errorf("store: resolve occurrence %s: guard refused the update", id)
+	}
+	return nil
 }

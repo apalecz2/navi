@@ -137,6 +137,13 @@ func run() error {
 		return err
 	}
 
+	// Beside resolve, and after it: snooze reaches notified rows the same way,
+	// and the chain it builds is what gives the resolution path something to
+	// roll up.
+	if err := reportSnooze(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// After fire, since it exercises the other direction — inbound rather
 	// than outbound — and needs nothing fire left behind.
 	if err := reportConversations(ctx, st, log); err != nil {
@@ -1420,8 +1427,12 @@ func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Lo
 	fmt.Println("\nresolve  POST /api/occurrences/{id}/resolve")
 
 	m := metrics.New()
+	loc, err := schedule.LoadLocation(tz)
+	if err != nil {
+		return err
+	}
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
-		health.New(), m, st, time.Time{}, nil)
+		health.New(), m, st, time.Time{}, loc, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/resolve",
@@ -1560,6 +1571,475 @@ func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Lo
 		badSource.Code, verdict(badSource.Code == http.StatusBadRequest))
 
 	return nil
+}
+
+// snoozeBody is the endpoint's response, decoded far enough to assert on. It
+// is spelled out here rather than imported because internal/httpapi's own
+// response types are unexported, which is correct — a wire shape a second
+// package can reach is a wire shape that stops being the handler's to change.
+type snoozeBody struct {
+	Occurrence occurrenceBody `json:"occurrence"`
+	Parent     occurrenceBody `json:"parent"`
+	Chain      chainBody      `json:"chain"`
+}
+
+type occurrenceBody struct {
+	ID                 string  `json:"id"`
+	StartsAt           string  `json:"starts_at"`
+	Status             string  `json:"status"`
+	IsOverride         bool    `json:"is_override"`
+	ParentOccurrenceID *string `json:"parent_occurrence_id"`
+	SnoozeDepth        int     `json:"snooze_depth"`
+	ResolvedAt         *string `json:"resolved_at"`
+	ResolutionSource   *string `json:"resolution_source"`
+}
+
+type chainBody struct {
+	RootID       string  `json:"root_id"`
+	ScheduledAt  string  `json:"scheduled_at"`
+	SnoozeCount  int     `json:"snooze_count"`
+	WasCompleted bool    `json:"was_completed"`
+	CompletedAt  *string `json:"completed_at"`
+}
+
+// reportSnooze drives POST /api/occurrences/{id}/snooze through a real httpapi
+// server, the way reportResolve drives its sibling, and then checks the four
+// delta presets one layer down against schedule.ResolveDelta directly.
+//
+// The split is deliberate. Everything that depends on a row — R6's untouched
+// starts_at, the child's flags, the cap, the chain — has to go through the
+// endpoint, because the point is that the wiring is right. Everything that
+// depends on what time it is cannot: "tonight after 19:00" and "tomorrow across
+// a spring-forward boundary" are questions about a specific now, and driving
+// them through an HTTP handler that reads the wall clock would make them pass
+// or fail depending on when this ran. The pure function takes its now as an
+// argument, so both branches are checkable every time. That is the same lesson
+// session 13's from_date fix learned the expensive way.
+func reportSnooze(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\nsnooze  POST /api/occurrences/{id}/snooze")
+
+	m := metrics.New()
+	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
+		health.New(), m, st, time.Time{}, fallback, nil)
+
+	post := func(id, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/snooze",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+	decode := func(rec *httptest.ResponseRecorder) snoozeBody {
+		var out snoozeBody
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out
+	}
+
+	item, err := seedFireItem(ctx, st, "snooze path probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+
+	// A notified row, reached the way the scheduler reaches one. at is how far
+	// in the past the row starts: a claimable row has to be behind now, and
+	// walking a chain to its cap means every link has to be claimable in turn.
+	claim := func(title string, at time.Time) (domain.Occurrence, error) {
+		occ, err := fireOccurrence(ctx, st, item, at, ptr(title))
+		if err != nil {
+			return domain.Occurrence{}, err
+		}
+		if err := fireAll(ctx, st, m, log); err != nil {
+			return domain.Occurrence{}, err
+		}
+		return st.GetOccurrence(ctx, occ.ID)
+	}
+
+	// 1. R6: the original keeps its timestamp and a child appears at the
+	// resolved time. 1h is the delta on purpose — it is instant arithmetic, so
+	// this assertion says nothing about zones and cannot be broken by which one
+	// kv.current_tz happens to hold by the time this section runs.
+	occ, err := claim("snooze probe body", time.Now().Add(-time.Minute))
+	if err != nil {
+		return err
+	}
+	if occ.Status != domain.StatusNotified {
+		return fmt.Errorf("naviseed: snooze: occurrence %s is %s, not notified", occ.ID, occ.Status)
+	}
+	was := occ.StartsAt
+
+	t0 := time.Now()
+	applied := post(occ.ID, `{"delta":"1h","source":"web"}`)
+	body := decode(applied)
+
+	parent, err := st.GetOccurrence(ctx, occ.ID)
+	if err != nil {
+		return err
+	}
+	child, err := st.GetOccurrence(ctx, body.Occurrence.ID)
+	if err != nil {
+		return err
+	}
+
+	untouched := parent.StartsAt.Equal(was)
+	fmt.Printf("  notified -> snoozed     status %d  starts_at %s unchanged=%v  resolved_at=%s source=%s  %s\n",
+		applied.Code, domain.FormatTime(was), untouched,
+		presence(parent.ResolvedAt != nil), sourceOf(parent.ResolutionSource),
+		verdict(applied.Code == http.StatusOK && untouched &&
+			parent.Status == domain.StatusSnoozed && parent.ResolvedAt != nil &&
+			parent.ResolutionSource != nil && *parent.ResolutionSource == domain.ResolvedByWeb))
+
+	// The child, and the hour it was pushed by. Bounded rather than compared
+	// exactly, because the handler reads its own clock a moment after t0.
+	offset := child.StartsAt.Sub(t0)
+	childOK := child.Status == domain.StatusPending && child.IsOverride &&
+		child.ParentOccurrenceID != nil && *child.ParentOccurrenceID == occ.ID &&
+		child.SnoozeDepth == 1 &&
+		offset >= time.Hour-5*time.Second && offset <= time.Hour+5*time.Second
+	fmt.Printf("    child                 %s  is_override=%v parent=%s depth=%d  +%s  %s\n",
+		child.Status, child.IsOverride, presence(child.ParentOccurrenceID != nil),
+		child.SnoozeDepth, offset.Round(time.Second), verdict(childOK))
+
+	// 2. A second tap on the same row. snoozed is terminal, so this is the
+	// idempotency table's "already in the requested terminal state": 200,
+	// nothing written, and crucially the same child rather than a second one.
+	again := post(occ.ID, `{"delta":"1h","source":"web"}`)
+	againBody := decode(again)
+	all, err := st.ListOccurrencesForItem(ctx, item.ID)
+	if err != nil {
+		return err
+	}
+	children := 0
+	for _, row := range all {
+		if row.ParentOccurrenceID != nil && *row.ParentOccurrenceID == occ.ID {
+			children++
+		}
+	}
+	fmt.Printf("    snoozed -> snoozed    status %d  same child=%v  children=%d  %s\n",
+		again.Code, againBody.Occurrence.ID == body.Occurrence.ID, children,
+		verdict(again.Code == http.StatusOK &&
+			againBody.Occurrence.ID == body.Occurrence.ID && children == 1))
+
+	// 3. The scheduler never sees a snoozed row again. Both ListDueOccurrences
+	// and ClaimOccurrence filter status = 'pending', so this falls out by
+	// construction — drive it rather than assert it.
+	rec := &recordingTransport{}
+	sched := scheduler.New(log.With("component", "scheduler-snooze"), st, rec, m, time.Now())
+	if _, err := sched.Fire(ctx); err != nil {
+		return err
+	}
+	stillSnoozed, err := statusOf(ctx, st, occ.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    original not re-fired  %s, %d send(s)  %s\n",
+		stillSnoozed, rec.count("snooze probe body"),
+		verdict(stillSnoozed == domain.StatusSnoozed && rec.count("snooze probe body") == 0))
+
+	// 4. The child survives materialization. is_override is the whole
+	// mechanism, guarded in the planner and again in the delete's WHERE clause;
+	// this is the check that both are actually in force.
+	if err := reportSnoozeSurvival(ctx, st, item, child, fallback, log); err != nil {
+		return err
+	}
+
+	// 5. The chain, completed through its child (D-011, R7).
+	if err := reportChainRollup(ctx, st, post, decode, claim); err != nil {
+		return err
+	}
+
+	// 6. The cap, and the missed it resolves to (R8).
+	if err := reportSnoozeCap(ctx, st, m, post, claim, log); err != nil {
+		return err
+	}
+
+	// The two edges this endpoint can produce, labelled by the surface.
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, want := range []string{
+		`navi_occurrence_transitions_total{from="notified",source="web",to="snoozed"}`,
+		`navi_occurrence_transitions_total{from="notified",source="web",to="missed"} 1`,
+	} {
+		fmt.Printf("  transitions metric      %s  %s\n",
+			want, verdict(strings.Contains(metricsRec.Body.String(), want)))
+	}
+
+	// A body the schema would reject never reaches the store, and source is
+	// required even though 07-api-spec's example omits it.
+	badDelta := post(occ.ID, `{"delta":"in a bit","source":"web"}`)
+	noSource := post(occ.ID, `{"delta":"1h"}`)
+	missing := post("01ARZ3NDEKTSV4RRFFQ69G5FAV", `{"delta":"1h","source":"web"}`)
+	fmt.Printf("  delta not in the enum   status %d  %s\n",
+		badDelta.Code, verdict(badDelta.Code == http.StatusBadRequest))
+	fmt.Printf("  source omitted          status %d  %s\n",
+		noSource.Code, verdict(noSource.Code == http.StatusBadRequest))
+	fmt.Printf("  unknown occurrence      status %d  %s\n",
+		missing.Code, verdict(missing.Code == http.StatusNotFound))
+
+	reportSnoozeDeltas()
+	return nil
+}
+
+// fireAll runs one real scheduler pass, which is how a row reaches notified
+// without anything writing that status by hand.
+func fireAll(ctx context.Context, st *store.Store, m *metrics.Metrics, log *slog.Logger) error {
+	sched := scheduler.New(log.With("component", "scheduler-snooze"), st,
+		&recordingTransport{}, m, time.Now())
+	_, err := sched.Fire(ctx)
+	return err
+}
+
+// reportSnoozeSurvival re-materializes the child's item and checks the child
+// came through untouched. It is a check and not a change: nothing in this
+// session touched the materializer.
+func reportSnoozeSurvival(
+	ctx context.Context,
+	st *store.Store,
+	item domain.Item,
+	child domain.Occurrence,
+	fallback *time.Location,
+	log *slog.Logger,
+) error {
+	mat := materializer.New(log.With("component", "materializer-snooze"), st, fallback)
+	if _, err := mat.Item(ctx, item.ID); err != nil {
+		return err
+	}
+
+	after, err := st.GetOccurrence(ctx, child.ID)
+	if err != nil {
+		return err
+	}
+	survived := after.ID == child.ID && after.StartsAt.Equal(child.StartsAt) &&
+		after.Status == domain.StatusPending && after.IsOverride
+	fmt.Printf("    child survives materialization  starts_at %s  %s  %s\n",
+		domain.FormatTime(after.StartsAt), after.Status, verdict(survived))
+	return nil
+}
+
+// reportChainRollup snoozes a fresh occurrence, completes the child, and reads
+// the chains view back.
+//
+// This is that view's first execution: it has existed since P0 and nothing
+// created a chain to put through it until now, which is why session 13 built no
+// roll-up rather than building one against an empty set. A chain counts once
+// and any completed link completes it (D-011), so completing the child has to
+// make the root's chain read completed with the depth it actually reached.
+func reportChainRollup(
+	ctx context.Context,
+	st *store.Store,
+	post func(id, body string) *httptest.ResponseRecorder,
+	decode func(*httptest.ResponseRecorder) snoozeBody,
+	claim func(title string, at time.Time) (domain.Occurrence, error),
+) error {
+	root, err := claim("snooze chain body", time.Now().Add(-time.Minute))
+	if err != nil {
+		return err
+	}
+	snoozed := decode(post(root.ID, `{"delta":"1h","source":"web"}`))
+	childID := snoozed.Occurrence.ID
+
+	res, err := st.ResolveOccurrence(ctx, childID, domain.StatusCompleted, nil,
+		domain.ResolvedByWeb, time.Now())
+	if err != nil {
+		return err
+	}
+
+	chain, err := st.ChainFor(ctx, childID)
+	if err != nil {
+		return err
+	}
+	rootChain, err := st.ChainFor(ctx, root.ID)
+	if err != nil {
+		return err
+	}
+
+	// Two rows, one chain, and the same answer from either end of it.
+	sameFromBothEnds := chain.RootID == rootChain.RootID && chain.RootID == root.ID
+	rolledUp := chain.WasCompleted && chain.SnoozeCount == 1 &&
+		chain.ScheduledAt.Equal(root.StartsAt) && chain.CompletedAt != nil
+	fmt.Printf("  chain roll-up           root=%s snooze_count=%d was_completed=%v scheduled_at=%s  %s\n",
+		presence(chain.RootID != ""), chain.SnoozeCount, chain.WasCompleted,
+		domain.FormatTime(chain.ScheduledAt), verdict(rolledUp && sameFromBothEnds))
+
+	// And the resolution endpoint reports the same roll-up it just caused, so
+	// no surface has to walk parents for itself.
+	fmt.Printf("    reported by resolve   snooze_count=%d was_completed=%v  %s\n",
+		res.Chain.SnoozeCount, res.Chain.WasCompleted,
+		verdict(res.Chain.WasCompleted && res.Chain.SnoozeCount == 1 &&
+			res.Chain.RootID == root.ID))
+
+	// The parent is still snoozed and was never rewritten: history is
+	// immutable, and the chain's verdict is a read over the view rather than a
+	// second terminal status written into an ancestor.
+	parent, err := st.GetOccurrence(ctx, root.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    parent left alone     %s  %s\n",
+		parent.Status, verdict(parent.Status == domain.StatusSnoozed))
+	return nil
+}
+
+// reportSnoozeCap walks a chain to the item's snooze_cap and asks for one more.
+//
+// The intermediate links go through the store rather than the endpoint, because
+// each has to be claimable in turn and a real delta puts every child in the
+// future. What the endpoint has to answer for is the last step, which is the
+// only one that behaves differently: a 409 whose current_state is the missed
+// the cap just wrote. This is missed's first caller anywhere in this repository
+// (R8, D-008).
+func reportSnoozeCap(
+	ctx context.Context,
+	st *store.Store,
+	m *metrics.Metrics,
+	post func(id, body string) *httptest.ResponseRecorder,
+	claim func(title string, at time.Time) (domain.Occurrence, error),
+	log *slog.Logger,
+) error {
+	root, err := claim("snooze cap body", time.Now().Add(-time.Minute))
+	if err != nil {
+		return err
+	}
+	item, err := st.GetItem(ctx, root.ItemID)
+	if err != nil {
+		return err
+	}
+
+	// Each link lands 30 seconds back so the next pass can claim it.
+	pastMinute := func(domain.Item, domain.Occurrence) (time.Time, error) {
+		return time.Now().Add(-30 * time.Second), nil
+	}
+
+	live := root
+	for depth := 0; depth < item.SnoozeCap; depth++ {
+		res, err := st.SnoozeOccurrence(ctx, live.ID, domain.ResolvedByWeb, time.Now(), pastMinute)
+		if err != nil {
+			return err
+		}
+		if res.CapReached {
+			return fmt.Errorf("naviseed: snooze cap: hit the cap at depth %d of %d", depth, item.SnoozeCap)
+		}
+		if err := fireAll(ctx, st, m, log); err != nil {
+			return err
+		}
+		if live, err = st.GetOccurrence(ctx, res.Child.ID); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("  snooze cap %d            walked to depth %d, live link %s\n",
+		item.SnoozeCap, live.SnoozeDepth, live.Status)
+
+	capped := post(live.ID, `{"delta":"1h","source":"web"}`)
+	after, err := st.GetOccurrence(ctx, live.ID)
+	if err != nil {
+		return err
+	}
+	children, err := st.ListOccurrencesForItem(ctx, item.ID)
+	if err != nil {
+		return err
+	}
+	fourth := 0
+	for _, row := range children {
+		if row.ParentOccurrenceID != nil && *row.ParentOccurrenceID == live.ID {
+			fourth++
+		}
+	}
+
+	state := currentState(capped.Body.Bytes())
+	fmt.Printf("    one more              status %d  current_state=%q  row %s  no child=%v  %s\n",
+		capped.Code, state, after.Status, fourth == 0,
+		verdict(capped.Code == http.StatusConflict &&
+			state == string(domain.StatusMissed) &&
+			after.Status == domain.StatusMissed && fourth == 0))
+	fmt.Printf("    reason recorded       %q\n", noteOf(after.ResolutionNote))
+
+	chain, err := st.ChainFor(ctx, live.ID)
+	fmt.Printf("    chain reads missed    snooze_count=%d was_completed=%v terminal %s  %s\n",
+		chain.SnoozeCount, chain.WasCompleted, after.Status,
+		verdict(err == nil && chain.RootID == root.ID &&
+			chain.SnoozeCount == item.SnoozeCap && !chain.WasCompleted))
+	return err
+}
+
+// reportSnoozeDeltas checks the four presets against schedule.ResolveDelta
+// directly, with a fabricated now, so both branches of "tonight" and the
+// spring-forward case are exercised on every run rather than on whichever ones
+// happen to fall on the right side of a clock.
+func reportSnoozeDeltas() {
+	fmt.Println("\nsnooze deltas  resolved in the item's zone")
+
+	toronto, err := schedule.LoadLocation("America/Toronto")
+	if err != nil {
+		fmt.Printf("  %s\n", verdict(false))
+		return
+	}
+
+	fixedAt := func(hhmm string) schedule.Schedule {
+		return schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr(hhmm)}
+	}
+	windowed := func(start, end string) schedule.Schedule {
+		return schedule.Schedule{
+			Kind:   schedule.KindWindowed,
+			RRule:  ptr("FREQ=DAILY"),
+			Window: []string{start, end},
+		}
+	}
+
+	check := func(label string, d schedule.Delta, s schedule.Schedule, now, want time.Time, wantFold schedule.Fold) {
+		at, fold, err := schedule.ResolveDelta(d, s, toronto, now)
+		ok := err == nil && at.Equal(want) && fold == wantFold
+		fmt.Printf("  %-34s %s -> %s  (%s local)  %s\n",
+			label, domain.FormatTime(now), domain.FormatTime(at),
+			at.In(toronto).Format("2006-01-02 15:04 MST"), verdict(ok))
+		if !ok {
+			fmt.Printf("    wanted              %s fold=%s  err=%v\n",
+				domain.FormatTime(want), wantFold, err)
+		}
+	}
+
+	// An ordinary summer afternoon, well away from any transition.
+	noon := time.Date(2026, 8, 19, 12, 0, 0, 0, toronto)
+
+	// The two offsets are instant arithmetic and ignore the schedule entirely.
+	check("10m", schedule.Delta10m, fixedAt("07:00"), noon, noon.Add(10*time.Minute), schedule.FoldNone)
+	check("1h", schedule.Delta1h, fixedAt("07:00"), noon, noon.Add(time.Hour), schedule.FoldNone)
+
+	// tonight is 19:00 local, and now + 2h once 19:00 has gone.
+	check("tonight, before 19:00", schedule.DeltaTonight, fixedAt("07:00"), noon,
+		time.Date(2026, 8, 19, 19, 0, 0, 0, toronto), schedule.FoldNone)
+
+	evening := time.Date(2026, 8, 19, 20, 30, 0, 0, toronto)
+	check("tonight, after 19:00", schedule.DeltaTonight, fixedAt("07:00"), evening,
+		evening.Add(2*time.Hour), schedule.FoldNone)
+
+	// tomorrow is the item's own time of day, per kind. A fixed item has one;
+	// a windowed item does not, so its window opens the day instead.
+	check("tomorrow, fixed at 07:00", schedule.DeltaTomorrow, fixedAt("07:00"), noon,
+		time.Date(2026, 8, 20, 7, 0, 0, 0, toronto), schedule.FoldNone)
+	check("tomorrow, window 12:00-17:00", schedule.DeltaTomorrow, windowed("12:00", "17:00"), noon,
+		time.Date(2026, 8, 20, 12, 0, 0, 0, toronto), schedule.FoldNone)
+
+	// A schedule that names no time at all falls back to 09:00 — the spec's
+	// literal answer, and the only place it applies.
+	check("tomorrow, no time at all", schedule.DeltaTomorrow,
+		schedule.Schedule{Kind: schedule.KindWindowed, RRule: ptr("FREQ=DAILY")}, noon,
+		time.Date(2026, 8, 20, 9, 0, 0, 0, toronto), schedule.FoldNone)
+
+	// Spring forward. 2027-03-14 is the second Sunday in March, so the clock
+	// goes 02:00 EST -> 03:00 EDT overnight. 09:00 tomorrow is 23 hours away,
+	// and Add(24 * time.Hour) would put the reminder at 10:00.
+	beforeDST := time.Date(2027, 3, 13, 9, 0, 0, 0, toronto)
+	wantDST := time.Date(2027, 3, 14, 9, 0, 0, 0, toronto)
+	check("tomorrow, across spring-forward", schedule.DeltaTomorrow, fixedAt("09:00"),
+		beforeDST, wantDST, schedule.FoldNone)
+	fmt.Printf("  %-34s %s  %s\n", "  and it is 23h, not 24h",
+		wantDST.Sub(beforeDST), verdict(wantDST.Sub(beforeDST) == 23*time.Hour))
+
+	// A wall clock inside the gap never happened, so it resolves to the
+	// transition instant itself — 03:00 EDT, not 03:30.
+	check("tomorrow, into the DST gap", schedule.DeltaTomorrow, fixedAt("02:30"),
+		beforeDST, time.Date(2027, 3, 14, 3, 0, 0, 0, toronto), schedule.FoldGap)
 }
 
 // currentState reads the current_state field a 409 body carries.

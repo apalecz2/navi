@@ -5,6 +5,20 @@
 // The horizon backfill and llm_calls retention (L7, 90 days per
 // 04-data-model.md) exist so far. conversations' own retention (180 days)
 // is not built yet.
+//
+// Snooze-cap enforcement is listed against this loop in 03-architecture.md's
+// loop table and deliberately has no code here, because there is nothing for an
+// hourly pass to find. The cap is checked before a child is written
+// (domain.CheckSnoozeCap, in store.SnoozeOccurrence), so no row can ever exist
+// above it, and a chain sitting exactly at the cap has an ordinary pending live
+// link the scheduler fires like any other. Past the cap the snooze request
+// itself resolves the chain as missed (R8) — synchronously, at the moment it is
+// asked for, which is also what keeps that missed honest under D-008.
+//
+// The one state that looks like work is lowering items.snooze_cap after
+// children already exist. It is not: the live child still fires, and the next
+// snooze request is refused at the endpoint against the new cap. Do not add a
+// pass here on the strength of the loop table's wording alone.
 package sweeper
 
 import (

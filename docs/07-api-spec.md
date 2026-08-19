@@ -119,14 +119,74 @@ Side effects on success:
 - Cancels a pending notification if the occurrence had not yet fired
 - Rolls the snooze chain up if the occurrence has a parent
 
+The roll-up is a **read** over the `chains` view, taken inside the same
+transaction as the write and returned as a `chain` object on the response. It
+never writes to ancestors: they are `snoozed`, which is terminal, and history is
+immutable. It is present on every response and not only on a child's, because an
+occurrence that was never snoozed is a chain of one — reporting it that way is
+what keeps "a chain counts once" a single rule rather than two.
+
 ### `POST /api/occurrences/{id}/snooze`
 
 ```json
-{ "delta": "1h" }
+{ "delta": "1h", "source": "web" }
 ```
 
-Returns the new child occurrence. Returns `409` if `snooze_depth` has reached the
-item's cap, and resolves the chain as `missed` in that case.
+`delta` is one of `10m`, `1h`, `tonight`, `tomorrow` (R9). `source` is required
+and takes the same four values `resolve` does: the parent's `resolution_source`
+column and the `source` label on
+`navi_occurrence_transitions_total{from,to,source}` both need it, and neither can
+guess. There is no `note` — a snooze is not a resolution anyone attaches a reason
+to.
+
+Returns `200` with the child, the parent, and the chain roll-up:
+
+```json
+{
+  "occurrence": {
+    "id": "occ_01H...", "item_id": "itm_01H...",
+    "starts_at": "2026-08-05T19:00:00Z", "status": "pending",
+    "is_override": true, "parent_occurrence_id": "occ_01G...", "snooze_depth": 1
+  },
+  "parent": {
+    "id": "occ_01G...", "starts_at": "2026-08-05T13:00:00Z",
+    "status": "snoozed", "resolved_at": "2026-08-05T18:02:11Z",
+    "resolution_source": "web"
+  },
+  "chain": {
+    "root_id": "occ_01G...", "scheduled_at": "2026-08-05T13:00:00Z",
+    "snooze_count": 1, "was_completed": false, "completed_at": null
+  }
+}
+```
+
+The parent is in the response because R6's whole point is that its `starts_at`
+did not move, and a body carrying only the child cannot show that. The chain is
+D-011 made reportable, so no surface has to walk `parent_occurrence_id` for
+itself.
+
+Re-snoozing an already-`snoozed` occurrence is the idempotency table's second
+row: `200`, nothing written, and the **same** child returned rather than a
+second one minted. Snoozing a `pending` occurrence is a `409` — `notified →
+snoozed` is the only edge the transition table has, so a reminder that has not
+fired has nothing to be pushed back from.
+
+Returns `409` if `snooze_depth` has reached the item's cap, and resolves the
+chain as `missed` in that case — the write happens, and `current_state` reports
+it:
+
+```json
+{
+  "error": "snooze_cap_reached",
+  "message": "domain: snooze cap reached: depth 3 of 3",
+  "current_state": "missed"
+}
+```
+
+This is the only path in the service that assigns `missed` before P3's
+reconciler exists, and it is the one [04-data-model.md](04-data-model.md#streaks-and-snooze-chains)
+blesses by name: "a chain is `missed` if the terminal link is `missed`,
+including snooze-cap exhaustion."
 
 ### `POST /api/occurrences/bulk-resolve`
 

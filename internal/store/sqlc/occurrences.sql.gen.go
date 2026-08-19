@@ -9,6 +9,54 @@ import (
 	"context"
 )
 
+const childOccurrence = `-- name: ChildOccurrence :one
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
+    snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
+    resolution_source, message_text, message_model, message_generated_at,
+    generation_attempts, generation_pass, created_at
+FROM occurrences
+WHERE parent_occurrence_id = ?
+`
+
+// ChildOccurrence is the row a snooze wrote for its parent - the live link of
+// a chain, one step down.
+//
+// It is :one because a snoozed row has exactly one child by construction: the
+// second snooze of the same row is "already in the requested terminal state",
+// which domain.Transition answers OutcomeNoop and which writes nothing. So a
+// double-tapped Snooze button reads the child that already exists rather than
+// minting a second one. idx_occ_parent covers the lookup.
+//
+// The column list is spelled out rather than *, and this comment is plain
+// ASCII, matching OverrideFuturePendingOccurrence above - see items.sql's
+// UpdateItem for the sqlc truncation bug both avoid.
+func (q *Queries) ChildOccurrence(ctx context.Context, parentOccurrenceID *string) (Occurrence, error) {
+	row := q.db.QueryRowContext(ctx, childOccurrence, parentOccurrenceID)
+	var i Occurrence
+	err := row.Scan(
+		&i.ID,
+		&i.ItemID,
+		&i.StartsAt,
+		&i.EndsAt,
+		&i.Status,
+		&i.IsOverride,
+		&i.ParentOccurrenceID,
+		&i.SnoozeDepth,
+		&i.NotifiedAt,
+		&i.ReconciledAt,
+		&i.ResolvedAt,
+		&i.ResolutionNote,
+		&i.ResolutionSource,
+		&i.MessageText,
+		&i.MessageModel,
+		&i.MessageGeneratedAt,
+		&i.GenerationAttempts,
+		&i.GenerationPass,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const claimOccurrence = `-- name: ClaimOccurrence :execrows
 UPDATE occurrences
 SET status = 'notified', notified_at = ?

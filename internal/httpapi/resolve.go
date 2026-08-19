@@ -33,12 +33,20 @@ type resolveRequest struct {
 // without a second GET. The same body is returned for an applied transition
 // and for a no-op, because in both cases it is the current state — which is
 // the whole reason those two rows of the table share a status code.
+//
+// chain is the roll-up docs/07-api-spec.md lists as a side effect of this
+// endpoint — "rolls the snooze chain up if the occurrence has a parent". It is
+// present on every response and not only on a child's, because an occurrence
+// that was never snoozed is a chain of one and reporting it that way is what
+// keeps "a chain counts once" a single rule (D-011, R7).
 type resolveResponse struct {
 	ID               string  `json:"id"`
 	Status           string  `json:"status"`
 	ResolvedAt       *string `json:"resolved_at"`
 	ResolutionNote   *string `json:"resolution_note"`
 	ResolutionSource *string `json:"resolution_source"`
+
+	Chain chainResponse `json:"chain"`
 }
 
 // resolvableStatuses is the status enum from the spec's request body.
@@ -141,14 +149,16 @@ func (s *Server) handleResolveOccurrence(w http.ResponseWriter, r *http.Request)
 		s.metrics.IncTransition(string(res.Previous), string(res.Occurrence.Status), string(source))
 	}
 
-	writeJSON(w, s.log, http.StatusOK, toResolveResponse(res.Occurrence))
+	writeJSON(w, s.log, http.StatusOK, toResolveResponse(res))
 }
 
-func toResolveResponse(occ domain.Occurrence) resolveResponse {
+func toResolveResponse(res store.Resolution) resolveResponse {
+	occ := res.Occurrence
 	out := resolveResponse{
 		ID:             occ.ID,
 		Status:         string(occ.Status),
 		ResolutionNote: occ.ResolutionNote,
+		Chain:          toChainResponse(res.Chain),
 	}
 	if occ.ResolvedAt != nil {
 		at := domain.FormatTime(*occ.ResolvedAt)

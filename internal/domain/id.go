@@ -13,3 +13,16 @@ import "github.com/oklog/ulid/v2"
 func NewID() string {
 	return ulid.Make().String()
 }
+
+// ValidID reports whether s has the shape NewID produces.
+//
+// It is a shape check and not an existence check. The caller that needs it is
+// the Telegram callback decoder, which has to tell a payload it cannot parse
+// from one naming a row that is simply gone: the first is answered with a toast
+// and no database work at all, and the second is store.ErrNotFound. The store
+// lookup remains the real backstop — this only keeps obvious garbage from
+// reaching a query.
+func ValidID(s string) bool {
+	_, err := ulid.ParseStrict(s)
+	return err == nil
+}

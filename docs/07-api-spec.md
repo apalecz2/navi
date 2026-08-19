@@ -233,6 +233,51 @@ so no deduplication lives in the adapter. The keyboard is usually gone by the
 second tap; when it is not, the second tap is a `200` no-op or a `409` and the
 toast says so.
 
+#### `callback_data` framing
+
+Version-prefixed and colon-separated:
+
+```
+n1:<action>:<occurrence-id>[:<arg>]
+```
+
+`action` is one of `complete`, `skip`, `snooze`, `menu`, `back`. `arg` is present
+only on `snooze` and is one of the four deltas. The worst case is
+`n1:snooze:01ARZ3NDEKTSV4RRFFQ69G5FAV:tomorrow` — 45 bytes against Telegram's 64,
+which is the budget the action-tokens note above relies on.
+
+Colon separates unambiguously: a ULID is Crockford base32, the action names are
+lowercase ASCII, and none of the four deltas contains one. The `n1` prefix makes
+a later change of format *distinguishable* rather than ambiguous — a button
+rendered before a redeploy and tapped after it decodes as an unknown version and
+is refused, instead of being parsed under the new rules into some other
+occurrence's id.
+
+A payload that fails to decode — unknown version, wrong field count, an action
+outside the set, an id that is not a ULID, an `arg` on an action that takes none —
+takes one path: no store call, no edit, an `answerCallbackQuery` saying the button
+is no longer valid, a `callback_decode` drop counted, and **`200` to Telegram**.
+The keyboard is left in place because nothing was resolved, and the `200` is
+deliberate: a non-2xx makes Telegram redeliver a payload that will fail to decode
+every time. A well-formed id for a row that no longer exists is a different case —
+it reaches the store, comes back not-found, and says so.
+
+#### Snooze: one button, four presets
+
+N4 describes one Snooze button and R9 defines four presets. The button opens them
+rather than picking one, because a default delta would put the other three out of
+reach on the only transport there is.
+
+So `Snooze` renders with `action = menu`, and a tap swaps the keyboard for the
+four presets plus a way back, via `editMessageReplyMarkup`. `menu` and `back`
+resolve nothing and never reach the state machine at all — that separation is what
+makes a non-resolving button safe to sit beside three resolving ones. Two taps,
+still no typing and no navigating.
+
+Two-stage rendering is the adapter's decision and nothing above it knows: the
+scheduler still describes three actions, and `Action.Arg` carries the chosen delta
+back.
+
 ---
 
 ## Items

@@ -577,60 +577,8 @@ func (s *Store) ResolveOccurrence(
 	var res Resolution
 
 	err := s.txConn(ctx, func(q *sqlc.Queries, tx *sql.Tx) error {
-		row, err := q.GetOccurrence(ctx, id)
-		if err != nil {
-			return notFound("store: resolve occurrence", err)
-		}
-		occ, err := toDomainOccurrence(row)
-		if err != nil {
-			return err
-		}
-		res.Occurrence = occ
-		res.Previous = occ.Status
-
-		// The kind lives on the item, not the occurrence, and the valid status
-		// set depends on it — the same in-transaction read CreateOccurrence
-		// makes for the same reason.
-		itemRow, err := q.GetItem(ctx, occ.ItemID)
-		if err != nil {
-			return notFound("store: resolve occurrence: item", err)
-		}
-		item, err := toDomainItem(itemRow)
-		if err != nil {
-			return err
-		}
-
-		outcome, err := domain.Transition(item.Kind, occ.Status, to)
-		res.Outcome = outcome
-		if err != nil {
-			// A *domain.TransitionError, returned as it is. res.Occurrence
-			// already holds the current row, which is what the 409 reports.
-			return err
-		}
-		if outcome != domain.OutcomeApplied {
-			// Nothing was written, but the chain is still what the caller
-			// asked about, and a double tap should report the same numbers the
-			// first tap did rather than none.
-			res.Chain, err = chainFrom(ctx, tx, id)
-			return err
-		}
-
-		if err := s.writeResolutionTx(ctx, q, id, res.Previous, to, note, source, now); err != nil {
-			return err
-		}
-
-		// Mirror what the statement wrote, so the caller can render the new
-		// state without a second read.
-		resolved := now
-		res.Occurrence.Status = to
-		res.Occurrence.ResolvedAt = &resolved
-		res.Occurrence.ResolutionNote = note
-		res.Occurrence.ResolutionSource = &source
-
-		// Last, so the roll-up reflects the write above it. This is what makes
-		// "completing the child completes the chain" a number the caller can
-		// report rather than a property it has to infer.
-		res.Chain, err = chainFrom(ctx, tx, id)
+		var err error
+		res, err = s.resolveOneTx(ctx, q, tx, id, to, note, source, now)
 		return err
 	})
 	if err != nil {
@@ -643,6 +591,138 @@ func (s *Store) ResolveOccurrence(
 		return Resolution{}, err
 	}
 	return res, nil
+}
+
+// resolveOneTx is one occurrence's resolution inside a transaction somebody else
+// opened.
+//
+// It is factored out of ResolveOccurrence rather than inlined there because
+// BulkResolve is the second caller and an atomic batch is one txConn calling
+// this per row — not a second copy of the read, the transition, and the
+// roll-up. The partial Resolution it returns alongside a *domain.TransitionError
+// is deliberate: res.Occurrence already holds the current row, which is what a
+// 409 reports.
+func (s *Store) resolveOneTx(
+	ctx context.Context,
+	q *sqlc.Queries,
+	tx *sql.Tx,
+	id string,
+	to domain.Status,
+	note *string,
+	source domain.ResolutionSource,
+	now time.Time,
+) (Resolution, error) {
+	var res Resolution
+
+	row, err := q.GetOccurrence(ctx, id)
+	if err != nil {
+		return res, notFound("store: resolve occurrence", err)
+	}
+	occ, err := toDomainOccurrence(row)
+	if err != nil {
+		return res, err
+	}
+	res.Occurrence = occ
+	res.Previous = occ.Status
+
+	// The kind lives on the item, not the occurrence, and the valid status
+	// set depends on it — the same in-transaction read CreateOccurrence
+	// makes for the same reason.
+	itemRow, err := q.GetItem(ctx, occ.ItemID)
+	if err != nil {
+		return res, notFound("store: resolve occurrence: item", err)
+	}
+	item, err := toDomainItem(itemRow)
+	if err != nil {
+		return res, err
+	}
+
+	outcome, err := domain.Transition(item.Kind, occ.Status, to)
+	res.Outcome = outcome
+	if err != nil {
+		// A *domain.TransitionError, returned as it is.
+		return res, err
+	}
+	if outcome != domain.OutcomeApplied {
+		// Nothing was written, but the chain is still what the caller
+		// asked about, and a double tap should report the same numbers the
+		// first tap did rather than none.
+		res.Chain, err = chainFrom(ctx, tx, id)
+		return res, err
+	}
+
+	if err := s.writeResolutionTx(ctx, q, id, res.Previous, to, note, source, now); err != nil {
+		return res, err
+	}
+
+	// Mirror what the statement wrote, so the caller can render the new
+	// state without a second read.
+	resolved := now
+	res.Occurrence.Status = to
+	res.Occurrence.ResolvedAt = &resolved
+	res.Occurrence.ResolutionNote = note
+	res.Occurrence.ResolutionSource = &source
+
+	// Last, so the roll-up reflects the write above it. This is what makes
+	// "completing the child completes the chain" a number the caller can
+	// report rather than a property it has to infer.
+	res.Chain, err = chainFrom(ctx, tx, id)
+	return res, err
+}
+
+// BulkResolution is one row of a batch: which occurrence, which terminal status,
+// and why, if the user said.
+type BulkResolution struct {
+	OccurrenceID string
+	Status       domain.Status
+	Note         *string
+}
+
+// BulkResolve resolves a batch in one transaction, all or nothing.
+//
+// It is what "stretching and vitamins yes, skipped the walk" needs: six
+// sequential single resolutions are six chances to fail and a partial
+// application when the fourth is wrong, which is the argument
+// docs/06-agent-spec.md makes for one tool taking a list. So this is one
+// txConn calling resolveOneTx per row — not a third copy of the transition
+// rules, and not a second guarded statement beside writeResolutionTx.
+//
+// A no-op row is not an error. Asking to complete something already completed
+// is the idempotency table's second row wherever it appears, so a batch mixing
+// one already-resolved occurrence with one pending occurrence applies the
+// pending one and reports both. A rejected transition or an id that does not
+// exist does abort the whole batch, and the error names which row it was — per
+// docs/07-api-spec.md, "if any occurrence id is invalid, nothing is written and
+// the response identifies which one".
+func (s *Store) BulkResolve(
+	ctx context.Context,
+	rows []BulkResolution,
+	source domain.ResolutionSource,
+	now time.Time,
+) ([]Resolution, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	results := make([]Resolution, 0, len(rows))
+	err := s.txConn(ctx, func(q *sqlc.Queries, tx *sql.Tx) error {
+		results = results[:0]
+		for _, row := range rows {
+			res, err := s.resolveOneTx(ctx, q, tx, row.OccurrenceID, row.Status, row.Note, source, now)
+			if err != nil {
+				// Wrapped, not replaced: a caller still reaches the
+				// *domain.TransitionError or store.ErrNotFound underneath with
+				// errors.As and errors.Is, and now knows which row carried it.
+				return fmt.Errorf("store: bulk resolve: occurrence %s: %w", row.OccurrenceID, err)
+			}
+			results = append(results, res)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // Snooze is what one call to SnoozeOccurrence decided.

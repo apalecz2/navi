@@ -104,29 +104,18 @@ func (s *Server) handleSnoozeOccurrence(w http.ResponseWriter, r *http.Request) 
 	}
 
 	now := time.Now()
-	at := func(item domain.Item, _ domain.Occurrence) (time.Time, error) {
-		loc, err := zones.For(item)
-		if err != nil {
-			return time.Time{}, err
-		}
-		sched, err := schedule.Parse(item.Schedule)
-		if err != nil {
-			return time.Time{}, err
-		}
-		startsAt, fold, err := schedule.ResolveDelta(delta, sched, loc, now)
-		if err != nil {
-			return time.Time{}, err
-		}
-		if fold != schedule.FoldNone {
+	at := schedule.SnoozeAt(zones, delta, now,
+		func(item domain.Item, loc *time.Location, startsAt time.Time, fold schedule.Fold) {
+			if fold == schedule.FoldNone {
+				return
+			}
 			// Rare, deliberate, and the only explanation for a snooze that
 			// landed an hour from where it was asked for. Same line the
 			// materializer logs for the same reason.
 			s.log.Debug("snooze: dst boundary", "occurrence", id, "item", item.ID,
 				"delta", string(delta), "zone", loc.String(), "fold", fold.String(),
 				"instant", domain.FormatTime(startsAt))
-		}
-		return startsAt, nil
-	}
+		})
 
 	res, err := s.store.SnoozeOccurrence(r.Context(), id, source, now, at)
 	if err != nil {
@@ -174,23 +163,9 @@ func (s *Server) handleSnoozeOccurrence(w http.ResponseWriter, r *http.Request) 
 }
 
 // zones resolves which location an item's wall clocks mean, reading the device
-// zone once. It mirrors the materializer's own begin: kv.current_tz if it is
-// set, the deployment default underneath, and the item's own zone in between —
-// that last rung is schedule.Zones' business, not this function's.
+// zone once. The reading is schedule.LoadZones', shared with the Telegram
+// callback handler so that two snooze surfaces cannot resolve a delta against
+// two different pictures of where the user is.
 func (s *Server) zones(ctx context.Context) (schedule.Zones, error) {
-	z := schedule.Zones{Fallback: s.defaultTZ}
-
-	name, ok, err := s.store.CurrentTZ(ctx)
-	if err != nil {
-		return schedule.Zones{}, err
-	}
-	if !ok {
-		return z, nil
-	}
-	device, err := schedule.LoadLocation(name)
-	if err != nil {
-		return schedule.Zones{}, err
-	}
-	z.Device = device
-	return z, nil
+	return schedule.LoadZones(ctx, s.store, s.defaultTZ)
 }

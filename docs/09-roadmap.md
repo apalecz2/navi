@@ -146,14 +146,34 @@ it is the wrong one to rush. Everything after it is recoverable.
 - Early resolution: `complete` on a `pending` occurrence, cancelling its
   notification
 - `resolution_source` tracking
+- `bulk_resolve` tool and `store.BulkResolve`, atomic — pulled forward from P3,
+  since early resolution from a message needs the agent to resolve something
 
 **Exit criteria**
 
-- [ ] Done on the reminder message resolves it in one tap, with no typing and no
-      navigating to find the item
-- [ ] The message updates in place to show the outcome, leaving one message in the
-      chat rather than two
-- [ ] Double-tapping Done does not double-record
+- [x] Done on the reminder message resolves it in one tap, with no typing and no
+      navigating to find the item — verified (session 15) by `cmd/naviseed`'s
+      callback section: a real `scheduler.Fire` through the real Telegram
+      adapter renders a three-button keyboard whose longest `callback_data` is
+      38 of Telegram's 64 bytes, and feeding that payload back through
+      `telegram.Inbound.ServeHTTP` leaves the occurrence `completed` with
+      `resolution_source = notification`. Snooze takes two taps by design — it
+      opens R9's four presets rather than privileging one — and the menu tap
+      writes nothing.
+- [x] The message updates in place to show the outcome, leaving one message in the
+      chat rather than two — verified (session 15) against a fake Bot API that
+      records every call: a resolving tap produces exactly
+      `answerCallbackQuery` then `editMessageText`, in that order, with **zero**
+      `sendMessage` calls and no `reply_markup` on the edit. N6's fallback is
+      checked too, by making the fake refuse the edit: a short confirmation is
+      sent instead, which costs the second message and is what N6 says a
+      transport that cannot edit should do.
+- [x] Double-tapping Done does not double-record — verified (session 15): the
+      same callback payload twice returns `200` both times, leaves
+      `resolved_at` byte for byte unchanged, toasts "Already done.", and leaves
+      `navi_occurrence_transitions_total{from="notified",to="completed",source="notification"}`
+      reading 1. No deduplication lives in the adapter; this is the state
+      machine's second idempotency row and nothing else.
 - [x] Snooze creates a child, the chain completes once, the streak survives —
       verified (session 14) by `cmd/naviseed`'s snooze section: a notified row
       snoozed through `POST /api/occurrences/{id}/snooze` keeps its `starts_at`
@@ -169,7 +189,16 @@ it is the wrong one to rush. Everything after it is recoverable.
       writes no fourth child, and leaves the chain reading `snooze_count=3,
       was_completed=false` with its terminal link `missed`. This is the only
       caller of `missed` in the tree until P3's reconciler.
-- [ ] "Did my stretching already" at 07:00 cancels the 18:00 notification
+- [x] "Did my stretching already" at 07:00 cancels the 18:00 notification —
+      verified (session 15) by `cmd/naviseed`'s `bulk_resolve` section. The tool
+      moved forward from P3 to get here: the P1 catalog could not resolve
+      anything, and 06-agent-spec argues directly against adding a
+      single-occurrence tool beside it. Three due pending rows resolved in one
+      atomic call, then a real `scheduler.Fire` pass sends **zero** — the
+      cancellation needs no cancel path, because `ListDueOccurrences` and
+      `ClaimOccurrence` both filter `status = 'pending'` and a resolved row has
+      already left the fire path by construction (R3). One bad id in a batch
+      writes nothing at all.
 
 ---
 
@@ -181,7 +210,11 @@ it is the wrong one to rush. Everything after it is recoverable.
 - Reconciler loop, per-item and global timing
 - Consolidated check-in composition, with a templated fallback
 - `context_ref` on conversation rows so replies are recognised
-- `bulk_resolve` tool and endpoint, atomic
+- `POST /api/occurrences/bulk-resolve`, atomic — the **tool** moved forward to
+  P2 (session 15), because the last P2 exit criterion needed the agent to
+  resolve an occurrence and a single-occurrence tool is what 06-agent-spec
+  argues against. `store.BulkResolve` exists; the HTTP endpoint waits for a
+  surface that calls it, which is the web app in P4
 - `skipped` distinct from `missed`, with resolution notes
 - Grace period, then `missed` assignment
 - `pause`, item-scoped and global

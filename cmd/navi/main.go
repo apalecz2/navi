@@ -138,6 +138,7 @@ func run() error {
 		m.RegisterInboundAccepted(telegram.Name)
 		m.RegisterInboundDropped("allowlist")
 		m.RegisterInboundDropped("queue_full")
+		m.RegisterInboundDropped("callback_decode")
 	}
 
 	// Loops run under their own context so shutdown can drain HTTP first and
@@ -159,12 +160,22 @@ func run() error {
 
 	// Every edge the resolution endpoint can legally produce, so a dashboard
 	// reads a zero rather than a gap before the first resolution of a given
-	// shape. The sources are the two that have a caller: notification arrives
-	// with the callback handler, sweeper with reconciliation, and registering
-	// either now would export a zero for something nothing can send.
+	// shape.
+	//
+	// The sources are the ones that have a caller. notification joins the set in
+	// the session that gave it one — the Telegram callback handler — and only
+	// when a chat webhook actually exists to receive a tap, on the same rule that
+	// gates the inbound counters above. sweeper still has none until
+	// reconciliation, and registering it now would export a zero for something
+	// nothing can send.
+	resolutionSources := []domain.ResolutionSource{domain.ResolvedByWeb, domain.ResolvedByAgent}
+	if chatWebhook != nil {
+		resolutionSources = append(resolutionSources, domain.ResolvedByNotification)
+	}
+
 	for _, from := range []domain.Status{domain.StatusPending, domain.StatusNotified} {
 		for _, to := range []domain.Status{domain.StatusCompleted, domain.StatusSkipped, domain.StatusMissed} {
-			for _, src := range []domain.ResolutionSource{domain.ResolvedByWeb, domain.ResolvedByAgent} {
+			for _, src := range resolutionSources {
 				m.RegisterTransition(string(from), string(to), string(src))
 			}
 		}
@@ -173,10 +184,10 @@ func run() error {
 	// Snooze is registered separately rather than folded into the loop above,
 	// because snoozed is reachable only from notified: adding it to that `to`
 	// list would export a zero for pending -> snoozed, an edge the transition
-	// table forbids. Same argument the block's own comment makes about the two
-	// sources with no caller — a series for something that cannot happen
-	// misreports the system just as surely as a missing one does.
-	for _, src := range []domain.ResolutionSource{domain.ResolvedByWeb, domain.ResolvedByAgent} {
+	// table forbids. Same argument the block's own comment makes about a source
+	// with no caller — a series for something that cannot happen misreports the
+	// system just as surely as a missing one does.
+	for _, src := range resolutionSources {
 		m.RegisterTransition(string(domain.StatusNotified), string(domain.StatusSnoozed), string(src))
 	}
 
@@ -246,10 +257,10 @@ func run() error {
 // rows, reports healthy, and never reaches a phone — which is the failure this
 // whole switch exists to make impossible.
 //
-// Telegram's supports_actions is false here and stays that way until P2 adds
-// the callback handler; flipping it is a change inside the adapter, not a
-// change to this switch, which is the entire point of building against
-// scheduler.Notifier instead of a concrete type.
+// Telegram's supports_actions became true in session 15, and this switch did
+// not change — the flip is a line inside the adapter, which is the entire point
+// of building against scheduler.Notifier instead of a concrete type, and the
+// only test D-007 gets before a second adapter exists.
 func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (scheduler.Notifier, error) {
 	switch name {
 	case config.LoggingTransport:
@@ -299,7 +310,15 @@ func chatTransport(name string, tg config.Telegram, provider, apiKey, routingPat
 		chatSender := telegram.New(tg.BotToken, tg.AllowedSenderID)
 		ladder := conversation.New(client, tools, routing, st, table, personaPath, defaultTZ, chatSender)
 		intake := conversation.NewIntake(ladder)
-		inbound := telegram.NewInbound(tg.WebhookSecret, tg.AllowedSenderID, st, intake, m, log.With("transport", telegram.Name))
+
+		// chatSender is handed to the webhook as well as to the ladder: a button
+		// tap is answered and its message edited on the same bot and the same
+		// chat the reminder went out on, so there is nothing to construct twice.
+		// st is passed as the resolver — the same *store.Store the HTTP endpoint
+		// holds, reached through the same two methods, which is how a tap and a
+		// web click cannot end up with different transition rules (D-014).
+		inbound := telegram.NewInbound(tg.WebhookSecret, tg.AllowedSenderID,
+			st, st, chatSender, intake, m, defaultTZ, log.With("transport", telegram.Name))
 		return inbound, intake, nil
 	default:
 		return nil, nil, fmt.Errorf("config: CHAT_TRANSPORT %q is not a known adapter", name)

@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"context"
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/domain"
@@ -77,4 +78,40 @@ func (z Zones) load(name string) (*time.Location, error) {
 // kv.current_tz. Same message, one implementation.
 func LoadLocation(name string) (*time.Location, error) {
 	return Zones{}.load(name)
+}
+
+// TZReader is the one thing LoadZones needs from a database: kv.current_tz, and
+// whether it has ever been set. Declared here rather than imported so this
+// package keeps its direction of dependency — store reaches schedule, never the
+// other way.
+type TZReader interface {
+	CurrentTZ(ctx context.Context) (string, bool, error)
+}
+
+// LoadZones reads the device zone once and returns the value every wall clock in
+// this run resolves against.
+//
+// It is the beginning the materializer already writes by hand and that both
+// snooze surfaces need: kv.current_tz if it is set, the deployment default
+// underneath, and the item's own zone in between — that last rung being For's
+// business and not this function's. Reading it once, here, before any write
+// transaction opens, is what stops a run that straddled a timezone change from
+// placing half its rows in each.
+func LoadZones(ctx context.Context, r TZReader, fallback *time.Location) (Zones, error) {
+	z := Zones{Fallback: fallback}
+
+	name, ok, err := r.CurrentTZ(ctx)
+	if err != nil {
+		return Zones{}, err
+	}
+	if !ok {
+		return z, nil
+	}
+
+	device, err := LoadLocation(name)
+	if err != nil {
+		return Zones{}, err
+	}
+	z.Device = device
+	return z, nil
 }

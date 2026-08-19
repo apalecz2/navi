@@ -31,7 +31,7 @@ func New(log *slog.Logger) *Transport { return &Transport{log: log} }
 // the interface, the log line, and the startup warning.
 func (t *Transport) Name() string { return Name }
 
-// Capabilities answers honestly, which for this adapter means answering no four
+// Capabilities answers honestly, which for this adapter means answering no five
 // times.
 //
 // SupportsActions is false because nothing can tap a log line. The adapter still
@@ -39,11 +39,17 @@ func (t *Transport) Name() string { return Name }
 // consolation prize, it is precisely the rendering the capability model
 // prescribes for a transport without action support, so the false branch of
 // D-007 is exercised by the only notification adapter that exists.
+//
+// SupportsMessageEditing is false for the same reason and keeps N6's fallback
+// branch honest: a line already written to a log cannot be rewritten, so the
+// short confirmation is what a caller would have to fall back to. Telegram is
+// the adapter that answers true.
 func (t *Transport) Capabilities() transport.Capabilities {
 	return transport.Capabilities{
 		SupportsActions:                   false,
 		SupportsNativeNotificationActions: false,
 		SupportsRichText:                  false,
+		SupportsMessageEditing:            false,
 		MaxBodyLength:                     0, // unlimited; a log line has no limit worth enforcing
 	}
 }
@@ -64,6 +70,7 @@ func (t *Transport) Send(ctx context.Context, msg transport.Outbound) (string, e
 		"priority", int(msg.Priority),
 		"body", msg.Body,
 		"actions", renderActions(msg.Actions),
+		"subject", subject(msg.SubjectID),
 	)
 	return "log", nil
 }
@@ -85,6 +92,17 @@ func recipient(r string) string {
 		return "(adapter default)"
 	}
 	return r
+}
+
+// subject reports what a tap on one of the rendered actions would resolve. An
+// adapter that cannot be tapped still logs it, because it is the difference
+// between a reminder the fire path sent and a conversational reply that happens
+// to carry no actions.
+func subject(id string) string {
+	if id == "" {
+		return "(none)"
+	}
+	return id
 }
 
 // renderActions is the no-action-support fallback: a numbered plain-text list.

@@ -54,6 +54,18 @@ type Outbound struct {
 	// rendered. How a tap gets home is entirely the adapter's business.
 	Actions []Action
 
+	// SubjectID names the thing the Actions act on. Empty means this message has
+	// nothing resolvable behind it, and an adapter renders no actions in that
+	// case even when Actions is non-empty — which is what keeps a conversational
+	// reply keyboard-free without anyone branching on why it was sent.
+	//
+	// An id has to travel somehow: Action.Arg is spoken for by the snooze delta
+	// and ThreadRef means a thread, so neither can carry it. What the id refers
+	// to is not this package's business. Today the scheduler puts an occurrence
+	// id here and Telegram packs it into callback_data; a transport that can only
+	// carry a URL would sign it into one instead (T10).
+	SubjectID string
+
 	Priority Priority
 
 	// ThreadRef ties this message to an existing conversation where the
@@ -78,6 +90,15 @@ type Capabilities struct {
 	SupportsNativeNotificationActions bool
 
 	SupportsRichText bool
+
+	// SupportsMessageEditing reports whether a message this adapter has already
+	// sent can be rewritten in place. N6 asks for the outcome of a tap to be
+	// folded into the original message rather than pushed after it, so a
+	// resolved reminder leaves one message in the chat instead of two; a
+	// transport that cannot sends the short confirmation instead. That fallback
+	// is a capability question rather than a name question (T5), which is why it
+	// is a flag here and not an if in the adapter.
+	SupportsMessageEditing bool
 
 	// MaxBodyLength is a limit in runes, zero meaning unlimited. Runes because
 	// this is the portable unit and the shared vocabulary has no business

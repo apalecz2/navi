@@ -310,6 +310,87 @@ func handleDeleteItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	return Result{Item: &archived, Applied: applied}, nil
 }
 
+// handleBulkResolve records a batch of outcomes in one transaction.
+//
+// It is the tool behind "stretching and vitamins yes, skipped the walk" and
+// behind "did my stretching already" — the second being a batch of one, which
+// resolves a pending occurrence early and thereby cancels its notification (R3).
+// That cancellation needs no code: both ListDueOccurrences and ClaimOccurrence
+// filter status = 'pending', so a row this moves to a terminal status has
+// already left the fire path by construction.
+//
+// Layer 2 is existence plus uniqueness. It deliberately does not use
+// store.LiveOccurrence, which requires a pending, non-override row belonging to
+// a named item — every one of those restrictions is wrong here, since a notified
+// occurrence and a snooze child are both perfectly resolvable.
+func handleBulkResolve(ctx context.Context, t *Tools, raw json.RawMessage) (Result, error) {
+	args, err := decode[BulkResolveArgs](raw)
+	if err != nil {
+		return Result{}, err
+	}
+
+	rows := make([]store.BulkResolution, 0, len(args.Resolutions))
+	seen := make(map[string]int, len(args.Resolutions))
+
+	for i, r := range args.Resolutions {
+		field := fmt.Sprintf("resolutions[%d].occurrence_id", i)
+
+		// Two rows naming one occurrence would resolve it and then meet
+		// themselves coming back — a no-op if the statuses agree and a rejected
+		// transition if they do not. Neither is what the caller meant, and the
+		// batch is atomic, so saying so is better than applying half a wish.
+		if first, dup := seen[r.OccurrenceID]; dup {
+			return Result{}, domain.Invalid("occurrence_unique", field,
+				"occurrence %q appears twice, at resolutions[%d] and resolutions[%d]",
+				r.OccurrenceID, first, i)
+		}
+		seen[r.OccurrenceID] = i
+
+		if _, err := t.store.GetOccurrence(ctx, r.OccurrenceID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return Result{}, domain.Invalid("occurrence_exists", field,
+					"occurrence %q does not exist", r.OccurrenceID)
+			}
+			return Result{}, err
+		}
+
+		// Layer 1's enum tag has already rejected anything outside the three,
+		// so this cannot fail for a decoded argument struct. It is here because
+		// the closed set lives in one place and this is how a caller reaches it.
+		status, ok := domain.ParseResolvableStatus(r.Status)
+		if !ok {
+			return Result{}, domain.Invalid("enum", fmt.Sprintf("resolutions[%d].status", i),
+				"status %q is not one of completed, skipped, missed", r.Status)
+		}
+
+		rows = append(rows, store.BulkResolution{
+			OccurrenceID: r.OccurrenceID,
+			Status:       status,
+			Note:         r.Note,
+		})
+	}
+
+	resolved, err := t.store.BulkResolve(ctx, rows, domain.ResolvedByAgent, time.Now())
+	if err != nil {
+		return Result{}, wrapValidation(err)
+	}
+
+	// last_touched_item is not written here. It points at the item a
+	// conversational follow-up would mean, and a resolution has no follow-up to
+	// feed — a batch spanning three items has no single answer to point at
+	// anyway (internal/store/kv.go's doc comment on LastTouchedItemID).
+	out := make([]Resolved, len(resolved))
+	for i, res := range resolved {
+		out[i] = Resolved{
+			OccurrenceID:   res.Occurrence.ID,
+			Status:         string(res.Occurrence.Status),
+			Applied:        res.Outcome == domain.OutcomeApplied,
+			ChainCompleted: res.Chain.WasCompleted,
+		}
+	}
+	return Result{Resolutions: out}, nil
+}
+
 // patchFrom translates the tool-facing ItemChanges into the store's
 // ItemPatch. The two are separate types on purpose: ItemChanges is what a
 // model fills in and Layer 1 validates against its jsonschema tags,

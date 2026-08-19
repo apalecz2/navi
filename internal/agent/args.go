@@ -78,6 +78,30 @@ type DeleteItemArgs struct {
 	Confirmed bool   `json:"confirmed"`
 }
 
+// BulkResolveArgs is bulk_resolve's arguments, from
+// docs/06-agent-spec.md#tool-catalog.
+//
+// A list rather than a single occurrence id, and deliberately so: six
+// sequential single calls are six chances to fail, six validation passes, and a
+// partial application when the fourth is wrong. One tool taking a list gives one
+// transaction and an all-or-nothing outcome, which is what "did everything
+// except the walk" actually needs. A batch of one is the degenerate case and is
+// what "did my stretching already" produces (R3).
+type BulkResolveArgs struct {
+	Resolutions []ResolutionArg `json:"resolutions" jsonschema:"required,minItems=1"`
+}
+
+// ResolutionArg is one occurrence's outcome inside a bulk_resolve call.
+//
+// The enum is the same three statuses domain.ParseResolvableStatus decodes, and
+// it is enforced at Layer 1 by decode.go's walk into slice elements — which is
+// the reason that walk exists.
+type ResolutionArg struct {
+	OccurrenceID string  `json:"occurrence_id" jsonschema:"required"`
+	Status       string  `json:"status" jsonschema:"required,enum=completed,enum=skipped,enum=missed"`
+	Note         *string `json:"note,omitempty"`
+}
+
 // RequestEscalationArgs is request_escalation's arguments - the escalation
 // ladder's own trigger (docs/06-agent-spec.md#escalation-ladder, L4), not
 // one of the four P1 CRUD tools. It writes nothing; see escalation.go.

@@ -221,6 +221,31 @@ func Transition(kind Kind, from, to Status) (Outcome, error) {
 	}
 }
 
+// ParseResolvableStatus decodes one of the three statuses a resolution request
+// may ask for, from whatever wire the request arrived on.
+//
+// It lives here rather than beside any one caller because there are three of
+// them now — the HTTP endpoint, the agent's bulk_resolve, and the Telegram
+// callback handler — and a closed set copied three times is a closed set that
+// drifts. snoozed is deliberately absent: it is reached through the snooze path,
+// which has a delta and a child to write, not by naming it as a target status.
+func ParseResolvableStatus(s string) (Status, bool) {
+	switch Status(s) {
+	case StatusCompleted:
+		return StatusCompleted, true
+	case StatusSkipped:
+		return StatusSkipped, true
+	case StatusMissed:
+		return StatusMissed, true
+	default:
+		return "", false
+	}
+}
+
+// ResolvableStatuses names the same set for an error message or a schema enum,
+// in the order the specification lists it.
+var ResolvableStatuses = []Status{StatusCompleted, StatusSkipped, StatusMissed}
+
 // CheckSnoozeCap reports whether another snooze is permitted. depth is the
 // current occurrence's snooze_depth and cap is items.snooze_cap.
 //

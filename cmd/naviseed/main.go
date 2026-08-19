@@ -144,6 +144,20 @@ func run() error {
 		return err
 	}
 
+	// After both endpoints, because a button tap reaches the same two store
+	// methods they do and there is no point checking the wiring before the
+	// thing it is wired to.
+	if err := reportCallback(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// Beside it, and last of the resolution sections: bulk_resolve is the third
+	// surface, and the only one that can resolve an occurrence that has not
+	// fired yet.
+	if err := reportBulkResolve(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// After fire, since it exercises the other direction — inbound rather
 	// than outbound — and needs nothing fire left behind.
 	if err := reportConversations(ctx, st, log); err != nil {
@@ -1179,7 +1193,12 @@ func reportWebhook(ctx context.Context, st *store.Store, log *slog.Logger) error
 	m.RegisterInboundDropped("allowlist")
 	m.RegisterInboundDropped("queue_full")
 	disp := &fakeDispatcher{}
-	h := telegram.NewInbound(secret, allowedID, st, disp, m, log.With("component", "webhook"))
+	// nil resolver and nil api: this section is the message half, and a
+	// callback query with nothing wired to resolve it is acknowledged and
+	// ignored — the state every build before session 15 was in. The tap half is
+	// reportCallback's.
+	h := telegram.NewInbound(secret, allowedID, st, nil, nil, disp, m, nil,
+		log.With("component", "webhook"))
 
 	post := func(handler http.Handler, secretHeader, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(body))
@@ -1224,7 +1243,8 @@ func reportWebhook(ctx context.Context, st *store.Store, log *slog.Logger) error
 		verdict(redelivered.Code == http.StatusOK && again.ID == row.ID && again.Content == row.Content && len(disp.calls) == 1))
 
 	full := &fakeDispatcher{full: true}
-	hFull := telegram.NewInbound(secret, allowedID, st, full, m, log.With("component", "webhook"))
+	hFull := telegram.NewInbound(secret, allowedID, st, nil, nil, full, m, nil,
+		log.With("component", "webhook"))
 	fullResp := post(hFull, secret, update(9004, allowedID, "queue full probe"))
 	metricsRec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -1777,6 +1797,630 @@ func reportSnooze(ctx context.Context, st *store.Store, tz string, fallback *tim
 		missing.Code, verdict(missing.Code == http.StatusNotFound))
 
 	reportSnoozeDeltas()
+	return nil
+}
+
+// fakeTelegram stands in for the Bot API so the calls an adapter makes are
+// observable rather than assumed.
+//
+// It is what makes N6 checkable at all: "the message updates in place, leaving
+// one message in the chat rather than two" is a claim about which methods were
+// called and in what order, and there is nowhere else to read that from.
+type fakeTelegram struct {
+	srv *httptest.Server
+
+	mu    sync.Mutex
+	calls []apiCall
+
+	// editFails makes editMessageText return the API's own refusal, which is
+	// the live half of N6's fallback — a message too old or since deleted.
+	editFails bool
+
+	nextMessageID int
+}
+
+type apiCall struct {
+	Method string
+	Body   map[string]any
+}
+
+func newFakeTelegram() *fakeTelegram {
+	f := &fakeTelegram{nextMessageID: 5000}
+	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
+	return f
+}
+
+func (f *fakeTelegram) handle(w http.ResponseWriter, r *http.Request) {
+	// /bot<token>/<method>
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	method := parts[len(parts)-1]
+
+	var body map[string]any
+	raw, _ := io.ReadAll(r.Body)
+	_ = json.Unmarshal(raw, &body)
+
+	f.mu.Lock()
+	f.calls = append(f.calls, apiCall{Method: method, Body: body})
+	id := f.nextMessageID
+	f.nextMessageID++
+	fails := f.editFails
+	f.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if fails && method == "editMessageText" {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"message to edit not found"}`)
+		return
+	}
+	fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d}}`, id)
+}
+
+func (f *fakeTelegram) URL() string { return f.srv.URL }
+func (f *fakeTelegram) Close()      { f.srv.Close() }
+
+func (f *fakeTelegram) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = nil
+}
+
+// methods is the call sequence, which is the assertion for "answerCallbackQuery
+// then editMessageText, in that order".
+func (f *fakeTelegram) methods() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	for i, c := range f.calls {
+		out[i] = c.Method
+	}
+	return out
+}
+
+func (f *fakeTelegram) count(method string) int {
+	n := 0
+	for _, m := range f.methods() {
+		if m == method {
+			n++
+		}
+	}
+	return n
+}
+
+// last returns the most recent body for a method, or nil.
+func (f *fakeTelegram) last(method string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if f.calls[i].Method == method {
+			return f.calls[i].Body
+		}
+	}
+	return nil
+}
+
+// button is one decoded inline keyboard button.
+type button struct {
+	Text string
+	Data string
+}
+
+// keyboardOf pulls reply_markup out of a recorded body. A nil result means the
+// message carried no keyboard, which is itself an assertion in two places: the
+// edit that folds an outcome in must drop it.
+func keyboardOf(body map[string]any) [][]button {
+	markup, ok := body["reply_markup"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	rows, ok := markup["inline_keyboard"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([][]button, 0, len(rows))
+	for _, r := range rows {
+		cells, ok := r.([]any)
+		if !ok {
+			continue
+		}
+		row := make([]button, 0, len(cells))
+		for _, c := range cells {
+			b, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, _ := b["text"].(string)
+			data, _ := b["callback_data"].(string)
+			row = append(row, button{Text: text, Data: data})
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// str reads a string field that may have been omitted.
+func str(body map[string]any, key string) string {
+	if body == nil {
+		return ""
+	}
+	s, _ := body[key].(string)
+	return s
+}
+
+// reportCallback drives the Telegram callback path end to end: a real
+// scheduler pass through the real adapter renders the keyboard, and synthetic
+// callback_query updates go through the real Inbound handler against a fake Bot
+// API.
+//
+// It is the P2 exit criteria as assertions. Nothing here writes a status by
+// hand or calls a store method the adapter would not have called — the whole
+// question is whether a tap reaches the same state machine everything else
+// does, and a shortcut anywhere in the middle would stop answering it.
+func reportCallback(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\ncallback  POST /webhook/telegram (button taps)")
+
+	const (
+		secret    = "naviseed-callback-secret"
+		allowedID = "111"
+	)
+
+	m := metrics.New()
+	m.RegisterInboundDropped("callback_decode")
+
+	api := newFakeTelegram()
+	defer api.Close()
+
+	tg := telegram.New("naviseed-token", allowedID, telegram.WithAPIBase(api.URL()))
+	h := telegram.NewInbound(secret, allowedID, st, st, tg, nil, m, fallback,
+		log.With("component", "callback"))
+
+	updateID := 9100
+	tap := func(data string, messageID int, text string) *httptest.ResponseRecorder {
+		updateID++
+		body := fmt.Sprintf(
+			`{"update_id":%d,"callback_query":{"id":"cb-%d","from":{"id":%s},"data":%q,`+
+				`"message":{"message_id":%d,"chat":{"id":%s},"text":%q}}}`,
+			updateID, updateID, allowedID, data, messageID, allowedID, text)
+
+		req := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(body))
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secret)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	item, err := seedFireItem(ctx, st, "callback path probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+
+	// notify sends one occurrence through the real fire path with the real
+	// adapter attached, so the keyboard under assertion is the one a reminder
+	// actually carries — not one this file built to match.
+	notify := func(title string) (domain.Occurrence, error) {
+		occ, err := fireOccurrence(ctx, st, item, time.Now().Add(-time.Minute), ptr(title))
+		if err != nil {
+			return domain.Occurrence{}, err
+		}
+		sched := scheduler.New(log.With("component", "scheduler-callback"), st, tg, m, time.Now())
+		if _, err := sched.Fire(ctx); err != nil {
+			return domain.Occurrence{}, err
+		}
+		return st.GetOccurrence(ctx, occ.ID)
+	}
+
+	// 1. supports_actions is true and the keyboard is real. The callback_data
+	// budget is the thing worth measuring: 64 bytes is the whole reason
+	// 07-api-spec declines to build a signed-token scheme here.
+	api.reset()
+	occ, err := notify("callback probe body")
+	if err != nil {
+		return err
+	}
+	sent := api.last("sendMessage")
+	kb := keyboardOf(sent)
+
+	rendered := len(kb) == 1 && len(kb[0]) == 3
+	longest := 0
+	data := make([]string, 0, 3)
+	if rendered {
+		for _, b := range kb[0] {
+			data = append(data, b.Data)
+			if len(b.Data) > longest {
+				longest = len(b.Data)
+			}
+		}
+	}
+	keyboardOK := rendered &&
+		data[0] == "n1:complete:"+occ.ID &&
+		data[1] == "n1:menu:"+occ.ID &&
+		data[2] == "n1:skip:"+occ.ID &&
+		longest <= 64
+	fmt.Printf("  keyboard on the reminder  %d row(s), %d button(s), longest callback_data %d/64 bytes  %s\n",
+		len(kb), len(kb[0]), longest, verdict(keyboardOK))
+
+	// 2. One tap resolves it, and the message is edited rather than followed by
+	// a second one — the first two exit criteria, and they are one assertion
+	// because "in place" is exactly "no sendMessage beside the edit".
+	api.reset()
+	done := tap("n1:complete:"+occ.ID, 5001, "callback probe body")
+	after, err := st.GetOccurrence(ctx, occ.ID)
+	if err != nil {
+		return err
+	}
+	edit := api.last("editMessageText")
+	seq := api.methods()
+	oneTapOK := done.Code == http.StatusOK &&
+		after.Status == domain.StatusCompleted &&
+		after.ResolvedAt != nil &&
+		after.ResolutionSource != nil && *after.ResolutionSource == domain.ResolvedByNotification &&
+		len(seq) == 2 && seq[0] == "answerCallbackQuery" && seq[1] == "editMessageText" &&
+		api.count("sendMessage") == 0 &&
+		keyboardOf(edit) == nil
+	fmt.Printf("  Done resolves in one tap  status %d  %s  source=%s  calls=%v  keyboard dropped %v  %s\n",
+		done.Code, after.Status, sourceOf(after.ResolutionSource), seq,
+		keyboardOf(edit) == nil, verdict(oneTapOK))
+	fmt.Printf("    toast %q  message %q\n",
+		str(api.last("answerCallbackQuery"), "text"), str(edit, "text"))
+
+	// 3. The double tap. Same terminal state again is the idempotency table's
+	// second row: 200, nothing written, and the metric still reads one.
+	firstResolvedAt := domain.FormatTime(*after.ResolvedAt)
+	api.reset()
+	twice := tap("n1:complete:"+occ.ID, 5001, "callback probe body")
+	again, err := st.GetOccurrence(ctx, occ.ID)
+	if err != nil {
+		return err
+	}
+	unchanged := domain.FormatTime(*again.ResolvedAt) == firstResolvedAt
+	fmt.Printf("  double tap does not double-record  status %d  resolved_at unchanged %v  toast %q  %s\n",
+		twice.Code, unchanged, str(api.last("answerCallbackQuery"), "text"),
+		verdict(twice.Code == http.StatusOK && unchanged))
+
+	// 4. The two-stage snooze keyboard. menu writes nothing at all — that is
+	// the property that makes a non-resolving action safe to put on the same
+	// keyboard as three resolving ones.
+	snoozed, err := notify("callback snooze body")
+	if err != nil {
+		return err
+	}
+	api.reset()
+	menu := tap("n1:menu:"+snoozed.ID, 5002, "callback snooze body")
+	stillNotified, err := statusOf(ctx, st, snoozed.ID)
+	if err != nil {
+		return err
+	}
+	presets := keyboardOf(api.last("editMessageReplyMarkup"))
+	menuOK := menu.Code == http.StatusOK &&
+		stillNotified == domain.StatusNotified &&
+		api.count("editMessageText") == 0 &&
+		len(presets) == 2 && len(presets[0]) == len(schedule.Deltas) && len(presets[1]) == 1
+	labels := make([]string, 0, len(schedule.Deltas))
+	if len(presets) > 0 {
+		for _, b := range presets[0] {
+			labels = append(labels, b.Text)
+		}
+	}
+	fmt.Printf("  Snooze opens the presets  status %d  occurrence still %s  presets %v  %s\n",
+		menu.Code, stillNotified, labels, verdict(menuOK))
+
+	api.reset()
+	pushed := tap("n1:snooze:"+snoozed.ID+":1h", 5002, "callback snooze body")
+	parent, err := st.GetOccurrence(ctx, snoozed.ID)
+	if err != nil {
+		return err
+	}
+	chain, err := st.ChainFor(ctx, snoozed.ID)
+	if err != nil {
+		return err
+	}
+	snoozeOK := pushed.Code == http.StatusOK &&
+		parent.Status == domain.StatusSnoozed &&
+		parent.StartsAt.Equal(snoozed.StartsAt) &&
+		parent.ResolutionSource != nil && *parent.ResolutionSource == domain.ResolvedByNotification &&
+		chain.SnoozeCount == 1
+	fmt.Printf("  a preset snoozes it       status %d  parent %s  starts_at unmoved %v  chain snooze_count=%d  %s\n",
+		pushed.Code, parent.Status, parent.StartsAt.Equal(snoozed.StartsAt), chain.SnoozeCount,
+		verdict(snoozeOK))
+
+	// The clock in the toast is the device zone, which reportZones has already
+	// set to Europe/Lisbon by the time this runs — not the deployment default.
+	// That is the intended behaviour and it is worth naming, because a reader
+	// comparing the number against their own wall clock would otherwise think
+	// it wrong: the item's zone resolves the delta, the device's reports it.
+	deviceZone := fallback.String()
+	if name, ok, err := st.CurrentTZ(ctx); err == nil && ok {
+		deviceZone = name
+	}
+	fmt.Printf("    toast %q  message %q  (clock in %s, the device zone)\n",
+		str(api.last("answerCallbackQuery"), "text"), str(api.last("editMessageText"), "text"),
+		deviceZone)
+
+	if err := reportCallbackCap(ctx, st, m, api, tap, notify, log); err != nil {
+		return err
+	}
+	if err := reportCallbackMalformed(ctx, st, m, api, tap, occ.ID); err != nil {
+		return err
+	}
+	if err := reportCallbackEditFallback(api, tap, notify); err != nil {
+		return err
+	}
+
+	// resolution_source = notification, reachable for the first time.
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, want := range []string{
+		`navi_occurrence_transitions_total{from="notified",source="notification",to="completed"} 1`,
+		`navi_occurrence_transitions_total{from="notified",source="notification",to="snoozed"} 1`,
+		`navi_occurrence_transitions_total{from="notified",source="notification",to="missed"} 1`,
+	} {
+		fmt.Printf("  transitions metric      %s  %s\n",
+			want, verdict(strings.Contains(metricsRec.Body.String(), want)))
+	}
+	return nil
+}
+
+// reportCallbackCap walks a chain to its cap through the keyboard and checks
+// the toast says what the 409 would have (R8).
+func reportCallbackCap(
+	ctx context.Context,
+	st *store.Store,
+	m *metrics.Metrics,
+	api *fakeTelegram,
+	tap func(data string, messageID int, text string) *httptest.ResponseRecorder,
+	notify func(title string) (domain.Occurrence, error),
+	log *slog.Logger,
+) error {
+	root, err := notify("callback cap body")
+	if err != nil {
+		return err
+	}
+	item, err := st.GetItem(ctx, root.ItemID)
+	if err != nil {
+		return err
+	}
+
+	// Walk to the cap the way reportSnoozeCap does: through the store, with
+	// each link landing in the past so the next scheduler pass can claim it and
+	// make it notified. Only the last step goes through the keyboard, because
+	// the keyboard is what this section is checking and the walk is scaffolding.
+	pastMinute := func(domain.Item, domain.Occurrence) (time.Time, error) {
+		return time.Now().Add(-30 * time.Second), nil
+	}
+	current := root
+	for depth := 0; depth < item.SnoozeCap; depth++ {
+		res, err := st.SnoozeOccurrence(ctx, current.ID, domain.ResolvedByNotification, time.Now(), pastMinute)
+		if err != nil {
+			return err
+		}
+		if res.CapReached {
+			return fmt.Errorf("naviseed: callback cap: hit the cap at depth %d of %d", depth, item.SnoozeCap)
+		}
+		if err := fireAll(ctx, st, m, log); err != nil {
+			return err
+		}
+		if current, err = st.GetOccurrence(ctx, res.Child.ID); err != nil {
+			return err
+		}
+	}
+
+	api.reset()
+	over := tap("n1:snooze:"+current.ID+":10m", 5003, "callback cap body")
+	final, err := st.GetOccurrence(ctx, current.ID)
+	if err != nil {
+		return err
+	}
+	toast := str(api.last("answerCallbackQuery"), "text")
+	capOK := over.Code == http.StatusOK &&
+		final.Status == domain.StatusMissed &&
+		strings.Contains(toast, "snooze cap") &&
+		strings.Contains(toast, "missed")
+	fmt.Printf("  the cap resolves as missed  %s  toast %q  %s\n",
+		final.Status, toast, verdict(capOK))
+	return nil
+}
+
+// reportCallbackMalformed checks the three ways a payload fails to decode. All
+// three take one path: a toast, a counter, and nothing else.
+func reportCallbackMalformed(
+	ctx context.Context,
+	st *store.Store,
+	m *metrics.Metrics,
+	api *fakeTelegram,
+	tap func(data string, messageID int, text string) *httptest.ResponseRecorder,
+	knownID string,
+) error {
+	before, err := statusOf(ctx, st, knownID)
+	if err != nil {
+		return err
+	}
+
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"unframed", "garbage"},
+		{"unknown version", "n0:complete:" + knownID},
+		{"id is not a ULID", "n1:complete:not-a-ulid"},
+		{"arg on a non-snooze action", "n1:complete:" + knownID + ":1h"},
+	}
+	for _, c := range cases {
+		api.reset()
+		rec := tap(c.data, 5004, "callback probe body")
+		ok := rec.Code == http.StatusOK &&
+			api.count("editMessageText") == 0 &&
+			api.count("editMessageReplyMarkup") == 0 &&
+			api.count("sendMessage") == 0 &&
+			api.count("answerCallbackQuery") == 1
+		fmt.Printf("  malformed: %-26s status %d  answered only %v  %s\n",
+			c.name, rec.Code, ok, verdict(ok))
+	}
+
+	after, err := statusOf(ctx, st, knownID)
+	if err != nil {
+		return err
+	}
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	counted := strings.Contains(metricsRec.Body.String(),
+		`navi_inbound_messages_dropped_total{reason="callback_decode"} 4`)
+	fmt.Printf("  malformed: nothing written  %s -> %s  drop counted %v  %s\n",
+		before, after, counted, verdict(before == after && counted))
+	return nil
+}
+
+// reportCallbackEditFallback is N6's other half: an edit the API refuses falls
+// back to a short confirmation, so the outcome is never lost even though it
+// costs the second message N6 exists to avoid.
+func reportCallbackEditFallback(
+	api *fakeTelegram,
+	tap func(data string, messageID int, text string) *httptest.ResponseRecorder,
+	notify func(title string) (domain.Occurrence, error),
+) error {
+	occ, err := notify("callback fallback body")
+	if err != nil {
+		return err
+	}
+
+	api.reset()
+	api.mu.Lock()
+	api.editFails = true
+	api.mu.Unlock()
+	defer func() {
+		api.mu.Lock()
+		api.editFails = false
+		api.mu.Unlock()
+	}()
+
+	rec := tap("n1:skip:"+occ.ID, 5005, "callback fallback body")
+	confirmation := api.last("sendMessage")
+	ok := rec.Code == http.StatusOK &&
+		api.count("editMessageText") == 1 &&
+		api.count("sendMessage") == 1 &&
+		keyboardOf(confirmation) == nil
+	fmt.Printf("  edit refused -> confirmation  status %d  sent %q, no keyboard %v  %s\n",
+		rec.Code, str(confirmation, "text"), keyboardOf(confirmation) == nil, verdict(ok))
+	return nil
+}
+
+// reportBulkResolve drives the agent's bulk_resolve tool, which is what the
+// last P2 exit criterion needs: "did my stretching already" at 07:00 has to
+// cancel the 18:00 notification, and no P1 tool could resolve anything.
+//
+// The cancellation is the interesting half and it needs no cancel path. Both
+// ListDueOccurrences and ClaimOccurrence filter status = 'pending', so a row
+// moved to a terminal status has already left the fire path by construction —
+// which is a claim about the SQL, and the only way to check it is to run a real
+// scheduler pass afterwards and count zero.
+func reportBulkResolve(ctx context.Context, st *store.Store, table *defaults.Table, tz string, defaultTZ *time.Location, log *slog.Logger) error {
+	fmt.Println("\nagent bulk_resolve")
+
+	mat := materializer.New(log.With("component", "materializer-bulk"), st, defaultTZ)
+	t := agent.New(st, mat, table, defaultTZ)
+
+	item, err := seedFireItem(ctx, st, "bulk resolve probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+
+	// Three pending rows, all already due, so the scheduler would take every
+	// one of them on its next pass.
+	titles := []string{"bulk stretching", "bulk vitamins", "bulk walk"}
+	occs := make([]domain.Occurrence, 0, len(titles))
+	for _, title := range titles {
+		occ, err := fireOccurrence(ctx, st, item, time.Now().Add(-time.Minute), ptr(title))
+		if err != nil {
+			return err
+		}
+		occs = append(occs, occ)
+	}
+
+	// "Stretching and vitamins yes, skipped the walk" — one call, one
+	// transaction, three rows.
+	res, err := callTool(ctx, t, "bulk_resolve", agent.BulkResolveArgs{
+		Resolutions: []agent.ResolutionArg{
+			{OccurrenceID: occs[0].ID, Status: "completed"},
+			{OccurrenceID: occs[1].ID, Status: "completed"},
+			{OccurrenceID: occs[2].ID, Status: "skipped", Note: ptr("I was away")},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	statuses := make([]domain.Status, 0, len(occs))
+	for _, occ := range occs {
+		s, err := statusOf(ctx, st, occ.ID)
+		if err != nil {
+			return err
+		}
+		statuses = append(statuses, s)
+	}
+	batchOK := len(res.Resolutions) == 3 &&
+		statuses[0] == domain.StatusCompleted &&
+		statuses[1] == domain.StatusCompleted &&
+		statuses[2] == domain.StatusSkipped
+	fmt.Printf("  three in one write      %v  %s\n", statuses, verdict(batchOK))
+
+	// The exit criterion. Nothing was sent for any of them, because a resolved
+	// row is not a pending row.
+	rec := &recordingTransport{}
+	sched := scheduler.New(log.With("component", "scheduler-bulk"), st, rec, metrics.New(), time.Now())
+	if _, err := sched.Fire(ctx); err != nil {
+		return err
+	}
+	sends := 0
+	for _, title := range titles {
+		sends += rec.count(title)
+	}
+	fmt.Printf("  early resolution cancels the notification  %d send(s)  %s\n",
+		sends, verdict(sends == 0))
+
+	// Idempotency, through the tool rather than the endpoint: the same batch
+	// again writes nothing and is not an error.
+	repeat, err := callTool(ctx, t, "bulk_resolve", agent.BulkResolveArgs{
+		Resolutions: []agent.ResolutionArg{{OccurrenceID: occs[0].ID, Status: "completed"}},
+	})
+	noopOK := err == nil && len(repeat.Resolutions) == 1 && !repeat.Resolutions[0].Applied
+	fmt.Printf("  repeat is a no-op       applied=%v  %s\n",
+		len(repeat.Resolutions) == 1 && repeat.Resolutions[0].Applied, verdict(noopOK))
+
+	// Atomicity: one bad id and nothing at all is written. This is the whole
+	// argument for a list-taking tool over repeated single calls.
+	fresh, err := fireOccurrence(ctx, st, item, time.Now().Add(-time.Minute), ptr("bulk atomic probe"))
+	if err != nil {
+		return err
+	}
+	_, atomicErr := callTool(ctx, t, "bulk_resolve", agent.BulkResolveArgs{
+		Resolutions: []agent.ResolutionArg{
+			{OccurrenceID: fresh.ID, Status: "completed"},
+			{OccurrenceID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Status: "completed"},
+		},
+	})
+	untouched, err := statusOf(ctx, st, fresh.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  a bad id writes nothing  first row still %s  rejected %v  %s\n",
+		untouched, atomicErr != nil,
+		verdict(atomicErr != nil && untouched == domain.StatusPending))
+
+	// Layer 1 over a list, which is what the slice walk in decode.go bought.
+	empty := agent.BulkResolveArgs{Resolutions: []agent.ResolutionArg{}}
+	_, emptyErr := callTool(ctx, t, "bulk_resolve", empty)
+	_, enumErr := callTool(ctx, t, "bulk_resolve", agent.BulkResolveArgs{
+		Resolutions: []agent.ResolutionArg{{OccurrenceID: fresh.ID, Status: "snoozed"}},
+	})
+	_, dupErr := callTool(ctx, t, "bulk_resolve", agent.BulkResolveArgs{
+		Resolutions: []agent.ResolutionArg{
+			{OccurrenceID: fresh.ID, Status: "completed"},
+			{OccurrenceID: fresh.ID, Status: "skipped"},
+		},
+	})
+	fmt.Printf("  empty list rejected      %v  %s\n", emptyErr != nil, verdict(emptyErr != nil))
+	fmt.Printf("  per-row enum enforced    %v  %s\n", enumErr != nil, verdict(enumErr != nil))
+	fmt.Printf("  duplicate id rejected    %v  %s\n", dupErr != nil, verdict(dupErr != nil))
+	if enumErr != nil {
+		fmt.Printf("    %s\n", enumErr)
+	}
 	return nil
 }
 

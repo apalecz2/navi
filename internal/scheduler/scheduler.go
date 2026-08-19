@@ -305,8 +305,17 @@ func (s *Scheduler) send(ctx context.Context, d store.Due) (time.Duration, bool,
 		// Recipient is left empty: this is a single-user system with no user
 		// table, so the adapter's configured default is the only recipient there
 		// is.
-		Body:     transport.Truncate(body, caps.MaxBodyLength),
-		Actions:  actions(),
+		Body:    transport.Truncate(body, caps.MaxBodyLength),
+		Actions: actions(),
+
+		// The occurrence a tap on one of those actions would resolve. An adapter
+		// that renders actions has to be able to say which row they refer to, and
+		// nothing else on this struct can carry it. This is the one line the fire
+		// path needed for P2's callback handler; the capability flag itself flips
+		// inside the adapter, which is what building against scheduler.Notifier
+		// bought.
+		SubjectID: d.ID,
+
 		Priority: transport.Priority(d.Priority),
 	}
 
@@ -356,8 +365,9 @@ func (s *Scheduler) release(ctx context.Context, ids []string, claimedAt time.Ti
 }
 
 // actions are the three things a user can do about a reminder, described and not
-// rendered (N4). What a tap travels over is the adapter's business, and what
-// happens when one arrives is P2's.
+// rendered (N4). What a tap travels over is the adapter's business, and so is how
+// many taps it takes: Telegram renders Snooze as a keyboard that opens R9's four
+// presets, and the vocabulary here stays at three.
 func actions() []transport.Action {
 	return []transport.Action{
 		{ID: transport.ActionComplete, Label: "Done"},

@@ -225,6 +225,7 @@ type Outbound struct {
     Recipient string
     Body      string
     Actions   []Action
+    SubjectID string // what the Actions act on; an occurrence id today
     Priority  Priority
     ThreadRef string
 }
@@ -233,6 +234,7 @@ type Capabilities struct {
     SupportsActions                   bool
     SupportsNativeNotificationActions bool
     SupportsRichText                  bool
+    SupportsMessageEditing            bool
     MaxBodyLength                     int
 }
 
@@ -264,6 +266,22 @@ while a push transport that can only carry a URL would build a signed one instea
 struct — as an earlier draft did — pushed one transport's delivery mechanism into
 the shared vocabulary and made every caller responsible for signing.
 
+`SubjectID` is how the action id gets something to act on. An `Action` says what
+it does, and the occurrence it does it to has to travel somewhere: `Arg` is
+spoken for by the snooze delta and `ThreadRef` means a thread, so neither can
+carry it. It is empty on a message with nothing resolvable behind it — a
+conversational reply — and an adapter renders no actions in that case even if
+`Actions` is non-empty, which is what keeps a reply keyboard-free with no branch
+on why it was sent. The vocabulary does not say the value is an occurrence id,
+because a transport that can only carry a URL signs it into one instead.
+
+`SupportsMessageEditing` is what N6's fallback branches on. The outcome of a tap
+is folded into the message the button was attached to rather than pushed after
+it, so a resolved reminder leaves one message in the chat instead of two; a
+transport that cannot edit sends the short confirmation. That is a capability
+question and never a name question (T5), which is why it is a flag rather than an
+`if` inside one adapter.
+
 Callers branch on `capabilities`, never on `name`. A transport without action
 support renders a numbered plain-text list that the agent parses from the reply,
 which is how iMessage would work later.
@@ -279,12 +297,17 @@ Both roles point at the same adapter to start with (D-006). The split is kept
 because it is the seam a dedicated push channel drops into later, and because it
 costs one environment variable to keep and a refactor to reintroduce.
 
-Telegram declares `supports_actions` true and
-`supports_native_notification_actions` false. That second flag currently has no
+Telegram declares `supports_actions` true, `supports_message_editing` true, and
+`supports_native_notification_actions` false. That last flag currently has no
 adapter setting it true, which is the point: the notification-versus-chat-message
 distinction is recorded in the capability model rather than in anyone's memory, so
 the code that would need to change when T10 lands is already the code reading the
 flag.
+
+`supports_actions` was declared false from session 6 until session 15, on the
+grounds that a button whose tap goes nowhere is worse than no button. Flipping it
+changed one line inside the adapter and nothing in the scheduler, which is the
+only test D-007 gets before a second adapter exists.
 
 ## Model access
 

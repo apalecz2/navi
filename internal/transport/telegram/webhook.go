@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/transport"
 )
 
@@ -36,17 +37,40 @@ type Dispatcher interface {
 	Enqueue(msg transport.IncomingMessage) bool
 }
 
+// Resolver is what a button tap needs from the repository: the same two
+// methods internal/httpapi calls, reached the same way.
+//
+// It is deliberately not a narrower "resolve this for me" helper. D-014 bought
+// one state machine across three surfaces, and the way that stays true is that
+// the third surface calls the same two store methods rather than something
+// written for it — every transition rule stays inside domain.Transition, which
+// both of these already ask.
+type Resolver interface {
+	ResolveOccurrence(ctx context.Context, id string, to domain.Status, note *string,
+		source domain.ResolutionSource, now time.Time) (store.Resolution, error)
+
+	SnoozeOccurrence(ctx context.Context, id string, source domain.ResolutionSource,
+		now time.Time, at func(domain.Item, domain.Occurrence) (time.Time, error)) (store.Snooze, error)
+
+	CurrentTZ(ctx context.Context) (string, bool, error)
+}
+
 // Metrics is this handler's slice of the registry.
 type Metrics interface {
 	IncInboundAccepted(transport string)
 	IncInboundDropped(reason string)
+	IncTransition(from, to, source string)
 }
 
 // Inbound is the webhook half of this adapter: verified against a shared
-// secret, then filtered by the sender allowlist (D8). It shares no state
-// with the outbound Transport — a botToken and an http.Client versus a
-// secret, an allowlist, a store, and a metrics sink — so it is its own type
-// rather than a widened one.
+// secret, then filtered by the sender allowlist (D8).
+//
+// It holds the outbound Transport rather than duplicating a bot token and an
+// http.Client, because since session 15 it answers taps: a callback query is
+// replied to on the same bot it was sent from, and the message it came from is
+// edited in place (N6). It is still its own type — the outbound half has no
+// secret, no allowlist and no store — but it is no longer stateless with
+// respect to the API.
 //
 // It implements http.Handler directly, on the same precedent as
 // metrics.Handler(): the package that owns a wire format hands httpapi a
@@ -55,38 +79,79 @@ type Inbound struct {
 	secret          string
 	allowedSenderID string
 	store           ConversationStore
+	resolver        Resolver
+	api             *Transport
 	dispatcher      Dispatcher
 	metrics         Metrics
+	defaultTZ       *time.Location
 	log             *slog.Logger
 }
 
 // NewInbound returns the webhook handler for CHAT_TRANSPORT=telegram.
+//
 // dispatcher may be nil, in which case an accepted message is recorded but
 // nothing is ever notified to process it — the state naviseed's
 // webhook-only checks still exercise.
-func NewInbound(secret, allowedSenderID string, store ConversationStore, dispatcher Dispatcher, m Metrics, log *slog.Logger) *Inbound {
-	return &Inbound{secret: secret, allowedSenderID: allowedSenderID, store: store, dispatcher: dispatcher, metrics: m, log: log}
+//
+// resolver and api may both be nil, in which case a callback query is
+// acknowledged and ignored exactly as it was before this session. They are not
+// separately optional: a tap that resolves without answering leaves a spinner
+// on the user's screen, and one that answers without resolving lies.
+func NewInbound(
+	secret, allowedSenderID string,
+	store ConversationStore,
+	resolver Resolver,
+	api *Transport,
+	dispatcher Dispatcher,
+	m Metrics,
+	defaultTZ *time.Location,
+	log *slog.Logger,
+) *Inbound {
+	return &Inbound{
+		secret:          secret,
+		allowedSenderID: allowedSenderID,
+		store:           store,
+		resolver:        resolver,
+		api:             api,
+		dispatcher:      dispatcher,
+		metrics:         m,
+		defaultTZ:       defaultTZ,
+		log:             log,
+	}
 }
 
 // update is the subset of Telegram's Update this handler decodes: enough to
-// route correctly without acting on anything but a plain message this
-// session. from() reads whichever of message or callback_query is present,
-// so an allowlisted user's button tap (no buttons exist until P2, but the
-// Update shape does not know that) is recognised as allowlisted rather than
-// miscounted as a stranger.
+// route a plain message and a button tap and nothing else. from() reads
+// whichever of message or callback_query is present, so both kinds go through
+// one allowlist check before they diverge.
 type update struct {
 	UpdateID      int64            `json:"update_id"`
 	Message       *tgMessage       `json:"message"`
 	CallbackQuery *tgCallbackQuery `json:"callback_query"`
 }
 
+// tgMessage carries MessageID and Chat because a callback query arrives with
+// the message its button was attached to, and editing that message in place
+// (N6) needs both. For an inbound plain message they are decoded and unused.
 type tgMessage struct {
-	From *tgUser `json:"from"`
-	Text string  `json:"text"`
+	MessageID int     `json:"message_id"`
+	Chat      *tgChat `json:"chat"`
+	From      *tgUser `json:"from"`
+	Text      string  `json:"text"`
 }
 
+type tgChat struct {
+	ID int64 `json:"id"`
+}
+
+// tgCallbackQuery is one button tap. ID is what answerCallbackQuery clears the
+// spinner with, Data is the payload callback.go framed, and Message is where
+// the outcome gets folded back in.
 type tgCallbackQuery struct {
-	From *tgUser `json:"from"`
+	ID      string     `json:"id"`
+	From    *tgUser    `json:"from"`
+	Data    string     `json:"data"`
+	Message *tgMessage `json:"message"`
 }
 
 type tgUser struct {
@@ -105,15 +170,22 @@ func (u update) from() *tgUser {
 }
 
 // ServeHTTP verifies the secret, decodes the envelope, checks the allowlist,
-// and — for a plain message from the allowlisted sender — records it.
+// and then routes on what kind of update arrived.
 //
 // Order: secret first, so a wrong or missing header never causes the body to
 // be read at all; then decode, because the sender id lives inside the JSON
 // and cannot be checked before it is parsed; then the allowlist; then the
-// write. A non-message update from the allowlisted sender (an edited
-// message, a channel post, a callback query) is acknowledged and ignored —
-// neither accepted nor dropped — since P2 is what gives any of those
-// somewhere to go.
+// work. That is steps one and two of
+// docs/07-api-spec.md#notification-button-taps, and it is the same order for
+// both kinds of update — which is the point, because it is why a tap needs no
+// authentication of its own and Q6's signed action tokens stay unbuilt.
+//
+// The two kinds diverge immediately afterwards. A message normalizes into an
+// IncomingMessage and is enqueued for the agent. A callback query never reaches
+// the agent at all: it decodes to an occurrence and an action and goes straight
+// to the resolve path, because a tap is an instruction that has already been
+// unambiguously expressed. Any other update from the allowlisted sender (an
+// edited message, a channel post) is still acknowledged and ignored.
 func (h *Inbound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.secretValid(r.Header.Get("X-Telegram-Bot-Api-Secret-Token")) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -137,6 +209,22 @@ func (h *Inbound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// here names who it was or what it said — the counter is the only
 		// trace.
 		h.metrics.IncInboundDropped("allowlist")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if upd.CallbackQuery != nil {
+		h.handleCallback(r.Context(), upd.CallbackQuery)
+
+		// Always 200, whatever the tap did. A non-2xx makes Telegram redeliver
+		// the update, and a redelivered tap is another call into the state
+		// machine — which is safe, but pointless for a payload that will fail
+		// to decode every time. No conversations row and no update_id dedup
+		// either: 07-api-spec is explicit that no deduplication lives in the
+		// adapter, because a double tap is the state machine's second
+		// idempotency row and nothing else. The agent still sees the outcome,
+		// because context injection already reports today's occurrences with
+		// their status and resolution.
 		w.WriteHeader(http.StatusOK)
 		return
 	}

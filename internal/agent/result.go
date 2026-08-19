@@ -19,13 +19,33 @@ type Occurrence struct {
 	StartsAt string `json:"starts_at"`
 }
 
+// Resolved is one row of bulk_resolve's answer: what the occurrence is now, and
+// whether this call is what made it so.
+//
+// Applied false is not a failure. It is the idempotency table's second row —
+// the occurrence was already in the requested terminal state — and the
+// confirmation is better for saying "already done" than for claiming credit.
+type Resolved struct {
+	OccurrenceID string `json:"occurrence_id"`
+	Status       string `json:"status"`
+	Applied      bool   `json:"applied"`
+
+	// ChainCompleted is the snooze chain rolled up (D-011, R7): true when any
+	// link of this chain has completed, which is what a streak counts. A
+	// reminder that was never snoozed is a chain of one and this simply mirrors
+	// its own status.
+	ChainCompleted bool `json:"chain_completed"`
+}
+
 // Result is what every handler returns. Fields are populated per tool:
 // list_items sets Items; create_item and update_item set Item, Applied,
-// NextOccurrences and Inferred; delete_item sets Item and Applied only.
+// NextOccurrences and Inferred; delete_item sets Item and Applied only;
+// bulk_resolve sets Resolutions only.
 type Result struct {
 	Item            *domain.Item  `json:"item,omitempty"`
 	Items           []domain.Item `json:"items,omitempty"`
 	NextOccurrences []Occurrence  `json:"next_occurrences,omitempty"`
+	Resolutions     []Resolved    `json:"resolutions,omitempty"`
 
 	// Inferred is the vocabulary-default fields resolveSchedule filled in
 	// that the caller did not supply - A5's "state every inferred

@@ -137,6 +137,20 @@ partial application when call four is wrong. One tool taking a list gives one
 transaction and an all-or-nothing outcome, which is what "did everything except
 the walk" actually needs.
 
+It is built as of session 15, ahead of the rest of P3, and this argument is why.
+The last P2 exit criterion — "did my stretching already" at 07:00 cancelling the
+18:00 notification — needs the agent to resolve exactly one occurrence, and the
+cheap answer would have been a single-occurrence tool. That is the tool this
+paragraph rejects, so the smaller move was to bring `bulk_resolve` forward and
+let a batch of one be the degenerate case it already is. Its endpoint,
+`POST /api/occurrences/bulk-resolve`, stays in P3, because nothing calls it until
+the web app.
+
+In the implementation, `resolutions` is validated element by element at Layer 1 —
+a rejection names `resolutions[2].status`, not `status` — and two rows naming the
+same occurrence are refused outright rather than left to resolve it and then meet
+themselves coming back.
+
 **`propose_change` writes nothing.** The agent is allowed opinions about your
 schedule and not allowed to act on them. An assistant that silently moves a
 reminder because it inferred you would prefer 08:00 is a trust-destroying bug that

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -97,6 +98,17 @@ func validateValue(rv reflect.Value, prefix string) error {
 					return err
 				}
 			}
+		case reflect.Slice:
+			// Elements too, indexed in the path so a rejection names the row -
+			// "resolutions[2].status" and not "status". bulk_resolve is the
+			// first tool taking a list, and without this its per-element enum
+			// tag would be decoration: Layer 1 would pass anything and the
+			// state machine would reject it later with a worse message.
+			for j := 0; j < fv.Len(); j++ {
+				if err := validateValue(fv.Index(j), fmt.Sprintf("%s[%d]", path, j)); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -114,6 +126,7 @@ func checkField(fv reflect.Value, path, tag string) error {
 	var required bool
 	var enums []string
 	var min, max *float64
+	var minItems *int
 
 	for _, part := range strings.Split(tag, ",") {
 		switch {
@@ -129,12 +142,19 @@ func checkField(fv reflect.Value, path, tag string) error {
 			if f, err := strconv.ParseFloat(strings.TrimPrefix(part, "maximum="), 64); err == nil {
 				max = &f
 			}
+		case strings.HasPrefix(part, "minItems="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(part, "minItems=")); err == nil {
+				minItems = &n
+			}
 		}
 	}
 
 	// Dereference for the value checks below. A nil pointer or an empty
 	// string is "omitted" - only required objects to that; every other check
 	// is skipped rather than applied to a value that was never provided.
+	//
+	// A nil slice is omitted; an explicit [] is present but empty, which is a
+	// different mistake and gets minItems' message rather than "is required".
 	present := true
 	check := fv
 	switch {
@@ -146,6 +166,8 @@ func checkField(fv reflect.Value, path, tag string) error {
 		}
 	case fv.Kind() == reflect.String:
 		present = fv.String() != ""
+	case fv.Kind() == reflect.Slice:
+		present = !fv.IsNil()
 	}
 
 	if required && !present {
@@ -153,6 +175,11 @@ func checkField(fv reflect.Value, path, tag string) error {
 	}
 	if !present {
 		return nil
+	}
+
+	if minItems != nil && check.Kind() == reflect.Slice && check.Len() < *minItems {
+		return domain.Invalid("min_items", path, "%s needs at least %d item(s), got %d",
+			path, *minItems, check.Len())
 	}
 
 	if len(enums) > 0 && check.Kind() == reflect.String {

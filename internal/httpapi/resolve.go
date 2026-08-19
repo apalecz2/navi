@@ -49,27 +49,25 @@ type resolveResponse struct {
 	Chain chainResponse `json:"chain"`
 }
 
-// resolvableStatuses is the status enum from the spec's request body.
+// The status enum from the spec's request body is domain.ParseResolvableStatus,
+// not a map here, because there are three callers of it now — this endpoint, the
+// agent's bulk_resolve, and the Telegram callback handler — and a closed set
+// copied three times is a closed set that drifts.
 //
-// missed is a member, and deliberately unguarded beyond this. Per D-008 and K6
-// it means "asked and got nothing", never "the clock passed midnight", and
-// nothing in this repository sends it yet: snooze-cap exhaustion is its first
-// caller and the reconciler owns it from P3. The guard therefore belongs in
-// those callers, not here — a rule at this layer restricting which source may
-// ask for which status would be a second copy of the transition table living
-// beside the real one, which is exactly the divergence D-014 bought a single
-// endpoint to avoid.
-var resolvableStatuses = map[string]domain.Status{
-	string(domain.StatusCompleted): domain.StatusCompleted,
-	string(domain.StatusSkipped):   domain.StatusSkipped,
-	string(domain.StatusMissed):    domain.StatusMissed,
-}
+// missed is a member of it, and deliberately unguarded. Per D-008 and K6 it
+// means "asked and got nothing", never "the clock passed midnight", and what
+// keeps that honest is that almost nothing sends it: snooze-cap exhaustion is
+// its first caller and the reconciler owns it from P3. The guard therefore
+// belongs in those callers, not here — a rule at this layer restricting which
+// source may ask for which status would be a second copy of the transition table
+// living beside the real one, which is exactly the divergence D-014 bought a
+// single endpoint to avoid.
 
 // resolutionSources mirrors the CHECK constraint on occurrences.resolution_source.
 //
-// All four are accepted because the column accepts all four. Only web and
-// agent have a caller today; notification arrives with the callback handler,
-// and sweeper with reconciliation.
+// All four are accepted because the column accepts all four. Three have a caller
+// as of session 15 — web, agent, and notification, which the Telegram callback
+// handler sends. sweeper arrives with reconciliation in P3.
 var resolutionSources = map[string]domain.ResolutionSource{
 	string(domain.ResolvedByNotification): domain.ResolvedByNotification,
 	string(domain.ResolvedByWeb):          domain.ResolvedByWeb,
@@ -111,7 +109,7 @@ func (s *Server) handleResolveOccurrence(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	status, ok := resolvableStatuses[req.Status]
+	status, ok := domain.ParseResolvableStatus(req.Status)
 	if !ok {
 		writeValidationError(w, s.log, domain.Invalid("resolve_status_valid", "status",
 			"status %q is not one of completed, skipped, missed", req.Status))

@@ -70,6 +70,27 @@ func (d Delta) Valid() bool {
 	return false
 }
 
+// Label is how a delta is offered to a person — on a Telegram inline keyboard
+// today, on a web control later.
+//
+// It lives beside the set rather than in the adapter that renders it so that a
+// fifth preset cannot be added without a label, and so that two surfaces cannot
+// name the same delta differently. The wire value is the string itself; this is
+// only ever display.
+func (d Delta) Label() string {
+	switch d {
+	case Delta10m:
+		return "10 min"
+	case Delta1h:
+		return "1 hour"
+	case DeltaTonight:
+		return "Tonight"
+	case DeltaTomorrow:
+		return "Tomorrow"
+	}
+	return string(d)
+}
+
 // deltaList renders the four for an error message.
 func deltaList() string {
 	names := make([]string, len(Deltas))
@@ -184,4 +205,44 @@ func ResolveDelta(d Delta, s Schedule, loc *time.Location, now time.Time) (time.
 
 	return time.Time{}, FoldNone, domain.Invalid("snooze_delta_valid", "delta",
 		"delta %q is not one of %s", string(d), deltaList())
+}
+
+// SnoozeAt returns the callback store.SnoozeOccurrence takes: given the item as
+// it stands inside the open write transaction, where its snooze child starts.
+//
+// It exists as a constructor rather than as a block inside one handler because
+// there are two callers now — POST /api/occurrences/{id}/snooze and the Telegram
+// callback handler — and the second must not be a second copy of the delta
+// table. Everything it closes over is resolved before the transaction opens
+// (zones, delta, now), so the closure itself is pure and safe to run under the
+// writer lock, which is the property internal/store depends on to stay free of a
+// schedule import.
+//
+// observe, if non-nil, is called with what the resolution actually decided. It
+// is how a caller logs the DST fold at debug the way the materializer does,
+// without this package taking a logger.
+func SnoozeAt(
+	zones Zones,
+	delta Delta,
+	now time.Time,
+	observe func(item domain.Item, loc *time.Location, at time.Time, fold Fold),
+) func(domain.Item, domain.Occurrence) (time.Time, error) {
+	return func(item domain.Item, _ domain.Occurrence) (time.Time, error) {
+		loc, err := zones.For(item)
+		if err != nil {
+			return time.Time{}, err
+		}
+		sched, err := Parse(item.Schedule)
+		if err != nil {
+			return time.Time{}, err
+		}
+		at, fold, err := ResolveDelta(delta, sched, loc, now)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if observe != nil {
+			observe(item, loc, at, fold)
+		}
+		return at, nil
+	}
 }

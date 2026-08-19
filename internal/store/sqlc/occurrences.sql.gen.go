@@ -490,3 +490,45 @@ func (q *Queries) ReleaseClaimedOccurrence(ctx context.Context, arg ReleaseClaim
 	}
 	return result.RowsAffected()
 }
+
+const resolveOccurrence = `-- name: ResolveOccurrence :execrows
+UPDATE occurrences
+SET status = ?, resolved_at = ?, resolution_note = ?, resolution_source = ?
+WHERE id = ?
+  AND status = ?
+`
+
+type ResolveOccurrenceParams struct {
+	Status           string
+	ResolvedAt       *string
+	ResolutionNote   *string
+	ResolutionSource *string
+	ID               string
+	Status_2         string
+}
+
+// ResolveOccurrence is POST /api/occurrences/{id}/resolve's write half, run
+// only after domain.Transition has already answered OutcomeApplied. It writes
+// all four resolution columns together because they are one fact - a row
+// carrying a status but no resolved_at is not a resolution anyone can read.
+//
+// The trailing status = ? guard mirrors ClaimOccurrence's and
+// ReleaseClaimedOccurrence's. The single BEGIN IMMEDIATE writer already makes
+// the read above it and this write atomic, so the guard is redundant defence
+// rather than the mechanism, and it is kept for the same reason every other
+// guarded write in this file keeps one: a planner bug cannot reach a row the
+// statement itself refuses.
+func (q *Queries) ResolveOccurrence(ctx context.Context, arg ResolveOccurrenceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resolveOccurrence,
+		arg.Status,
+		arg.ResolvedAt,
+		arg.ResolutionNote,
+		arg.ResolutionSource,
+		arg.ID,
+		arg.Status_2,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}

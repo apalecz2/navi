@@ -510,3 +510,133 @@ func (s *Store) ReleaseClaims(ctx context.Context, ids []string, claimedAt time.
 	}
 	return released, nil
 }
+
+// Resolution is what one call to ResolveOccurrence decided: the outcome the
+// state machine returned, the occurrence as it now stands, and the status it
+// held on the way in.
+//
+// Occurrence is the row after the write when Applied, and the row exactly as
+// it was when Noop — which is what makes "200 with the current state" and
+// "200 with the new state" the same line of handler code rather than two.
+// Previous is carried because navi_occurrence_transitions_total needs both
+// ends of the edge, and only the caller that asked for the change knows it
+// was an edge at all.
+type Resolution struct {
+	Occurrence domain.Occurrence
+	Outcome    domain.Outcome
+	Previous   domain.Status
+}
+
+// ResolveOccurrence resolves one occurrence through the shared state machine
+// (D-014, invariant 4): read the row and its item's kind, ask
+// domain.Transition, and write the four resolution columns only when the
+// answer is OutcomeApplied.
+//
+// Every question a resolution surface can ask is answered here, so no caller
+// re-decides any of them. A legal edge applies and returns Applied; the same
+// terminal state again returns Noop with nothing written; a different terminal
+// state and an illegal edge both return a *domain.TransitionError carrying the
+// current state. That is the whole of docs/07-api-spec.md#idempotency, and it
+// is a property of the state machine rather than of any surface — which is why
+// there are no idempotency keys anywhere near this path.
+//
+// Nothing here restricts which source may request which status. missed is
+// reachable from this method exactly as the table allows, and the reason it is
+// not guarded is D-014's: a second rule beside the transition table is the
+// divergence the single endpoint was bought to avoid. What keeps missed honest
+// is that nothing sends it — see the handler in internal/httpapi/resolve.go.
+//
+// Early resolution needs no cancel path (R3). Both ListDueOccurrences and
+// ClaimOccurrence filter status = 'pending', so a row this method moves to a
+// terminal status has already left the scheduler's reach; and because both go
+// through the one BEGIN IMMEDIATE writer there is no race, only an order. If
+// the claim commits first the row is notified and this still succeeds, because
+// notified is a legal starting point for the same edges.
+func (s *Store) ResolveOccurrence(
+	ctx context.Context,
+	id string,
+	to domain.Status,
+	note *string,
+	source domain.ResolutionSource,
+	now time.Time,
+) (Resolution, error) {
+	var res Resolution
+
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		row, err := q.GetOccurrence(ctx, id)
+		if err != nil {
+			return notFound("store: resolve occurrence", err)
+		}
+		occ, err := toDomainOccurrence(row)
+		if err != nil {
+			return err
+		}
+		res.Occurrence = occ
+		res.Previous = occ.Status
+
+		// The kind lives on the item, not the occurrence, and the valid status
+		// set depends on it — the same in-transaction read CreateOccurrence
+		// makes for the same reason.
+		itemRow, err := q.GetItem(ctx, occ.ItemID)
+		if err != nil {
+			return notFound("store: resolve occurrence: item", err)
+		}
+		item, err := toDomainItem(itemRow)
+		if err != nil {
+			return err
+		}
+
+		outcome, err := domain.Transition(item.Kind, occ.Status, to)
+		res.Outcome = outcome
+		if err != nil {
+			// A *domain.TransitionError, returned as it is. res.Occurrence
+			// already holds the current row, which is what the 409 reports.
+			return err
+		}
+		if outcome != domain.OutcomeApplied {
+			return nil
+		}
+
+		resolvedAt := domain.FormatTime(now)
+		sourceText := string(source)
+		n, err := q.ResolveOccurrence(ctx, sqlc.ResolveOccurrenceParams{
+			Status:           string(to),
+			ResolvedAt:       &resolvedAt,
+			ResolutionNote:   note,
+			ResolutionSource: &sourceText,
+			ID:               id,
+			Status_2:         string(res.Previous),
+		})
+		if err != nil {
+			return fmt.Errorf("store: resolve occurrence: %w", err)
+		}
+		if n == 0 {
+			// The guard refused it. Nothing else can have moved the row — this
+			// is inside the write transaction on the only writer — so this is a
+			// bug surfacing rather than a case with a story, and it is worth an
+			// error instead of a silent no-op that would report 200.
+			s.log.Warn("resolve: refused update", "occurrence", id,
+				"from", res.Previous, "to", to)
+			return fmt.Errorf("store: resolve occurrence %s: guard refused the update", id)
+		}
+
+		// Mirror what the statement wrote, so the caller can render the new
+		// state without a second read.
+		resolved := now
+		res.Occurrence.Status = to
+		res.Occurrence.ResolvedAt = &resolved
+		res.Occurrence.ResolutionNote = note
+		res.Occurrence.ResolutionSource = &source
+		return nil
+	})
+	if err != nil {
+		var te *domain.TransitionError
+		if errors.As(err, &te) {
+			// Not a failure: the state machine answered, and the answer plus
+			// the current row are what the caller reports.
+			return res, err
+		}
+		return Resolution{}, err
+	}
+	return res, nil
+}

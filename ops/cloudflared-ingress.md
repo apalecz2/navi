@@ -66,5 +66,22 @@ callback query on `/webhook/telegram`, already authenticated by the shared secre
 and already filtered by the sender allowlist (D8, D-006). There is no
 session-less public action path in this service.
 
-Only `/healthz` exists today. The rest are listed so the ingress rule does not
-need revisiting as each one lands.
+`/healthz`, `/webhook/telegram` and — since session 13 —
+`POST /api/occurrences/{id}/resolve` exist today. The rest are listed so the
+ingress rule does not need revisiting as each one lands.
+
+**`/api` carries no in-process authentication, by design.** The container trusts
+that a request reaching `/api/*` came through this tunnel with an Access session
+already established, which is what D-014 means by "auth is resolved before the
+handler runs" and what makes one resolution endpoint serve three surfaces at no
+per-surface cost. Two things follow. The Access policy for `/api/*` must
+actually be applied in the dashboard before the tunnel is pointed at a real
+host — an ingress rule without it publishes the resolution endpoint. And the
+container port must not be reachable except through the tunnel, since anything
+that can open a socket to it can resolve any occurrence by id.
+
+Still unverified against the real tunnel: that `/api` is reachable through it at
+all, and that an unauthenticated request is refused at the edge. Neither is code
+work, and both are in the same class as session 7's open reachability item —
+they need the real host, and they should be checked once by hand on the first
+deploy rather than assumed.

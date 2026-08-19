@@ -157,6 +157,19 @@ func run() error {
 	m.RegisterHorizonDays(func() float64 { return horizonDays(st, log) })
 	m.RegisterTransition(string(domain.StatusPending), string(domain.StatusNotified), scheduler.Source)
 
+	// Every edge the resolution endpoint can legally produce, so a dashboard
+	// reads a zero rather than a gap before the first resolution of a given
+	// shape. The sources are the two that have a caller: notification arrives
+	// with the callback handler, sweeper with reconciliation, and registering
+	// either now would export a zero for something nothing can send.
+	for _, from := range []domain.Status{domain.StatusPending, domain.StatusNotified} {
+		for _, to := range []domain.Status{domain.StatusCompleted, domain.StatusSkipped, domain.StatusMissed} {
+			for _, src := range []domain.ResolutionSource{domain.ResolvedByWeb, domain.ResolvedByAgent} {
+				m.RegisterTransition(string(from), string(to), string(src))
+			}
+		}
+	}
+
 	sup := supervisor.New(log, h, m)
 	loops := []supervisor.Loop{
 		mat.Loop(),

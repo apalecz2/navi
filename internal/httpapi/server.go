@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/config"
+	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/health"
 	"github.com/aidenpaleczny/navi/internal/metrics"
+	"github.com/aidenpaleczny/navi/internal/store"
 )
 
 // Store is the slice of the repository the handlers in this package use. It is
@@ -25,6 +27,11 @@ type Store interface {
 	Ping(ctx context.Context) error
 	PendingOverdue(ctx context.Context, floor time.Time) (int, error)
 	Horizon(ctx context.Context) (int, bool, error)
+
+	// ResolveOccurrence carries the whole of the resolution decision, so the
+	// handler maps an outcome onto a status code and judges nothing itself.
+	ResolveOccurrence(ctx context.Context, id string, to domain.Status, note *string,
+		source domain.ResolutionSource, now time.Time) (store.Resolution, error)
 }
 
 // Server holds what the handlers read. Nothing in this struct is written after
@@ -58,6 +65,13 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+
+	// The first /api route. Everything under /api is authenticated by
+	// Cloudflare Access at the tunnel edge, one-time PIN
+	// (docs/07-api-spec.md#authentication, ops/cloudflared-ingress.md) — there
+	// is no in-process check here because there is no session for one to read,
+	// and D-014's "auth is resolved before the handler runs" is that decision.
+	mux.HandleFunc("POST /api/occurrences/{id}/resolve", s.handleResolveOccurrence)
 
 	// /metrics is served on the same listener but is deliberately absent from
 	// the tunnel ingress table: it carries no secrets, but it describes usage

@@ -40,6 +40,8 @@ import (
 	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/health"
+	"github.com/aidenpaleczny/navi/internal/httpapi"
 	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/metrics"
 	"github.com/aidenpaleczny/navi/internal/model"
@@ -126,6 +128,12 @@ func run() error {
 	// Last, because it is the only section that sends anything, and because it
 	// wants the global pause reportPause left lifted.
 	if err := reportFire(ctx, st, cfg.Schedule.DefaultTZ.String(), log); err != nil {
+		return err
+	}
+
+	// After fire, because the notified rows it resolves are ones the scheduler
+	// claimed rather than ones written as notified by hand.
+	if err := reportResolve(ctx, st, cfg.Schedule.DefaultTZ.String(), log); err != nil {
 		return err
 	}
 
@@ -1398,6 +1406,187 @@ func fireOccurrence(ctx context.Context, st *store.Store, item domain.Item, at t
 	})
 }
 
+// reportResolve drives POST /api/occurrences/{id}/resolve through a real
+// httpapi server, the same no-socket way reportWebhook drives the Telegram
+// webhook: an http.Handler and httptest, so the route, the decode, the outcome
+// mapping and the store write are all the ones production runs.
+//
+// The four cases are the four rows of docs/07-api-spec.md#idempotency. The
+// last is driven one layer down, at the store, because pending is not a member
+// of the endpoint's status enum and no valid request body can name it -
+// checking it there is what shows ResolveOccurrence adds no rule of its own
+// beyond domain.Transition's.
+func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Logger) error {
+	fmt.Println("\nresolve  POST /api/occurrences/{id}/resolve")
+
+	m := metrics.New()
+	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
+		health.New(), m, st, time.Time{}, nil)
+
+	post := func(id, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/resolve",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	// A notified row, reached the way the scheduler reaches one rather than by
+	// writing the status by hand.
+	item, err := seedFireItem(ctx, st, "resolve path probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+	claim := func(title string) (domain.Occurrence, error) {
+		occ, err := fireOccurrence(ctx, st, item, time.Now().Add(-time.Minute), ptr(title))
+		if err != nil {
+			return domain.Occurrence{}, err
+		}
+		rec := &recordingTransport{}
+		sched := scheduler.New(log.With("component", "scheduler-resolve"), st, rec, m, time.Now())
+		if _, err := sched.Fire(ctx); err != nil {
+			return domain.Occurrence{}, err
+		}
+		return st.GetOccurrence(ctx, occ.ID)
+	}
+
+	occ, err := claim("resolve probe body")
+	if err != nil {
+		return err
+	}
+	if occ.Status != domain.StatusNotified {
+		return fmt.Errorf("naviseed: resolve: occurrence %s is %s, not notified", occ.ID, occ.Status)
+	}
+
+	// 1. A legal edge applies and writes all three columns.
+	applied := post(occ.ID, `{"status":"completed","note":"done early","source":"web"}`)
+	after, err := st.GetOccurrence(ctx, occ.ID)
+	if err != nil {
+		return err
+	}
+	appliedOK := applied.Code == http.StatusOK &&
+		after.Status == domain.StatusCompleted &&
+		after.ResolvedAt != nil &&
+		after.ResolutionSource != nil && *after.ResolutionSource == domain.ResolvedByWeb
+	fmt.Printf("  notified -> completed   status %d  occurrence=%s resolved_at=%s source=%s  %s\n",
+		applied.Code, after.Status, presence(after.ResolvedAt != nil),
+		sourceOf(after.ResolutionSource), verdict(appliedOK))
+
+	// 2. The same terminal state again: 200, and nothing written.
+	noop := post(occ.ID, `{"status":"completed","note":"second tap","source":"web"}`)
+	again, err := st.GetOccurrence(ctx, occ.ID)
+	if err != nil {
+		return err
+	}
+	unchanged := again.ResolvedAt != nil && after.ResolvedAt != nil &&
+		again.ResolvedAt.Equal(*after.ResolvedAt) &&
+		noteOf(again.ResolutionNote) == noteOf(after.ResolutionNote)
+	fmt.Printf("  completed -> completed  status %d  nothing rewritten=%v  %s\n",
+		noop.Code, unchanged, verdict(noop.Code == http.StatusOK && unchanged))
+
+	// 3. A different terminal state: 409, reporting the state it is in.
+	conflict := post(occ.ID, `{"status":"skipped","note":null,"source":"web"}`)
+	fmt.Printf("  completed -> skipped    status %d  current_state=%q  %s\n",
+		conflict.Code, currentState(conflict.Body.Bytes()),
+		verdict(conflict.Code == http.StatusConflict &&
+			currentState(conflict.Body.Bytes()) == string(domain.StatusCompleted)))
+
+	// 4. An illegal edge, at the store: notified -> pending is not in the table.
+	illegalOcc, err := claim("resolve illegal body")
+	if err != nil {
+		return err
+	}
+	res, err := st.ResolveOccurrence(ctx, illegalOcc.ID, domain.StatusPending, nil, domain.ResolvedByWeb, time.Now())
+	var te *domain.TransitionError
+	illegal := errors.As(err, &te) && res.Outcome == domain.OutcomeIllegal
+	stillNotified, err := statusOf(ctx, st, illegalOcc.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  notified -> pending     illegal=%v  row still %s  %s\n",
+		illegal, stillNotified,
+		verdict(illegal && stillNotified == domain.StatusNotified))
+	if te != nil {
+		fmt.Printf("    message               %q\n", te.Message)
+	}
+
+	// R3, US-4.1: a pending occurrence resolved before it fires is one the
+	// scheduler never sends. There is no cancel path and no flag - the row
+	// leaves status = 'pending', which is the predicate both ListDueOccurrences
+	// and ClaimOccurrence are built on, so it falls out of the fire path by
+	// construction. This drives it end to end rather than asserting it: a row
+	// that is due right now, completed first, then a real scheduler pass.
+	early, err := fireOccurrence(ctx, st, item, time.Now().Add(-time.Minute), ptr("resolve early body"))
+	if err != nil {
+		return err
+	}
+	earlyResolve := post(early.ID, `{"status":"completed","note":"did it at breakfast","source":"agent"}`)
+	earlyRec := &recordingTransport{}
+	earlySched := scheduler.New(log.With("component", "scheduler-early"), st, earlyRec, m, time.Now())
+	earlyFire, err := earlySched.Fire(ctx)
+	if err != nil {
+		return err
+	}
+	earlyAfter, err := st.GetOccurrence(ctx, early.ID)
+	if err != nil {
+		return err
+	}
+	neverSent := earlyResolve.Code == http.StatusOK &&
+		earlyAfter.Status == domain.StatusCompleted &&
+		earlyAfter.NotifiedAt == nil &&
+		earlyRec.count("resolve early body") == 0
+	fmt.Printf("  pending -> completed    status %d  claimed=%d  %d send(s)  notified_at=%s  %s\n",
+		earlyResolve.Code, earlyFire.Claimed, earlyRec.count("resolve early body"),
+		presence(earlyAfter.NotifiedAt != nil), verdict(neverSent))
+
+	// The metric carries the resolution, labelled by the surface that made it.
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	wantSeries := `navi_occurrence_transitions_total{from="notified",source="web",to="completed"} 1`
+	counted := strings.Contains(metricsRec.Body.String(), wantSeries)
+	fmt.Printf("  transitions metric      %s  %s\n", wantSeries, verdict(counted))
+
+	// A missing occurrence is a 404 and not a 500, and a body the schema would
+	// reject never reaches the store.
+	missing := post("01ARZ3NDEKTSV4RRFFQ69G5FAV", `{"status":"completed","note":null,"source":"web"}`)
+	badStatus := post(occ.ID, `{"status":"finished","note":null,"source":"web"}`)
+	badSource := post(occ.ID, `{"status":"completed","note":null,"source":"telepathy"}`)
+	fmt.Printf("  unknown occurrence      status %d  %s\n",
+		missing.Code, verdict(missing.Code == http.StatusNotFound))
+	fmt.Printf("  status not in the enum  status %d  %s\n",
+		badStatus.Code, verdict(badStatus.Code == http.StatusBadRequest))
+	fmt.Printf("  source not in the enum  status %d  %s\n",
+		badSource.Code, verdict(badSource.Code == http.StatusBadRequest))
+
+	return nil
+}
+
+// currentState reads the current_state field a 409 body carries.
+func currentState(body []byte) string {
+	var out struct {
+		CurrentState string `json:"current_state"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return ""
+	}
+	return out.CurrentState
+}
+
+func sourceOf(s *domain.ResolutionSource) string {
+	if s == nil {
+		return "null"
+	}
+	return string(*s)
+}
+
+func noteOf(s *string) string {
+	if s == nil {
+		return "null"
+	}
+	return *s
+}
+
 func statusOf(ctx context.Context, st *store.Store, id string) (domain.Status, error) {
 	occ, err := st.GetOccurrence(ctx, id)
 	if err != nil {
@@ -2265,7 +2454,7 @@ func reportAgentTools(ctx context.Context, st *store.Store, table *defaults.Tabl
 	if err := reportLayerRejections(ctx, t); err != nil {
 		return err
 	}
-	if err := reportUpdateScopes(ctx, t, st, mat); err != nil {
+	if err := reportUpdateScopes(ctx, t, st, mat, defaultTZ); err != nil {
 		return err
 	}
 	return reportDeleteItem(ctx, t, st)
@@ -2400,7 +2589,7 @@ func reportLayerRejections(ctx context.Context, t *agent.Tools) error {
 
 // reportUpdateScopes drives update_item through all three edit scopes plus
 // the field-level diff, against one item created for this section alone.
-func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, mat *materializer.Materializer) error {
+func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, mat *materializer.Materializer, defaultTZ *time.Location) error {
 	created, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
 		Title:    "agent update scopes",
 		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("07:00")},
@@ -2409,6 +2598,15 @@ func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, ma
 		return err
 	}
 	itemID := created.Item.ID
+
+	// The zone this item's wall clocks actually resolve against, which is what
+	// from_date's boundary means below. It is not the process's zone and it is
+	// not defaultTZ: reportZones has already set kv.current_tz to Europe/Lisbon
+	// by the time this runs, so a floating item resolves there.
+	loc, err := itemZone(ctx, st, *created.Item, defaultTZ)
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("\nagent update_item scopes")
 
@@ -2436,7 +2634,20 @@ func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, ma
 		verdict(res.Applied.Deleted > 0 && res.Applied.Inserted > 0 && disjoint(beforeIDs, afterIDs)))
 
 	// from_date: rows before the date are untouched, rows after change.
-	from := time.Now().AddDate(0, 0, 7)
+	//
+	// The boundary is a local date in the item's own zone, not an instant in
+	// this process's: the server floors to midnight of from_date resolved
+	// through loc (internal/agent/execute.go's ParseInLocation), and from_date
+	// is inclusive of its whole target date (05-schedule-spec.md#edit-scope).
+	// Classifying rows with StartsAt.After(a time.Now()-derived instant) asks a
+	// different question in a different zone and gets a different answer - it
+	// mis-files the boundary day's own row as "before" whenever the current
+	// UTC time-of-day is past that row's, which is what made this check fail
+	// every afternoon.
+	fromDate := time.Now().In(loc).AddDate(0, 0, 7).Format(domain.DateLayout)
+	beforeBoundary := func(occ domain.Occurrence) bool {
+		return occ.StartsAt.In(loc).Format(domain.DateLayout) < fromDate
+	}
 	beforeRows, err := pendingRows(ctx, st, itemID)
 	if err != nil {
 		return err
@@ -2444,7 +2655,7 @@ func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, ma
 	_, err = callTool(ctx, t, "update_item", agent.UpdateItemArgs{
 		ItemID:   itemID,
 		Scope:    agent.ScopeFromDate,
-		FromDate: ptr(from.Format(domain.DateLayout)),
+		FromDate: ptr(fromDate),
 		Changes: agent.ItemChanges{
 			Schedule: &schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("21:15")},
 		},
@@ -2458,7 +2669,7 @@ func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, ma
 	}
 	beforeUntouched := true
 	for _, occ := range beforeRows {
-		if occ.StartsAt.After(from) {
+		if !beforeBoundary(occ) {
 			continue
 		}
 		if !stillPresent(afterRows, occ) {
@@ -2467,12 +2678,12 @@ func reportUpdateScopes(ctx context.Context, t *agent.Tools, st *store.Store, ma
 	}
 	changedAfter := false
 	for _, occ := range afterRows {
-		if occ.StartsAt.After(from) && !stillPresent(beforeRows, occ) {
+		if !beforeBoundary(occ) && !stillPresent(beforeRows, occ) {
 			changedAfter = true
 		}
 	}
 	fmt.Printf("  from_date   %s  rows before untouched=%v  rows after changed=%v  %s\n",
-		from.Format(domain.DateLayout), beforeUntouched, changedAfter,
+		fromDate, beforeUntouched, changedAfter,
 		verdict(beforeUntouched && changedAfter))
 
 	// single: retime one occurrence, mark is_override, survive a full

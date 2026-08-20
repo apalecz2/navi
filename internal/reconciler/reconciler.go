@@ -17,18 +17,25 @@
 // cost a miss nobody was ever asked about. Do not "fix" this into consistency
 // with the scheduler — the two are asymmetric on purpose.
 //
-// The check-in itself is rendered from a template (see template.go). That is
-// D-009's required fallback rather than a placeholder for the model composer:
-// 06-agent-spec gives this component the failure mode "fall back to a templated
-// list", and a fallback that is only reached when the model is down is a
-// fallback nobody has run.
+// The check-in is composed by a model when one is configured and rendered from
+// a template when it is not, or when the call fails (compose.go, template.go).
+// The template is not a placeholder: 06-agent-spec gives this component the
+// failure mode "fall back to a templated list", and it is the live path for any
+// deployment without a chat transport - which is the right answer there, since
+// a check-in nobody can reply to does not need to be prettier.
 //
-// This session sends the question. Nothing here assigns missed yet, and nothing
-// here reads a reply.
+// The loop is two passes and they are separate on purpose. Reconcile asks;
+// ExpireGrace (grace.go) concludes. Nothing here reads a reply, and that is not
+// a gap: a reply arrives as an ordinary inbound message and is resolved by the
+// agent's bulk_resolve, which is D-009's "reconciliation and batch completion
+// are the same code path" taken literally. What this package contributes to
+// that is occurrences.reconciled_at and the conversations row's context_ref;
+// internal/conversation renders both into the turn that answers them.
 package reconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -67,6 +74,13 @@ type Store interface {
 	LastReconcileSlot(ctx context.Context) (string, bool, error)
 	ListUnreconciled(ctx context.Context, from, to time.Time, globalSlot, slot string) ([]store.Unreconciled, error)
 	RecordCheckIn(ctx context.Context, ids []string, slot string, conv *domain.NewConversation, now time.Time) error
+
+	// The grace half. ListAwaitingReconciliation is the read the agent's
+	// context injection shares; BulkResolve is the same atomic write every
+	// other resolution surface reaches, which is what keeps the fourth surface
+	// from being a fourth set of transition rules (D-014).
+	ListAwaitingReconciliation(ctx context.Context, loc *time.Location) ([]store.Awaiting, error)
+	BulkResolve(ctx context.Context, rows []store.BulkResolution, source domain.ResolutionSource, now time.Time) ([]store.Resolution, error)
 }
 
 // Notifier is the outbound half of a transport and nothing else, on the same
@@ -80,9 +94,15 @@ type Notifier interface {
 }
 
 // Metrics is the check-in's slice of the registry.
+//
+// IncTransition is here because the grace pass writes a status, and a status
+// change belongs in navi_occurrence_transitions_total wherever it happens -
+// the store does not count for anyone, so every surface counts at its own edge.
 type Metrics interface {
 	IncCheckIn()
+	IncCheckInFallback()
 	AddReconciledOccurrences(n int)
+	IncTransition(from, to, source string)
 }
 
 // Reconciler sends the daily check-in and, from next session, applies missed
@@ -92,6 +112,11 @@ type Reconciler struct {
 	store    Store
 	notifier Notifier
 	metrics  Metrics
+
+	// composer is nil when no model client exists, which is every deployment
+	// without a chat transport. That is a supported configuration and not a
+	// degraded one — see compose.go.
+	composer Composer
 
 	// globalAt is cfg.Schedule.ReconcileAt, a zero-padded local HH:MM.
 	// items.reconcile_at overrides it per item (K8).
@@ -103,13 +128,15 @@ type Reconciler struct {
 }
 
 // New returns a reconciler. globalAt is the configured check-in time as a local
-// HH:MM; config.Load has already rejected anything that is not one.
-func New(log *slog.Logger, st Store, n Notifier, m Metrics, globalAt string, defaultTZ *time.Location) *Reconciler {
+// HH:MM; config.Load has already rejected anything that is not one. composer
+// may be nil, in which case every check-in is the template.
+func New(log *slog.Logger, st Store, n Notifier, m Metrics, c Composer, globalAt string, defaultTZ *time.Location) *Reconciler {
 	return &Reconciler{
 		log:       log,
 		store:     st,
 		notifier:  n,
 		metrics:   m,
+		composer:  c,
 		globalAt:  globalAt,
 		defaultTZ: defaultTZ,
 	}
@@ -148,13 +175,29 @@ func (r Result) LogValue() slog.Value {
 	)
 }
 
-// Tick is the loop body: one pass, then a line if it did anything.
+// Tick is the loop body: ask, then expire, then a line if either did anything.
+//
+// The two run in that order and both run unconditionally. Order, because a row
+// asked about at 21:00 with a five-minute grace should not wait a full tick to
+// expire. Unconditionally, because a failed send must not block expiry: the
+// send that failed wrote no reconciled_at, so it added nothing to the set the
+// grace pass is working on, and holding yesterday's answered-nothing rows
+// hostage to today's transport outage would be a second failure caused by the
+// first.
 func (r *Reconciler) Tick(ctx context.Context) error {
-	res, err := r.Reconcile(ctx, time.Now())
+	now := time.Now()
+
+	res, askErr := r.Reconcile(ctx, now)
 	if res.Sent {
 		r.log.Info("check-in sent", "result", res)
 	}
-	return err
+
+	exp, graceErr := r.ExpireGrace(ctx, now)
+	if exp.Missed > 0 {
+		r.log.Info("grace expired", "result", exp)
+	}
+
+	return errors.Join(askErr, graceErr)
 }
 
 // Reconcile runs one pass. It is the synchronous entry point, and it takes its
@@ -211,7 +254,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (Result, erro
 		return res, r.store.RecordCheckIn(ctx, nil, date+slotSeparator+slot, nil, now)
 	}
 
-	text := Compose(outstanding)
+	text := r.composeCheckIn(ctx, outstanding)
 
 	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()

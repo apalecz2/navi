@@ -38,6 +38,7 @@ type Metrics struct {
 
 	checkIns              prometheus.Counter
 	reconciledOccurrences prometheus.Counter
+	checkInFallbacks      prometheus.Counter
 
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
@@ -114,6 +115,10 @@ func New() *Metrics {
 			Name: "navi_reconcile_occurrences_total",
 			Help: "Occurrences a check-in asked about, across all passes.",
 		}),
+		checkInFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_reconcile_fallback_total",
+			Help: "Check-ins sent as the plain template because no composed text was produced.",
+		}),
 		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "navi_inbound_messages_accepted_total",
 			Help: "Inbound messages recorded to conversations, by transport.",
@@ -141,6 +146,7 @@ func New() *Metrics {
 		m.copywriterFallbacks,
 		m.checkIns,
 		m.reconciledOccurrences,
+		m.checkInFallbacks,
 		m.inboundAccepted,
 		m.inboundDropped,
 		m.llmCalls,
@@ -216,10 +222,21 @@ func (m *Metrics) IncCopywriterFallback() { m.copywriterFallbacks.Inc() }
 // not when the pass decides to run: a check-in that never reached the user
 // asked nobody anything, and D-008 turns on that distinction.
 //
-// Both of these are plain counters and neither carries a status label, because
-// nothing this session writes a status. When the grace pass starts assigning
-// missed, that goes to navi_occurrence_transitions_total like every other edge.
+// Both of these are plain counters and neither carries a status label. The
+// grace pass's missed assignments go to navi_occurrence_transitions_total like
+// every other edge, which is where a status label belongs.
 func (m *Metrics) IncCheckIn() { m.checkIns.Inc() }
+
+// IncCheckInFallback counts one check-in sent as the plain template rather than
+// as composed text.
+//
+// It exists for the same reason IncCopywriterFallback does, and the parallel is
+// exact: what is worth knowing is how often the user got the boring version,
+// which is a fact about what was sent rather than about what failed to
+// generate. llm_calls cannot answer it, because the commonest fallback writes
+// no llm_calls row at all — a deployment with no chat transport has no model
+// client, never calls one, and templates every night.
+func (m *Metrics) IncCheckInFallback() { m.checkInFallbacks.Inc() }
 
 // AddReconciledOccurrences counts how many occurrences a check-in asked about.
 // Read against navi_reconcile_checkins_total it is the average size of an

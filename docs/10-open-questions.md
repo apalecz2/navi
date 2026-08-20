@@ -102,6 +102,27 @@ did not want. Silence risks a miss that was really an oversight.
 **Leaning:** resolve what was answered, say nothing about the rest, let grace
 handle it. Revisit if it turns out to produce false misses.
 
+**Settled in session 17, as the leaning.** There is no re-ask and no mechanism
+for one. The unmentioned occurrence keeps its `reconciled_at`, stays
+`pending`/`notified`, and is therefore still in the agent's `Context ref` block
+on every following turn — so "oh, and the walk too" ten minutes later resolves
+it with no second question having been asked. At the deadline it becomes
+`missed`.
+
+Two things about this are worth recording because they are not obvious from the
+question. The first is that "say nothing about the rest" is an instruction to
+the model, in `behaviouralRules`, and it had to be stated: the natural failure
+is to helpfully record the unmentioned item as `skipped`, which is a lie about
+what the user said. The second is that the window a partial answer stays open
+for *is* the grace window, read from one store method
+(`store.ListAwaitingReconciliation`) by both the agent and the grace pass. That
+is what makes "still answerable" and "not yet missed" the same instant rather
+than two clocks that agree until they do not.
+
+Whether it produces false misses is now a question the data can answer:
+`resolution_source = 'reconciler'` counts exactly the occurrences that were
+asked about and never answered.
+
 ### Q-5: Whether `digest` notification policy is worth building
 
 It is in the requirements as a third policy but has no user story driving it. It

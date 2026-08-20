@@ -167,6 +167,29 @@ func run() error {
 		return err
 	}
 
+	// Beside it: the composed check-in and, more to the point, its fallback.
+	// Separate from reportReconcile because that section asserts what a pass
+	// covers and this one asserts what it says, and the only way to check the
+	// second is to break a real model client on purpose.
+	if err := reportReconcileComposer(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// Then the reply to it, which is the other half of D-009: reconciliation
+	// and unprompted batch completion are one code path, so answering a
+	// check-in is bulk_resolve reached through the ordinary agent turn.
+	if err := reportReconcileReply(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// And last, the conclusion: grace, then missed. It runs after the reply
+	// section on purpose, because one of the things it has to show is that an
+	// answer arriving inside the window prevents the miss - which needs an
+	// answer to have arrived.
+	if err := reportGrace(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// Beside it: pausing is the other half of P3's first session, and the
 	// check-in honouring a pause is asserted inside reportReconcile rather than
 	// here, because it is a property of the check-in and not of the endpoint.
@@ -2333,7 +2356,13 @@ func reportBulkResolve(ctx context.Context, st *store.Store, table *defaults.Tab
 	fmt.Println("\nagent bulk_resolve")
 
 	mat := materializer.New(log.With("component", "materializer-bulk"), st, defaultTZ)
-	t := agent.New(st, mat, table, defaultTZ)
+
+	// A real registry, because this is where the agent's own transition series
+	// is checked. Every other resolution surface counts at its edge and this
+	// one did not until session 17, so the assertion below is the thing that
+	// keeps it counting.
+	m := metrics.New()
+	t := agent.New(st, mat, table, defaultTZ, m)
 
 	item, err := seedFireItem(ctx, st, "bulk resolve probe", domain.NotifyAtTime, tz)
 	if err != nil {
@@ -2759,8 +2788,11 @@ func reportReconcile(ctx context.Context, st *store.Store, tz string, fallback *
 	// The pass runs at the instant this scenario calls "now", so the slot is
 	// now's own local HH:MM: it has arrived by definition, and no lookback can
 	// stray onto yesterday near midnight.
+	// Nil composer: this scenario is about the gather, the send and the
+	// latch, and the template is what it asserts against. reportReconcileComposer
+	// is where a composer is wired in and where the fallback is proved.
 	rec := &recordingTransport{}
-	r := reconciler.New(log.With("loop", "reconciler"), st, rec, m, nowHM, fallback)
+	r := reconciler.New(log.With("loop", "reconciler"), st, rec, m, nil, nowHM, fallback)
 
 	silent, err := seedFireItem(ctx, st, "reconcile silent probe", domain.NotifySilent, tz)
 	if err != nil {
@@ -2974,7 +3006,7 @@ func reportReconcileTiming(
 	}
 
 	rec := &recordingTransport{}
-	r := reconciler.New(log.With("loop", "reconciler-timing"), st, rec, m, "21:00", fallback)
+	r := reconciler.New(log.With("loop", "reconciler-timing"), st, rec, m, nil, "21:00", fallback)
 
 	early, err := seedFireItem(ctx, st, "reconcile midday probe", domain.NotifySilent, tz)
 	if err != nil {
@@ -3050,6 +3082,629 @@ func reportReconcileTiming(
 	fmt.Printf("  21:00 pass              slot=%q sweeps the rest, including the later midday row  %s\n",
 		night.Slot, verdict(nightOK))
 	fmt.Printf("    %s\n", strings.ReplaceAll(nightBody, "\n", "\n    "))
+	return nil
+}
+
+// composeServer answers with plain prose, the shape a check-in composition
+// comes back as. Distinct from proseServer only in that this one is the
+// success case rather than the ladder's failure case.
+func composeServer(text string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		escaped, _ := json.Marshal(text)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}]}`,
+			string(escaped))
+	}))
+}
+
+// brokenServer answers every request with a 500 - model.KindUnavailable, the
+// provider being down rather than the request being wrong.
+func brokenServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"message":"upstream exploded"}}`)
+	}))
+}
+
+// reportReconcileComposer drives the model-composed check-in and, more
+// importantly, its fallback.
+//
+// The fallback is the point. D-009 gives this component the failure mode "fall
+// back to a templated list", and until this session the template was the only
+// path, so it had never actually been a fallback. What is asserted here is that
+// breaking the model produces the template verbatim - by breaking a real model
+// client against a real HTTP server that returns 500, not by reading the code
+// and agreeing that it would.
+//
+// Four cases, and each is a different way for composition to be unusable: the
+// provider is down, the provider answers with nothing, the provider answers
+// with an essay, and there is no provider configured at all. All four have to
+// reach the same text, because a check-in that does not go out is a day with no
+// misses and no answers.
+func reportReconcileComposer(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\nreconcile  composing the check-in, and falling back")
+
+	zones, err := schedule.LoadZones(ctx, st, fallback)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	m := metrics.New()
+
+	// One item, one outstanding row, re-used by every case below: what varies
+	// is the composer, so everything else has to be identical or the bodies
+	// are not comparable.
+	item, err := seedFireItem(ctx, st, "compose probe", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	local := now.In(loc)
+	at := now.Add(-time.Minute)
+	if midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); at.Before(midnight) {
+		at = midnight
+	}
+
+	// The template the composer is being compared against, built from the same
+	// shape the reconciler will gather. composeTemplate is unexported, so this
+	// is its output as the reconciler with a nil composer produces it - which
+	// is the honest comparison anyway: what matters is that the two paths send
+	// the same bytes, not that a helper agrees with itself.
+	nowHM := now.In(loc).Format(reconciler.LocalTimeLayout)
+
+	// run drives one pass with one composer and returns what went out.
+	//
+	// Every case has to see the *same* outstanding set, or the bodies are not
+	// comparable and "the fallback matches the template" would be comparing
+	// two different lists of items. Earlier sections leave plenty outstanding,
+	// so each call drains first - one throwaway pass that stamps reconciled_at
+	// on whatever is left over - and only then seeds the single row this case
+	// is about. The drain runs against its own metrics registry so its
+	// nil-composer fallback is not counted against the real cases below.
+	run := func(c reconciler.Composer) (string, error) {
+		if err := st.RecordCheckIn(ctx, nil, "", nil, time.Now()); err != nil {
+			return "", err
+		}
+		drain := reconciler.New(log.With("loop", "reconciler-drain"), st,
+			&recordingTransport{}, metrics.New(), nil, nowHM, fallback)
+		if _, err := drain.Reconcile(ctx, now); err != nil {
+			return "", err
+		}
+
+		if err := st.RecordCheckIn(ctx, nil, "", nil, time.Now()); err != nil {
+			return "", err
+		}
+		if _, err := fireOccurrence(ctx, st, item, at, nil); err != nil {
+			return "", err
+		}
+		rec := &recordingTransport{}
+		r := reconciler.New(log.With("loop", "reconciler-compose"), st, rec, m, c, nowHM, fallback)
+		res, err := r.Reconcile(ctx, now)
+		if err != nil {
+			return "", err
+		}
+		if !res.Sent || len(rec.sent) == 0 {
+			return "", nil
+		}
+		return rec.sent[len(rec.sent)-1].Body, nil
+	}
+
+	// newComposer builds a real ModelComposer against a fake provider, through
+	// a real model.Client - so a failure is classified by the same code the
+	// production path uses and lands in llm_calls the same way.
+	newComposer := func(srv *httptest.Server) reconciler.Composer {
+		routing := &model.Routing{Tasks: map[model.Task]model.TaskRouting{
+			model.TaskReconcile: {Tiers: []model.Tier{
+				{Model: "naviseed-reconcile", BaseURL: srv.URL, TimeoutSeconds: 5},
+			}},
+		}}
+		client := model.New(log.With("component", "model-compose"), routing, "", st, m)
+		return reconciler.NewModelComposer(client, routing, "config/persona.md.does-not-exist")
+	}
+
+	// The no-composer body, which is the template, and the baseline every
+	// other case is measured against.
+	templated, err := run(nil)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  no composer configured  %q  %s\n",
+		truncate(templated, 60), verdict(templated != ""))
+
+	// 1. The happy path: composed prose goes out, and it is not the template.
+	const composed = "Haven't heard how the compose probe went today - did you get to it?"
+	okSrv := composeServer(composed)
+	defer okSrv.Close()
+	body, err := run(newComposer(okSrv))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  composed check-in sent  %q  %s\n",
+		truncate(body, 60), verdict(body == composed && body != templated))
+
+	// 2. The provider is down. This is the assertion the session exists for:
+	// the fallback is exercised by breaking the model, and the bytes that go
+	// out are the template's, not a truncated error or an empty message.
+	beforeCalls, err := countLLMCalls(ctx, st)
+	if err != nil {
+		return err
+	}
+	downSrv := brokenServer()
+	defer downSrv.Close()
+	body, err = run(newComposer(downSrv))
+	if err != nil {
+		return err
+	}
+	afterCalls, err := countLLMCalls(ctx, st)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  model down -> template  %q  llm_calls +%d  %s\n",
+		truncate(body, 50), afterCalls-beforeCalls,
+		verdict(body == templated && afterCalls > beforeCalls))
+
+	// 3. A call that succeeds and says nothing. model.Complete reports this as
+	// success, because adequacy is the caller's judgement - acceptComposed is
+	// where that judgement is made, and this is it being made.
+	emptySrv := composeServer("   ")
+	defer emptySrv.Close()
+	body, err = run(newComposer(emptySrv))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  empty completion        -> template  %s\n", verdict(body == templated))
+
+	// 4. An essay. The guard falls back rather than truncating: the first 400
+	// runes of a message that misunderstood the task is not better prose than
+	// the template, it is the same mistake cut short.
+	longSrv := composeServer(strings.Repeat("nag ", 400))
+	defer longSrv.Close()
+	body, err = run(newComposer(longSrv))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  over-long completion    -> template  %s\n", verdict(body == templated))
+
+	// Every fallback above is counted, including the nil-composer one, which
+	// is the case llm_calls cannot see.
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	counted := strings.Contains(metricsRec.Body.String(), "navi_reconcile_fallback_total 4")
+	fmt.Printf("  fallbacks counted       navi_reconcile_fallback_total 4  %s\n", verdict(counted))
+
+	return nil
+}
+
+// reportReconcileReply is the reply path: a check-in goes out, the user answers
+// it in one plain message, and three occurrences resolve in one write.
+//
+// What this can and cannot assert is worth being exact about, because the
+// tempting version of it is dishonest. The model here is a fake that returns a
+// fixed bulk_resolve call, so nothing below demonstrates a model *recognising*
+// a reply - a scripted answer proves the plumbing behind the answer and nothing
+// about the comprehension in front of it.
+//
+// So the real assertion is the first one: that the system prompt the ladder
+// actually assembled and sent carries the Context ref block, naming the check-in
+// and every occurrence still waiting on an answer. That is the whole mechanism.
+// Recognition is not a classifier or a route - it is these lines being present,
+// plus the check-in itself sitting in cross-turn history one message above the
+// reply. If they are there, the model has what it needs; if they are not, no
+// amount of prompt engineering downstream would help.
+//
+// The rest asserts the write: A8's single atomic operation, R2's skip carrying
+// its reason, and the confirmation naming items rather than reading back
+// occurrence ids.
+func reportReconcileReply(ctx context.Context, st *store.Store, table *defaults.Table, tz string,
+	defaultTZ *time.Location, log *slog.Logger) error {
+	fmt.Println("\nreconcile  answering the check-in")
+
+	zones, err := schedule.LoadZones(ctx, st, defaultTZ)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	m := metrics.New()
+	mat := materializer.New(log.With("component", "mat-reply"), st, defaultTZ)
+	tools := agent.New(st, mat, table, defaultTZ, m)
+
+	// Three items, the three from US-5.2 by shape: two the reply says yes to
+	// and one it skips with a reason.
+	stretch, err := seedFireItem(ctx, st, "reply stretching", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	vitamins, err := seedFireItem(ctx, st, "reply vitamins", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	walk, err := seedFireItem(ctx, st, "reply walk", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	local := now.In(loc)
+	at := now.Add(-time.Minute)
+	if midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); at.Before(midnight) {
+		at = midnight
+	}
+
+	var occs []domain.Occurrence
+	for _, it := range []domain.Item{stretch, vitamins, walk} {
+		occ, err := fireOccurrence(ctx, st, it, at, nil)
+		if err != nil {
+			return err
+		}
+		occs = append(occs, occ)
+	}
+
+	// A real check-in, so reconciled_at and the context_ref row are written by
+	// the code that writes them in production rather than fabricated here.
+	if err := st.RecordCheckIn(ctx, nil, "", nil, time.Now()); err != nil {
+		return err
+	}
+	nowHM := now.In(loc).Format(reconciler.LocalTimeLayout)
+	rec := &recordingTransport{}
+	r := reconciler.New(log.With("loop", "reconciler-reply"), st, rec, m, nil, nowHM, defaultTZ)
+	checkIn, err := r.Reconcile(ctx, now)
+	if err != nil {
+		return err
+	}
+	wantRef := "reconcile:" + now.In(loc).Format(domain.DateLayout)
+	fmt.Printf("  check-in sent           covering %d occurrence(s) ref=%s  %s\n",
+		checkIn.Occurrences, wantRef, verdict(checkIn.Sent && checkIn.Occurrences >= 3))
+
+	// The reply, scripted as the bulk_resolve the model would produce: two
+	// completed, one skipped carrying the user's own words (R2, US-4.3).
+	const reason = "I was away"
+	args := fmt.Sprintf(
+		`{"resolutions":[{"occurrence_id":%q,"status":"completed"},{"occurrence_id":%q,"status":"completed"},{"occurrence_id":%q,"status":"skipped","note":%q}]}`,
+		occs[0].ID, occs[1].ID, occs[2].ID, reason)
+
+	var captured []wireRequest
+	tier1 := capturingToolCallServer("bulk_resolve", args, &captured)
+	defer tier1.Close()
+
+	routing := &model.Routing{Tasks: map[model.Task]model.TaskRouting{
+		model.TaskCRUD: {Tiers: []model.Tier{
+			{Model: "naviseed-reply", BaseURL: tier1.URL, TimeoutSeconds: 5},
+		}},
+	}}
+	client := model.New(log.With("component", "model-reply"), routing, "", st, m)
+	sender := &fakeSender{}
+	ladder := conversation.New(client, tools, routing, st, table,
+		"config/persona.md.does-not-exist", defaultTZ, sender)
+
+	const replyText = "did everything except the walk, I was away"
+	if err := ladder.Handle(ctx, transport.IncomingMessage{
+		SenderID: "111", Text: replyText, Transport: telegram.Name,
+	}); err != nil {
+		return err
+	}
+
+	// --- the assertion that matters: what the model was actually given ------
+
+	prompt := ""
+	if len(captured) > 0 {
+		prompt = captured[0].systemContent()
+	}
+	hasRef := strings.Contains(prompt, "Context ref:  "+wantRef)
+	hasAll := strings.Contains(prompt, occs[0].ID) &&
+		strings.Contains(prompt, occs[1].ID) &&
+		strings.Contains(prompt, occs[2].ID)
+	// Titles too, not only ids: past midnight the awaiting block is the one
+	// place the title-to-id mapping survives, since Today's occurrences has
+	// rolled over.
+	hasTitles := strings.Contains(prompt, stretch.Title) &&
+		strings.Contains(prompt, vitamins.Title) &&
+		strings.Contains(prompt, walk.Title)
+	fmt.Printf("  context ref in prompt   ref=%v ids=%v titles=%v  %s\n",
+		hasRef, hasAll, hasTitles, verdict(hasRef && hasAll && hasTitles))
+
+	// The check-in text itself is in cross-turn history, one message above the
+	// reply. That is the other half of recognition and it costs nothing - the
+	// reconciler writes the row in persistAssistantProse's shape precisely so
+	// that seedHistory can replay it.
+	inHistory := false
+	for _, msg := range captured[0].Messages {
+		if msg.Role == "assistant" && strings.Contains(msg.Content, stretch.Title) {
+			inHistory = true
+		}
+	}
+	fmt.Printf("  check-in in history     %v  (the question above the answer)      %s\n",
+		inHistory, verdict(inHistory))
+
+	// --- and what the write did --------------------------------------------
+
+	s0, err := statusOf(ctx, st, occs[0].ID)
+	if err != nil {
+		return err
+	}
+	s1, err := statusOf(ctx, st, occs[1].ID)
+	if err != nil {
+		return err
+	}
+	walkRow, err := st.GetOccurrence(ctx, occs[2].ID)
+	if err != nil {
+		return err
+	}
+	allThree := s0 == domain.StatusCompleted && s1 == domain.StatusCompleted &&
+		walkRow.Status == domain.StatusSkipped
+	fmt.Printf("  three resolved, one call  %s/%s/%s  %s\n",
+		s0, s1, walkRow.Status, verdict(allThree))
+
+	// R2: a skip carries its reason, and it is a skip rather than a miss. The
+	// note is the user's own words, stored verbatim.
+	noteOK := walkRow.ResolutionNote != nil && *walkRow.ResolutionNote == reason
+	fmt.Printf("  skip carries its reason  note=%q  %s\n",
+		noteOf(walkRow.ResolutionNote), verdict(noteOK && walkRow.Status != domain.StatusMissed))
+
+	// The confirmation names items. Before this session bulk_resolve fell
+	// through buildConfirmation's default case and answered `Done - "" is set.`
+	// - three correct writes and a reply that named none of them.
+	reply := sender.last()
+	namesItems := strings.Contains(reply, stretch.Title) && strings.Contains(reply, walk.Title)
+	fmt.Printf("  confirmation names them  %q  %s\n",
+		truncate(reply, 70), verdict(namesItems && !strings.Contains(reply, `"" is set`)))
+
+	// The agent's own transition series, which was a registered zero from
+	// session 15 until this one: bulk_resolve wrote and counted nothing.
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metricsRec.Body.String()
+	wantCompleted := `navi_occurrence_transitions_total{from="pending",source="agent",to="completed"} 2`
+	wantSkipped := `navi_occurrence_transitions_total{from="pending",source="agent",to="skipped"} 1`
+	fmt.Printf("  agent transitions counted  %s  %s\n",
+		wantCompleted, verdict(strings.Contains(body, wantCompleted) && strings.Contains(body, wantSkipped)))
+
+	// Q-4, and the answer to "what happens to what the reply did not mention":
+	// nothing is re-asked and nothing is concluded. An item the reply skipped
+	// over stays awaiting until grace, which reportGrace picks up from here.
+	return nil
+}
+
+// reportGrace is K6, K7 and D-008 arriving together: missed, assigned only
+// after a check-in asked and the grace window closed on the silence.
+//
+// The four cases are the four things that have to be true at once. A row inside
+// its window is untouched. A row past it is missed, and carries 'reconciler' -
+// the value migration 0004 added rather than borrowing 'sweeper'. A row nobody
+// ever asked about is invisible no matter how old, which is the whole of "not
+// by the clock passing midnight". And a reply landing inside the window
+// prevents the miss outright.
+//
+// Instants are fabricated against the device zone, not DEFAULT_TZ: the deadline
+// for a NULL grace_period_minutes is the end of the local day containing
+// reconciled_at, and reportZones has already moved that zone five hours away.
+func reportGrace(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\ngrace  and then missed")
+
+	zones, err := schedule.LoadZones(ctx, st, fallback)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	m := metrics.New()
+
+	now := time.Now()
+	r := reconciler.New(log.With("loop", "reconciler-grace"), st, nil, m, nil,
+		now.In(loc).Format(reconciler.LocalTimeLayout), fallback)
+
+	// Drain first, against a throwaway registry. Earlier sections have asked
+	// about plenty of rows, and reportReconcileTiming deliberately fabricates
+	// its passes on yesterday - so those rows are already past their end-of-day
+	// deadline and would be missed by the first pass here, inflating every
+	// count below. Clearing them up front is what makes "exactly two" a
+	// statement about this section rather than about everything that ran before
+	// it.
+	drain := reconciler.New(log.With("loop", "reconciler-grace-drain"), st, nil, metrics.New(), nil,
+		now.In(loc).Format(reconciler.LocalTimeLayout), fallback)
+	if _, err := drain.ExpireGrace(ctx, now); err != nil {
+		return err
+	}
+
+	// seed makes one item with one occurrence and stamps reconciled_at by hand
+	// through RecordCheckIn, which is the same write a real pass makes. grace
+	// is the item's grace_period_minutes; nil means "end of local day" (K7).
+	seed := func(title string, grace *int, askedAt time.Time) (domain.Occurrence, error) {
+		item, err := seedFireItem(ctx, st, title, domain.NotifySilent, tz)
+		if err != nil {
+			return domain.Occurrence{}, err
+		}
+		if grace != nil {
+			if _, _, err := st.UpdateItemAndMaterialize(ctx, item.ID,
+				store.ItemPatch{GracePeriodMinutes: grace}, time.Now(), nil); err != nil {
+				return domain.Occurrence{}, err
+			}
+		}
+		occ, err := fireOccurrence(ctx, st, item, askedAt.Add(-time.Hour), nil)
+		if err != nil {
+			return domain.Occurrence{}, err
+		}
+		// The latch value is irrelevant here and deliberately not advanced to
+		// a real slot: this writes reconciled_at, which is the only input the
+		// grace pass reads.
+		if err := st.RecordCheckIn(ctx, []string{occ.ID}, "", nil, askedAt); err != nil {
+			return domain.Occurrence{}, err
+		}
+		return occ, nil
+	}
+
+	// Inside its window: asked five minutes ago with two hours of grace.
+	inside, err := seed("grace inside window", ptr(120), now.Add(-5*time.Minute))
+	if err != nil {
+		return err
+	}
+	// Past its window: asked an hour ago with five minutes of grace.
+	expired, err := seed("grace expired", ptr(5), now.Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	// No grace configured, asked yesterday: the default is the end of the
+	// local day the question was asked on, which is behind us.
+	yesterday := now.AddDate(0, 0, -1)
+	endOfDay, err := seed("grace end of day", nil, yesterday)
+	if err != nil {
+		return err
+	}
+	// Never asked about at all. Older than any of the above and still not
+	// missable, because nothing ever put a question to it (K6).
+	neverItem, err := seedFireItem(ctx, st, "grace never asked", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	neverAsked, err := fireOccurrence(ctx, st, neverItem, yesterday, nil)
+	if err != nil {
+		return err
+	}
+
+	// The deadline rule itself, before any pass runs: reconciled_at plus the
+	// item's grace, or the end of that day. Read straight off the store method
+	// both the grace pass and the agent's context block share.
+	awaiting, err := st.ListAwaitingReconciliation(ctx, loc)
+	if err != nil {
+		return err
+	}
+	deadlines := map[string]time.Time{}
+	for _, a := range awaiting {
+		deadlines[a.ID] = a.Deadline
+	}
+	_, sawNever := deadlines[neverAsked.ID]
+	fmt.Printf("  never asked is invisible  in awaiting set=%v  %s\n",
+		sawNever, verdict(!sawNever))
+
+	insideLive := deadlines[inside.ID].After(now)
+	expiredDue := !deadlines[expired.ID].After(now)
+	fmt.Printf("  deadlines resolved      inside=%s expired=%s  %s\n",
+		deadlines[inside.ID].In(loc).Format("15:04"),
+		deadlines[expired.ID].In(loc).Format("15:04"),
+		verdict(insideLive && expiredDue))
+
+	// --- a reply inside the window prevents the miss entirely ---------------
+
+	// Resolved before the pass runs, the way an answer at 21:20 beats a
+	// deadline at 21:30. Nothing about it is special-cased: it simply leaves
+	// the candidate set by being terminal.
+	answered, err := seed("grace answered in time", ptr(5), now.Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	if _, err := st.ResolveOccurrence(ctx, answered.ID, domain.StatusCompleted,
+		ptr("answered the check-in"), domain.ResolvedByAgent, time.Now()); err != nil {
+		return err
+	}
+
+	exp, err := r.ExpireGrace(ctx, now)
+	if err != nil {
+		return err
+	}
+
+	insideStatus, err := statusOf(ctx, st, inside.ID)
+	if err != nil {
+		return err
+	}
+	expiredRow, err := st.GetOccurrence(ctx, expired.ID)
+	if err != nil {
+		return err
+	}
+	endOfDayStatus, err := statusOf(ctx, st, endOfDay.ID)
+	if err != nil {
+		return err
+	}
+	neverStatus, err := statusOf(ctx, st, neverAsked.ID)
+	if err != nil {
+		return err
+	}
+	answeredStatus, err := statusOf(ctx, st, answered.ID)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("  inside grace untouched  %s  %s\n",
+		insideStatus, verdict(insideStatus != domain.StatusMissed))
+	fmt.Printf("  past grace -> missed    %s / %s  %s\n",
+		expiredRow.Status, endOfDayStatus,
+		verdict(expiredRow.Status == domain.StatusMissed && endOfDayStatus == domain.StatusMissed))
+	fmt.Printf("  never asked untouched   %s  (K6: not by the clock)              %s\n",
+		neverStatus, verdict(neverStatus != domain.StatusMissed))
+	fmt.Printf("  reply inside grace wins  %s  (answered before the deadline)      %s\n",
+		answeredStatus, verdict(answeredStatus == domain.StatusCompleted))
+
+	// The source is the reconciler's own, which is what migration 0004 was
+	// for. Writing 'sweeper' here would have passed every other assertion on
+	// this page and quietly corrupted the one column that answers Q-15.
+	sourceOK := expiredRow.ResolutionSource != nil &&
+		*expiredRow.ResolutionSource == domain.ResolvedByReconciler
+	fmt.Printf("  resolution_source       %s  %s\n",
+		sourceOf(expiredRow.ResolutionSource), verdict(sourceOK))
+
+	// A miss carries no note. A note is why something did not happen, which is
+	// what makes a skip a skip - and the defining property of a miss is that
+	// nobody said anything.
+	fmt.Printf("  missed carries no note  %s  %s\n",
+		noteOf(expiredRow.ResolutionNote), verdict(expiredRow.ResolutionNote == nil))
+
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	wantSeries := `navi_occurrence_transitions_total{from="pending",source="reconciler",to="missed"} 2`
+	fmt.Printf("  transitions metric      %s  missed=%d  %s\n",
+		wantSeries, exp.Missed,
+		verdict(strings.Contains(metricsRec.Body.String(), wantSeries) && exp.Missed == 2))
+
+	// --- idempotence, and the concurrent-resolution claim -------------------
+
+	// A second pass writes nothing: the rows it missed are terminal now and
+	// have left the candidate set, which is also exactly why an abort caused by
+	// a concurrent resolution self-heals on the next tick rather than latching.
+	again, err := r.ExpireGrace(ctx, now)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  second pass is a no-op  candidates=%d missed=%d  %s\n",
+		again.Candidates, again.Missed, verdict(again.Missed == 0))
+
+	// --- a global pause suppresses the whole pass (I6) ----------------------
+
+	paused, err := seed("grace under pause", ptr(5), now.Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := st.SetGlobalPauseUntil(ctx, now.Add(72*time.Hour)); err != nil {
+		return err
+	}
+	pausedExp, err := r.ExpireGrace(ctx, now)
+	if err != nil {
+		return err
+	}
+	pausedStatus, err := statusOf(ctx, st, paused.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global pause suppresses  suppressed=%v missed=%d status=%s  %s\n",
+		pausedExp.Paused, pausedExp.Missed, pausedStatus,
+		verdict(pausedExp.Paused && pausedExp.Missed == 0 && pausedStatus != domain.StatusMissed))
+
+	// Lifted, or reportPauseEndpoints inherits a pause it did not set.
+	if err := st.ClearGlobalPause(ctx); err != nil {
+		return err
+	}
+
+	// And once it lifts, the row that waited is missed - it was asked, and the
+	// pause was a reason not to conclude anything yet rather than a reason to
+	// forgive the question.
+	after, err := r.ExpireGrace(ctx, now)
+	if err != nil {
+		return err
+	}
+	afterStatus, err := statusOf(ctx, st, paused.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  and missed once lifted  %s  missed=%d  %s\n",
+		afterStatus, after.Missed, verdict(afterStatus == domain.StatusMissed))
+
 	return nil
 }
 
@@ -3720,8 +4375,8 @@ func reportConversationLadder(ctx context.Context, st *store.Store, table *defau
 	fmt.Println("\nconversation ladder")
 
 	mat := materializer.New(log.With("component", "materializer"), st, defaultTZ)
-	tools := agent.New(st, mat, table, defaultTZ)
 	m := metrics.New()
+	tools := agent.New(st, mat, table, defaultTZ, m)
 	// The P5 persona slot, deliberately absent this session - GetPersona
 	// tolerates a missing file, so this path never needs to exist.
 	const personaPath = "config/persona.md.does-not-exist"
@@ -4113,7 +4768,12 @@ func reportConversationLadder(ctx context.Context, st *store.Store, table *defau
 // are not noise the fire-path assertions have to account for.
 func reportAgentTools(ctx context.Context, st *store.Store, table *defaults.Table, defaultTZ *time.Location, log *slog.Logger) error {
 	mat := materializer.New(log.With("component", "materializer"), st, defaultTZ)
-	t := agent.New(st, mat, table, defaultTZ)
+
+	// Nil registry, which is the case agent.Metrics is nil-able for: this
+	// section drives the catalog and the validation layers, and none of what it
+	// asserts is a counter. reportBulkResolve is where the transitions are
+	// checked.
+	t := agent.New(st, mat, table, defaultTZ, nil)
 
 	fmt.Println("\nagent tool catalog")
 	for _, tool := range t.Catalog() {

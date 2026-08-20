@@ -34,7 +34,7 @@ type CreateItemArgs struct {
 	TZMode             string            `json:"tz_mode,omitempty" jsonschema:"enum=fixed,enum=floating,default=floating"`
 	NotifyPolicy       string            `json:"notify_policy,omitempty" jsonschema:"enum=at_time,enum=silent,enum=digest,default=at_time"`
 	Priority           *int              `json:"priority,omitempty" jsonschema:"minimum=1,maximum=5,default=3"`
-	GracePeriodMinutes *int              `json:"grace_period_minutes,omitempty"`
+	GracePeriodMinutes *int              `json:"grace_period_minutes,omitempty" jsonschema:"minimum=1"`
 	ReconcileAt        *string           `json:"reconcile_at,omitempty"`
 }
 
@@ -66,9 +66,15 @@ type ItemChanges struct {
 	TZ                 *string            `json:"tz,omitempty"`
 	TZMode             *string            `json:"tz_mode,omitempty" jsonschema:"enum=fixed,enum=floating"`
 	NotifyPolicy       *string            `json:"notify_policy,omitempty" jsonschema:"enum=at_time,enum=silent,enum=digest"`
-	Priority           *int               `json:"priority,omitempty" jsonschema:"minimum=1,maximum=5"`
-	GracePeriodMinutes *int               `json:"grace_period_minutes,omitempty"`
-	ReconcileAt        *string            `json:"reconcile_at,omitempty"`
+	Priority *int `json:"priority,omitempty" jsonschema:"minimum=1,maximum=5"`
+
+	// minimum=1, matching CreateItemArgs: zero is the value that would let the
+	// tick that asks about an occurrence also mark it missed, which is K6
+	// defeated by a config value. domain.GraceDeadline treats a non-positive
+	// stored value as absent, so this is the front door rather than the only
+	// defence.
+	GracePeriodMinutes *int    `json:"grace_period_minutes,omitempty" jsonschema:"minimum=1"`
+	ReconcileAt        *string `json:"reconcile_at,omitempty"`
 	Attrs              json.RawMessage    `json:"attrs,omitempty"`
 }
 

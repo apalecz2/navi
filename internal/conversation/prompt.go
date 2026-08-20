@@ -11,6 +11,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/schedule"
+	"github.com/aidenpaleczny/navi/internal/store"
 )
 
 // roleAndScope is system-prompt part 1 (docs/06-agent-spec.md#system-prompt-
@@ -42,20 +43,31 @@ const behaviouralRules = `Rules:
 - Always confirm a write in plain language, naming the next concrete occurrence times.
 - When a delete is clearly requested, call delete_item directly with confirmed=true rather than asking first - the tool itself rejects an unconfirmed delete, and that rejection is your cue to retry with confirmed=true, not a reason to reply in prose instead.
 - Prefer bulk_resolve for any message reporting that something was done, skipped, or missed - including a single one, and including something already done earlier in the day. It takes a list and writes all of it in one transaction, so one call covers "did everything except the walk". Take the occurrence ids from the Today's occurrences block; never guess one.
+- Record a skip, not a miss, whenever the user says why something did not happen, and put their own words in the note: "did everything except the walk, I was away" is a completed set plus one skipped walk with note "I was away". Never choose missed. A miss is not something a person reports - it is what the system concludes when nobody said anything at all.
+- A "Context ref" block below means the last thing you sent was an end-of-day check-in and those occurrences are still waiting on an answer. The user's message may be that answer. If it reports what was or was not done, call bulk_resolve for exactly the occurrences it names and say nothing about the ones it left out - an item the user did not mention is not a skip, and it is not your job to ask again. If the message is a new request instead, treat it as one: a check-in does not oblige the user to answer it before saying anything else. Ids for these may come from the Context ref block or from Today's occurrences; after midnight only the Context ref block still lists them.
 - Prefer pause over a run of skips when the user says they are away or unavailable for a stretch of time. "I'm away until Monday" is one pause with scope=global, not a skip for every occurrence in between. Use scope=item when only one reminder is affected. Pausing with no until resumes normal operation.
 - Call request_escalation when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable.
 - Always respond by calling exactly one tool. A plain-text reply with no tool call is treated as a failure, not an answer.`
 
 // buildSystemPrompt assembles the five-part system prompt
-// (docs/06-agent-spec.md#system-prompt-structure). Part 5, injected context,
-// is the full block this session: current time, device timezone, global
-// pause, active items, today's occurrences, and last touched.
+// (docs/06-agent-spec.md#system-prompt-structure). Part 5, injected context, is
+// the full block: current time, device timezone, global pause, active items,
+// today's occurrences, last touched, and context ref.
 //
-// context_ref is still absent from the prompt even though the reconciler now
-// writes one onto its check-in row. It belongs in the *turn's* context - "this
-// message is a reply to reconcile:2026-08-19" - and that is the reply path,
-// which does not exist yet. Rendering the check-in's own context_ref here would
-// tell the model it is answering a question when it is being asked a new one.
+// Context ref is what makes a reply to the check-in resolvable, and it is
+// deliberately the whole of the mechanism. There is no classifier deciding
+// whether a message is an answer, and no separate route for one: every inbound
+// turn runs through this same prompt and this same catalog. Two things do the
+// work. The check-in is already in cross-turn history - the reconciler writes
+// it in persistAssistantProse's shape - so the model sees its own question
+// immediately above the user's reply. And this block names which occurrences
+// are still waiting, so "everything except the walk" has a set to resolve
+// against.
+//
+// Recognition therefore costs nothing when the message is not a reply. A new
+// request arriving after a check-in reaches create_item exactly as it would
+// have, because nothing about the routing changed and behaviouralRules says in
+// so many words that a check-in does not bind what the user says next.
 func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	var b strings.Builder
 
@@ -84,7 +96,67 @@ func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	b.WriteString(l.renderTodaysOccurrences(ctx, loc))
 	b.WriteString("\n")
 	b.WriteString(l.renderLastTouched(ctx))
+	b.WriteString(l.renderContextRef(ctx, loc))
 
+	return b.String()
+}
+
+// renderContextRef is the context block's "Context ref" section: the check-in
+// currently awaiting an answer, and the occurrences it is still waiting on.
+//
+// Omitted entirely when nothing is awaiting, which is the same "absent rather
+// than a plausible placeholder" convention renderLastTouched follows - and the
+// convention this block is named in. An empty Context ref line would tell the
+// model it is answering a question nobody asked, which is the one failure the
+// whole design is arranged to avoid.
+//
+// Titles are listed beside the ids and are not decoration. A 21:00 check-in
+// answered at 00:15 is waiting on rows from yesterday, which Today's
+// occurrences no longer contains, and behaviouralRules forbids guessing an id -
+// so past midnight this block is the only place the title-to-id mapping exists.
+//
+// "Still awaiting" is Deadline in the future: the same rows the grace pass will
+// mark missed once it is not, read from the same store method. That is what
+// makes "the agent can still resolve it" and "the reconciler has not concluded
+// yet" one fact rather than two clocks.
+func (l *Ladder) renderContextRef(ctx context.Context, loc *time.Location) string {
+	awaiting, err := l.store.ListAwaitingReconciliation(ctx, loc)
+	if err != nil {
+		return "" // degrade to no block, matching renderPause
+	}
+
+	now := time.Now()
+	live := make([]store.Awaiting, 0, len(awaiting))
+	for _, a := range awaiting {
+		if a.Deadline.After(now) {
+			live = append(live, a)
+		}
+	}
+	if len(live) == 0 {
+		return ""
+	}
+
+	ref, ok, err := l.store.LatestContextRef(ctx, store.ContextRefReconcile)
+	if err != nil || !ok {
+		// Rows are awaiting an answer but no check-in row names them, which
+		// means a conversations write was lost after RecordCheckIn marked them.
+		// Naming the date these rows were actually asked on is better than
+		// dropping the block: the ids are what the model needs, and the ref is
+		// how it knows they belong together.
+		ref = "reconcile:" + live[0].ReconciledAt.In(loc).Format(domain.DateLayout)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Context ref:  %s\n", ref)
+	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
+	for i, a := range live {
+		label := "  awaiting:"
+		if i > 0 {
+			label = "  "
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", label, a.ID, a.ItemTitle)
+	}
+	tw.Flush()
 	return b.String()
 }
 

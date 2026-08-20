@@ -37,6 +37,14 @@ type Store interface {
 	TodaysOccurrences(ctx context.Context, loc *time.Location) ([]store.TodayOccurrence, error)
 	LastTouchedItemID(ctx context.Context) (string, bool, error)
 	GetItem(ctx context.Context, id string) (domain.Item, error)
+
+	// The Context ref block's two reads. The first says which occurrences a
+	// check-in asked about and has not been answered for; the second says which
+	// check-in that was. They are separate because they answer different
+	// questions and one of them is shared with the reconciler's grace pass —
+	// "still answerable" and "not yet missed" have to be the same set.
+	ListAwaitingReconciliation(ctx context.Context, loc *time.Location) ([]store.Awaiting, error)
+	LatestContextRef(ctx context.Context, pattern string) (string, bool, error)
 }
 
 // Sender is the outbound half this package needs - Send only, satisfied

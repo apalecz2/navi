@@ -217,24 +217,41 @@ it is the wrong one to rush. Everything after it is recoverable.
   occurrence. `kv.last_reconcile_date` holds the last completed *slot*
   (`2026-08-19T21:00`), not a bare date, or the afternoon pass would suppress
   the evening one
-- Consolidated check-in composition, with a templated fallback — the **template**
-  is done, session 16, and it was built first on purpose: it is the fallback
-  D-009 requires, so building it first means it is exercised on every run
-  rather than only when the model is down. The model composer is not built
-- `context_ref` on conversation rows so replies are recognised — written,
-  session 16. `reconcile:{date}` on the check-in's own row. Nothing *reads* it
-  yet; that is the reply path
+- Consolidated check-in composition, with a templated fallback — done. The
+  **template** landed in session 16 and was built first on purpose; the **model
+  composer** landed in session 17, at which point the template became a real
+  fallback for the first time. It is reached on a model failure, on an empty or
+  over-long completion, and — most often — on a deployment with no chat
+  transport at all, which has no model client to call. `navi_reconcile_fallback_total`
+  counts all three, because the last one writes no `llm_calls` row to count
+- `context_ref` on conversation rows so replies are recognised — written in
+  session 16, **read** in session 17. `store.LatestContextRef` is its first
+  reader, and it names the open check-in in the agent's `Context ref` block
 - `occurrences.reconciled_at`, written on every row a check-in asked about —
   session 16, and it is the instant grace measures from. Not on the original
   list, and it is what makes "already asked" a per-row fact rather than a
-  per-pass one
+  per-pass one. Session 17's `store.ListAwaitingReconciliation` is the one read
+  over it, shared by the grace pass and the agent's context injection: "still
+  answerable" and "not yet missed" are the same set seen from two sides
 - `POST /api/occurrences/bulk-resolve`, atomic — the **tool** moved forward to
   P2 (session 15), because the last P2 exit criterion needed the agent to
   resolve an occurrence and a single-occurrence tool is what 06-agent-spec
   argues against. `store.BulkResolve` exists; the HTTP endpoint waits for a
   surface that calls it, which is the web app in P4
-- `skipped` distinct from `missed`, with resolution notes
-- Grace period, then `missed` assignment
+- `skipped` distinct from `missed`, with resolution notes — done, session 17.
+  The columns and the tool argument existed since P2; what was missing was the
+  rule that reaches for them. `behaviouralRules` now says a reason makes it a
+  skip, and that the agent never writes `missed` at all — a miss is not
+  something a person reports (R2)
+- Grace period, then `missed` assignment — done, session 17.
+  `reconciler.ExpireGrace` runs after `Reconcile` on every tick and is the only
+  thing in the tree that assigns `missed` for the reason K6 gives it. The
+  deadline is `domain.GraceDeadline`: `reconciled_at` plus
+  `items.grace_period_minutes`, or the end of the device-zone local day. It
+  writes through `store.BulkResolve` like every other resolution surface, with
+  `resolution_source = 'reconciler'` — a new enum value, added by migration
+  `0004`, because `sweeper` resolves nothing and borrowing its name would have
+  corrupted the one column Q-15 is waiting on
 - `pause`, item-scoped and global — done, session 16. `POST /api/items/{id}/pause`,
   `POST /api/pause`, and the agent's `pause` tool, all three reaching
   `materializer.Pause` / `PauseAll` so a pause set by conversation and one set by
@@ -244,18 +261,38 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 - [x] A silent stretching reminder never pushes but appears in the evening check-in
 - [x] One message covers all outstanding items, not one per item
-- [ ] "Stretching and vitamins yes, skipped the walk" resolves all three in one write
-- [ ] "Did everything except the walk, I was away" records a skip with a reason
+- [x] "Stretching and vitamins yes, skipped the walk" resolves all three in one write
+- [x] "Did everything except the walk, I was away" records a skip with a reason
 - [x] Nothing is marked missed before the check-in has asked
 - [x] "Pause everything until Monday" suppresses notifications and reconciliation
 
-The first two, the fifth and the sixth are `cmd/naviseed`'s `reportReconcile`
-and `reportPauseEndpoints`, which drive a real check-in against a recording
-transport and both pause routes through a real `httpapi` handler. The two open
-ones are the reply path: `store.BulkResolve` and the tool already exist, so what
-is missing is recognising a reply as an answer to a `context_ref` rather than as
-a new request — that, the grace window, and `missed` assignment land together,
-so the assignment never runs for a session with nothing able to prevent it.
+**P3 is complete as of session 17.** The first two, the fifth and the sixth are
+`cmd/naviseed`'s `reportReconcile` and `reportPauseEndpoints`, which drive a
+real check-in against a recording transport and both pause routes through a real
+`httpapi` handler. The third and fourth are `reportReconcileReply`, and the
+fifth gained a second half in `reportGrace`: nothing is missed before the
+check-in asked, *and* a reply arriving inside the window prevents the miss
+entirely.
+
+One limit is worth stating plainly rather than leaving to be discovered. The
+reply scenario drives a scripted model, so what it proves is the plumbing behind
+an answer and not the comprehension in front of it — a fake tier returning a
+fixed `bulk_resolve` call demonstrates nothing about a model recognising a
+reply. The assertion that carries real weight is the one on the system prompt
+the ladder actually assembled and sent: it contains the `Context ref` block
+naming the open check-in and every occurrence still awaiting an answer, with
+titles beside the ids. That is the whole mechanism. Recognition is not a
+classifier and not a separate route — it is those lines being present, plus the
+check-in itself sitting one message above the reply in cross-turn history. If
+they are there the model has what it needs, and if they are not, nothing
+downstream would rescue it.
+
+`ReplyTo` is deliberately still unwired, and `transport.IncomingMessage.ReplyTo`
+is still populated by nobody. A Telegram swipe-reply and a plain typed message
+take the identical path, because the awaiting window covers both. The only case
+`ReplyTo` would catch and the window would not is a reply arriving *after* grace
+expired — and by then the rows are `missed`, which is terminal, so it would not
+rescue that answer either.
 
 ---
 

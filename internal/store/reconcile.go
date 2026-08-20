@@ -83,6 +83,84 @@ func (s *Store) ListUnreconciled(
 	return out, nil
 }
 
+// Awaiting is one occurrence a check-in has asked about and that has not been
+// answered yet - the row the grace window is running on.
+//
+// Deadline is already resolved. Both readers compare it to now and neither
+// re-derives it, which is what keeps "still answerable" and "not yet missed"
+// the same instant rather than two calculations that agree until they do not.
+type Awaiting struct {
+	ID        string
+	ItemID    string
+	ItemTitle string
+
+	StartsAt time.Time
+	Status   domain.Status
+
+	// ReconciledAt is when the check-in asked. Carried alongside Deadline
+	// because the agent's Context ref block names the check-in by its date, and
+	// that date is this instant's, not today's - a 21:00 question answered at
+	// 00:15 is still yesterday's question.
+	ReconciledAt time.Time
+
+	// Deadline is domain.GraceDeadline's answer: reconciled_at plus the item's
+	// grace_period_minutes, or the end of the local day when it sets none (K7).
+	Deadline time.Time
+}
+
+// ListAwaitingReconciliation returns every occurrence a check-in asked about
+// and got no answer for, with each row's grace deadline already resolved
+// against loc.
+//
+// loc is the device zone, the same one the pass that asked resolved its day in.
+// See domain.GraceDeadline for why it is not the item's.
+//
+// The caller decides which side of the deadline it wants: the grace pass takes
+// the expired rows and marks them missed, the agent's context injection takes
+// the live ones and offers them to a reply. Neither filter belongs here,
+// because the two of them together are the definition of the set.
+func (s *Store) ListAwaitingReconciliation(ctx context.Context, loc *time.Location) ([]Awaiting, error) {
+	rows, err := s.read.ListAwaitingReconciliation(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: list awaiting reconciliation: %w", err)
+	}
+
+	out := make([]Awaiting, 0, len(rows))
+	for _, row := range rows {
+		startsAt, err := domain.ParseTime(row.StartsAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: list awaiting reconciliation: %w", err)
+		}
+		// The query filters reconciled_at IS NOT NULL, so a nil here is a row
+		// the database says cannot exist. Treating it as an error rather than
+		// skipping it keeps a corrupt row loud instead of quietly un-missable.
+		if row.ReconciledAt == nil {
+			return nil, fmt.Errorf("store: list awaiting reconciliation: occurrence %s has no reconciled_at", row.ID)
+		}
+		reconciledAt, err := domain.ParseTime(*row.ReconciledAt)
+		if err != nil {
+			return nil, fmt.Errorf("store: list awaiting reconciliation: %w", err)
+		}
+
+		var grace *int
+		if row.GracePeriodMinutes != nil {
+			m := int(*row.GracePeriodMinutes)
+			grace = &m
+		}
+
+		out = append(out, Awaiting{
+			ID:           row.ID,
+			ItemID:       row.ItemID,
+			ItemTitle:    row.Title,
+			StartsAt:     startsAt,
+			Status:       domain.Status(row.Status),
+			ReconciledAt: reconciledAt,
+			Deadline:     domain.GraceDeadline(reconciledAt, grace, loc),
+		})
+	}
+	return out, nil
+}
+
 // RecordCheckIn writes everything one reconciliation pass leaves behind:
 // reconciled_at on every row it asked about, the conversation row carrying the
 // message and its context_ref, and the slot latch that stops the pass running

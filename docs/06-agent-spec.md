@@ -187,7 +187,9 @@ Active goals:                                    [P3.5, not yet built]
   gol_01H..  "ship the report"    freestanding 60%, updated 2026-08-04
 
 Last touched: itm_01H.. ("evening walk")
-Context ref:  reconcile:2026-08-05   [present only when replying to a check-in]
+Context ref:  reconcile:2026-08-05   [present only while a check-in awaits an answer]
+  awaiting:  occ_01H..  morning stretch
+             occ_01H..  evening walk
 Context ref:  briefing:2026-08-05    [present only when replying to a briefing, P3.5]
 ```
 
@@ -197,6 +199,32 @@ outstanding today, so "everything" would be unresolvable.
 
 `Last touched` is what makes "make it more like five times" resolve without
 naming the item again.
+
+`Context ref` is the whole of reply recognition, and it is worth being explicit
+that there is nothing else. No classifier decides whether a message answers the
+check-in, and no separate route carries it: a reply is an ordinary inbound turn
+through the ordinary catalog. Two things make it resolvable. The check-in is
+already in cross-turn history — the reconciler writes it in the same shape
+`persistAssistantProse` does — so the model sees its own question immediately
+above the answer. And this block names what is still outstanding.
+
+The block is present only while at least one occurrence the check-in asked about
+is unresolved *and* inside its grace window, which is one read
+(`store.ListAwaitingReconciliation`) shared with the pass that assigns `missed`.
+Absent rather than empty when nothing is awaiting, the same convention `Last
+touched` follows: an empty `Context ref` would tell the model it is answering a
+question nobody asked.
+
+Titles sit beside the ids and are not decoration. A 21:00 check-in answered at
+00:15 is waiting on rows from *yesterday*, which `Today's occurrences` no longer
+lists, and the behavioural rules forbid guessing an id — so past midnight this
+block is the only surviving map from a name the user might say to an id the tool
+needs.
+
+What stops a new request being mistaken for an answer is that nothing is forced.
+The rules state that a check-in does not oblige the user to answer it before
+saying anything else, so "remind me to call mum at 6" arriving after one reaches
+`create_item` exactly as it would have.
 
 Active goals is read from the same `internal/conversation.Store` interface as
 active items — a widened method, not a second read path — and is the block
@@ -447,6 +475,32 @@ Rules:
 - Falls back to a plain templated list if the model call fails.
 - The reply is handled by `bulk_resolve`, so reconciliation and batch completion
   are the same code path.
+
+Built in session 17 (`internal/reconciler/compose.go`). Four notes from the
+implementation:
+
+- **The model is given titles and nothing else** — no ids, no statuses, no
+  times. The set of rows that gets a `reconciled_at` is built in `Reconcile`
+  from the same slice, so whatever the model writes it cannot widen or narrow
+  what was actually asked about. A composed message naming an item nobody
+  gathered would be a question the grace window then never answers for.
+- **The fallback is the value the code starts from**, not an error path it falls
+  into: `composeCheckIn` computes the template first and replaces it only on a
+  usable completion. There is no arrangement of failures that reaches the send
+  with nothing to send. It is reached on a provider failure, on an empty
+  completion, on one over the length guard, and on a deployment with no chat
+  transport — which is the commonest case and not a degraded one, since a
+  check-in nobody can reply to has no use for better prose.
+- **An empty or over-long completion falls back rather than being repaired.**
+  `model.Complete` reports prose-with-no-content as a *success*, because
+  adequacy is the caller's judgement; this component is where that judgement
+  gets made. Truncating an over-long answer would ship the first 400 runes of
+  something that misunderstood the task.
+- **The whole tier walk is budgeted at 20 seconds**, far under the tiers' own
+  configured timeouts. Supervisor ticks are serial, so an unbudgeted two-tier
+  walk would hold the reconciler loop for minutes — delaying the check-in,
+  stalling the grace pass behind it, and staling `/healthz`. The component with
+  the good failure mode is the one that should give up first.
 
 ## Briefing composer (P3.5, not yet built)
 

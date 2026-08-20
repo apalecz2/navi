@@ -113,8 +113,23 @@ Priority levels:
 | K4 | M | Reconciliation sends one consolidated message covering all unresolved items, not one message per item. |
 | K5 | M | Reconciliation covers both silent items and `at_time` items that were notified and ignored. |
 | K6 | M | `missed` is assigned only after reconciliation has asked and received no answer within a grace window. It is not assigned by the clock passing midnight. |
-| K7 | M | Grace period defaults to end of day in the item's local timezone, and is overridable per item. |
+| K7 | M | Grace period is measured from the moment the check-in asked, and defaults to end of day in the device timezone, overridable per item. |
 | K8 | S | Reconciliation time is configurable globally and overridable per item. |
+
+K7 said "in the item's local timezone" until session 17, and the code
+deliberately does otherwise — the wording is amended here rather than left to
+contradict `domain.GraceDeadline`. The reason is that the two clocks have to be
+the same one. A pass gathers `[local midnight, now]` in the *device* zone and
+asks its question there; if the deadline were resolved per item, a `tz_mode:
+fixed` item several hours ahead would already be past its own end of day at the
+moment it was asked, and would go `missed` on the next tick without anyone
+having had a chance to answer. The ask and its expiry have to agree about which
+day they are talking about, which they only do in one frame.
+
+The other half of the amendment is the measurement point, which the original
+wording left open: grace runs from `occurrences.reconciled_at`, never from the
+occurrence's own `starts_at`. That is K6 restated — a clock that started before
+the asking did would be measuring silence nobody was invited to break.
 
 ## A. Agent
 

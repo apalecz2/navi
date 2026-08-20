@@ -219,6 +219,97 @@ func (q *Queries) GetOccurrence(ctx context.Context, id string) (Occurrence, err
 	return i, err
 }
 
+const listAwaitingReconciliation = `-- name: ListAwaitingReconciliation :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.reconciled_at,
+       i.title, i.grace_period_minutes
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.reconciled_at IS NOT NULL
+  AND o.status IN ('pending', 'notified')
+  AND i.kind = 'reminder'
+  AND i.archived_at IS NULL
+ORDER BY o.starts_at, o.id
+`
+
+type ListAwaitingReconciliationRow struct {
+	ID                 string
+	ItemID             string
+	StartsAt           string
+	Status             string
+	ReconciledAt       *string
+	Title              string
+	GracePeriodMinutes *int64
+}
+
+// ListAwaitingReconciliation returns every occurrence a check-in has asked
+// about and that still has no answer. It is the exact inverse of
+// ListUnreconciled's second predicate: that one finds what to ask, this one
+// finds what was asked.
+//
+// One query, two readers, and that is the point. The reconciler's grace pass
+// keeps the rows whose deadline has passed and marks them missed; the agent's
+// context injection keeps the rows whose deadline has not, and renders them as
+// the Context ref block so a reply can still resolve them. "Awaiting an answer"
+// and "inside the grace window" are the same set seen from two sides, and
+// deriving it twice is how they would come to disagree.
+//
+// The deadline itself is not computed here. It is reconciled_at plus
+// grace_period_minutes, or the end of the local day when that is NULL (K7), and
+// neither SQLite nor this query knows which timezone that day belongs to. The
+// column comes back raw and domain.GraceDeadline resolves it during row
+// mapping, once, for both readers.
+//
+// kind = 'reminder' is not defensive padding. The event transition table has no
+// pending -> missed edge at all, and BulkResolve is all or nothing, so a single
+// event row carrying a reconciled_at would abort every grace batch from then
+// on - and unlike a concurrent resolution it would never leave the candidate
+// set, because nothing would ever move it out of pending. ListUnreconciled
+// already filters the same way, so no such row can exist today, which is
+// exactly what would make this expensive to find later.
+//
+// archived_at IS NULL keeps a miss off a reminder the user deleted after being
+// asked about it: re-materializing an archived item clears its future pending
+// rows, but today's already-past ones survive, and recording misses against a
+// deleted reminder is a statistic about nothing.
+//
+// Pause is deliberately absent, and it is the one filter here that is a
+// decision rather than a mechanic. A pause set after the check-in went out does
+// not spare that day's rows: the user was asked and did not say those items
+// were done, and a pause covers the future rather than resolving the past
+// (D-008, and "pausing is not resolving" cuts both ways). A global pause still
+// suppresses the grace pass while it is active, which the reconciler enforces
+// rather than this query, so those rows wait and are missed when it lifts.
+func (q *Queries) ListAwaitingReconciliation(ctx context.Context) ([]ListAwaitingReconciliationRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAwaitingReconciliation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAwaitingReconciliationRow{}
+	for rows.Next() {
+		var i ListAwaitingReconciliationRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.Status,
+			&i.ReconciledAt,
+			&i.Title,
+			&i.GracePeriodMinutes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueOccurrences = `-- name: ListDueOccurrences :many
 SELECT o.id, o.item_id, o.starts_at, o.message_text,
        i.title, i.kind, i.priority

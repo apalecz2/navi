@@ -179,11 +179,14 @@ I message "did stretching, vitamins, and the walk".
 ### US-4.3 Report completions with an exception
 I message "did everything today except the walk, I was travelling".
 
-- [ ] "Everything" resolves against today's outstanding occurrences from injected context [A3, A8]
-- [ ] The walk is recorded as `skipped`, not `missed` [R2]
-- [ ] "I was travelling" is stored as the resolution note [R2]
-- [ ] The skip does not break the streak the way a miss would [R2]
+- [x] "Everything" resolves against today's outstanding occurrences from injected context [A3, A8]
+- [x] The walk is recorded as `skipped`, not `missed` [R2]
+- [x] "I was travelling" is stored as the resolution note [R2]
+- [x] The skip does not break the streak the way a miss would [R2]
 - [ ] The skip reason is available to the copywriter, so the next message does not scold [G2, G8]
+
+The last box waits on P5, where the copywriter gets a body. The reason is stored
+and readable; nothing reads it yet.
 
 ### US-4.4 Check items off in a web view
 I open the app on my phone.
@@ -201,27 +204,31 @@ I open the app on my phone.
 ### US-5.1 Get one end-of-day check-in
 It is 21:00 and three items are unresolved.
 
-- [ ] A single message covers all three [K4]
-- [ ] It includes both silent items and notified-but-ignored items [K5]
-- [ ] Nothing has yet been marked `missed` [K6]
+- [x] A single message covers all three [K4]
+- [x] It includes both silent items and notified-but-ignored items [K5]
+- [x] Nothing has yet been marked `missed` [K6]
 
 ### US-5.2 Answer the check-in naturally
 I reply "stretching and vitamins yes, skipped the walk".
 
-- [ ] All three resolve from the one reply [A8]
-- [ ] The reply is understood as a response to the check-in, not a new request [A9]
+- [x] All three resolve from the one reply [A8]
+- [x] The reply is understood as a response to the check-in, not a new request [A9]
 
 ### US-5.3 Ignore the check-in
 I do not reply.
 
-- [ ] After the grace window the unresolved items become `missed` [K6]
-- [ ] Grace defaults to end of local day and is overridable per item [K7]
+- [x] After the grace window the unresolved items become `missed` [K6]
+- [x] Grace defaults to end of local day and is overridable per item [K7]
 - [ ] Misses feed streak and completion-rate statistics [V5]
+
+The last box waits on P4's statistics, which is the first thing that reads them.
+`missed` rows exist as of session 17 and the `chains` view already rolls them up;
+nothing charts them yet.
 
 ### US-5.4 Per-item reconciliation timing
 A reminder should be checked at 14:00 rather than 21:00.
 
-- [ ] Reconciliation time is overridable per item [K8]
+- [x] Reconciliation time is overridable per item [K8]
 
 ---
 

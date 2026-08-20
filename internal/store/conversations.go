@@ -111,6 +111,35 @@ func (s *Store) GetConversationByExternalID(ctx context.Context, transport, exte
 	return toDomainConversation(row)
 }
 
+// ContextRefReconcile is the LIKE pattern matching a check-in's context_ref.
+// The value itself is "reconcile:{date}", written by RecordCheckIn; P3.5's
+// briefing writes "briefing:{date}" and gets its own constant beside this one.
+const ContextRefReconcile = "reconcile:%"
+
+// LatestContextRef returns the most recent context_ref matching pattern, and
+// whether there was one at all.
+//
+// It answers "which question is on the table", not "is a question still open" —
+// see the query's comment. A caller wanting the second reads
+// ListAwaitingReconciliation and renders nothing when it is empty.
+//
+// No rows is not an error: a deployment where the reconciler has never sent a
+// check-in is the ordinary first-week state, and it reports ("", false, nil) on
+// the same convention CurrentTZ and LastTouchedItemID already use.
+func (s *Store) LatestContextRef(ctx context.Context, pattern string) (string, bool, error) {
+	ref, err := s.read.LatestContextRef(ctx, &pattern)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("store: latest context ref: %w", err)
+	}
+	if ref == nil || *ref == "" {
+		return "", false, nil
+	}
+	return *ref, true, nil
+}
+
 // ListRecentConversations returns the most recent conversation rows, newest
 // first, capped at limit — naviseed's way to inspect a turn's full
 // transcript, on the same shape ListLLMCalls uses. Nothing in the write or

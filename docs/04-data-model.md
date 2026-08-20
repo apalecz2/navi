@@ -97,7 +97,7 @@ CREATE TABLE occurrences (
   -- resolution detail
   resolution_note       TEXT,                      -- e.g. "on vacation"
   resolution_source     TEXT CHECK (resolution_source IN
-                          ('notification', 'web', 'agent', 'sweeper')),
+                          ('notification', 'web', 'agent', 'sweeper', 'reconciler')),
 
   -- generated message
   message_text          TEXT,
@@ -117,6 +117,13 @@ must never delete or overwrite a row where `is_override = 1`.
 `resolution_source` is worth having: after a month it tells you whether you
 actually resolve from notifications, the web app, or by messaging, which should
 inform where effort goes next.
+
+`reconciler` was added in session 17 (migration `0004`), when the grace pass
+became the first thing able to assign `missed` for the reason K6 gives it. It is
+deliberately not `sweeper`: the sweeper resolves nothing, and a source that names
+a loop which never wrote a resolution makes the column unreadable for exactly as
+long as it takes to collect. It is also the only value no user-facing surface can
+write — nobody reports a miss, the system concludes one.
 
 ### `conversations`
 

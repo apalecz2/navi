@@ -25,7 +25,14 @@ sql:
     # queries chains, the query is hand-written with database/sql inside this
     # package, which is still no SQL outside the repository module.
     #
-    # A new migration that adds a table must be added to this list.
+    # 0004_resolution_source_reconciler.sql is omitted for the same reason: it
+    # is a table rebuild that recreates that same view. What it changes is one
+    # CHECK constraint, which sqlc does not model at all — the column list it
+    # generates from 0001 is still exactly right.
+    #
+    # A new migration that adds a table or a column must be added to this list.
+    # One that only widens a constraint must not, and one that recreates the
+    # chains view cannot.
     schema:
       - "internal/store/migrations/0001_init.sql"
       - "internal/store/migrations/0003_conversations_dedup.sql"

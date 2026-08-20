@@ -125,11 +125,36 @@ func run() error {
 	// loop's agent.Tools re-materializes on every write).
 	mat := materializer.New(log.With("loop", materializer.Name), st, cfg.Schedule.DefaultTZ)
 
+	// The model stack, built here rather than inside chatTransport because two
+	// components need it now: the conversation ladder and the reconciler's
+	// check-in composer.
+	//
+	// The gate is unchanged — it exists iff a chat transport does — and that is
+	// deliberate rather than inherited. internal/config makes MODEL_API_KEY
+	// required exactly when CHAT_TRANSPORT is set, so building unconditionally
+	// would either fail the boot of a deployment that never wanted a model, or
+	// run with an empty key and spend one doomed request every evening to reach
+	// a template that was going to be sent anyway. And the configuration where
+	// it is nil is the one where it matters least: a check-in nobody can reply
+	// to does not need to be prettier than the template.
+	modelClient, routing, err := modelStack(cfg.Transport.Chat, cfg.Model.Provider, cfg.Model.APIKey,
+		cfg.Files.ModelRoutingPath(), st, m, log)
+	if err != nil {
+		return err
+	}
+
 	chatWebhook, chatIntake, err := chatTransport(cfg.Transport.Chat, cfg.Telegram,
-		cfg.Model.Provider, cfg.Model.APIKey, cfg.Files.ModelRoutingPath(), cfg.Files.PersonaPath(),
+		modelClient, routing, cfg.Files.PersonaPath(),
 		st, mat, table, cfg.Schedule.DefaultTZ, m, log)
 	if err != nil {
 		return err
+	}
+
+	// Nil composer when there is no model client, which composeCheckIn treats
+	// as an ordinary template pass rather than as a failure.
+	var composer reconciler.Composer
+	if modelClient != nil {
+		composer = reconciler.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
 	}
 	if chatWebhook != nil {
 		// Zero-value on start (RegisterLoop's argument): a webhook that has
@@ -181,6 +206,23 @@ func run() error {
 		}
 	}
 
+	// The reconciler's two edges, registered by hand and unconditionally.
+	//
+	// By hand, because it does not belong in resolutionSources: that loop
+	// crosses every source with every (from, to) the endpoint can produce, and
+	// the reconciler can produce exactly two. Adding it there would export
+	// zeros for pending -> completed and notified -> snoozed by a source that
+	// cannot reach either, which is the same misreporting the block above
+	// refuses for a source with no caller.
+	//
+	// Unconditionally, because unlike notification this needs no transport to
+	// exist. The reconciler loop always runs, so the grace pass can always fire,
+	// so a zero here is a true statement about a quiet week rather than about a
+	// feature that is switched off.
+	for _, from := range []domain.Status{domain.StatusPending, domain.StatusNotified} {
+		m.RegisterTransition(string(from), string(domain.StatusMissed), string(domain.ResolvedByReconciler))
+	}
+
 	// Snooze is registered separately rather than folded into the loop above,
 	// because snoozed is reachable only from notified: adding it to that `to`
 	// list would export a zero for pending -> snoozed, an edge the transition
@@ -202,7 +244,7 @@ func run() error {
 		// there is no second adapter to choose from — which is also why a
 		// Telegram outage takes out delivery and its own backstop together
 		// (03-architecture's one correlated failure, accepted in D-006).
-		reconciler.New(log.With("loop", reconciler.Name), st, notifier, m,
+		reconciler.New(log.With("loop", reconciler.Name), st, notifier, m, composer,
 			cfg.Schedule.ReconcileAt, cfg.Schedule.DefaultTZ).Loop(),
 
 		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
@@ -284,6 +326,38 @@ func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (schedul
 	}
 }
 
+// modelStack builds the model client and its routing table, or returns
+// (nil, nil, nil) when no chat transport names one.
+//
+// Two components read it — the conversation ladder and the reconciler's
+// check-in composer — which is why it is built here instead of inside
+// chatTransport. Both must get the same client: llm_calls, the tier metrics,
+// and the provider validation are per-client, and a second one would report a
+// second system.
+//
+// A nil client is a supported configuration, not an error. The caller decides
+// what to do without one, and both callers degrade rather than fail: no
+// webhook, and a templated check-in.
+func modelStack(chatName, provider, apiKey, routingPath string,
+	st *store.Store, m *metrics.Metrics, log *slog.Logger) (*model.Client, *model.Routing, error) {
+	if chatName == "" {
+		return nil, nil, nil
+	}
+
+	routing, err := model.LoadRouting(routingPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	// MODEL_PROVIDER and config/model.yaml's base_urls are two independent
+	// places to say "which provider" — this is what keeps a flip of one from
+	// silently sending the other's key to the wrong host
+	// (internal/model.ValidateProvider).
+	if err := routing.ValidateProvider(model.Provider(provider)); err != nil {
+		return nil, nil, fmt.Errorf("config: MODEL_PROVIDER %q: %w", provider, err)
+	}
+	return model.New(log.With("component", "model"), routing, apiKey, st, m), routing, nil
+}
+
 // chatTransport resolves CHAT_TRANSPORT to an inbound webhook handler and
 // the conversation loop that drains it, or to (nil, nil) when nothing names
 // it — today's default outside of P1 testing, in which case
@@ -294,31 +368,19 @@ func notifyTransport(name string, tg config.Telegram, log *slog.Logger) (schedul
 // notifyTransport: a typo that quietly ran with no inbound route would be a
 // container that looks entirely healthy and simply never hears from anyone.
 //
-// Since session 11: building the webhook handler also builds the model
-// client, the tool catalog, and the escalation ladder behind it — the whole
-// conversational stack lives or dies with CHAT_TRANSPORT, on the same
-// required-when-consumed reasoning internal/config's Model.APIKey and
-// BotToken changes follow.
-func chatTransport(name string, tg config.Telegram, provider, apiKey, routingPath, personaPath string,
+// Since session 17 it no longer builds the model client — modelStack does,
+// one level up, because the reconciler's check-in composer needs the same
+// one. What still lives or dies with CHAT_TRANSPORT is the inbound half:
+// the webhook, the tool catalog, and the escalation ladder.
+func chatTransport(name string, tg config.Telegram,
+	client *model.Client, routing *model.Routing, personaPath string,
 	st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location,
 	m *metrics.Metrics, log *slog.Logger) (http.Handler, *conversation.Intake, error) {
 	switch name {
 	case "":
 		return nil, nil, nil
 	case config.TelegramTransport:
-		routing, err := model.LoadRouting(routingPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		// MODEL_PROVIDER and config/model.yaml's base_urls are two
-		// independent places to say "which provider" — this is what keeps a
-		// flip of one from silently sending the other's key to the wrong
-		// host (internal/model.ValidateProvider).
-		if err := routing.ValidateProvider(model.Provider(provider)); err != nil {
-			return nil, nil, fmt.Errorf("config: MODEL_PROVIDER %q: %w", provider, err)
-		}
-		client := model.New(log.With("component", "model"), routing, apiKey, st, m)
-		tools := agent.New(st, mat, table, defaultTZ)
+		tools := agent.New(st, mat, table, defaultTZ, m)
 		chatSender := telegram.New(tg.BotToken, tg.AllowedSenderID)
 		ladder := conversation.New(client, tools, routing, st, table, personaPath, defaultTZ, chatSender)
 		intake := conversation.NewIntake(ladder)

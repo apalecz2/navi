@@ -16,6 +16,14 @@ const (
 	ResolvedByWeb          ResolutionSource = "web"
 	ResolvedByAgent        ResolutionSource = "agent"
 	ResolvedBySweeper      ResolutionSource = "sweeper"
+
+	// ResolvedByReconciler is the grace pass, and it is the only source that
+	// assigns missed for the reason D-008 gives it: asked, and got nothing.
+	// Added by migration 0004 rather than reusing sweeper, which resolves
+	// nothing and would have made this column lie about the one thing it
+	// exists to record. It is never written by a user-facing surface — nobody
+	// reports a miss, the system concludes one.
+	ResolvedByReconciler ResolutionSource = "reconciler"
 )
 
 // Generation pass values for message_text, from the copywriter's two-pass
@@ -90,6 +98,41 @@ func NotificationBody(messageText *string, title string) string {
 		return *messageText
 	}
 	return title
+}
+
+// GraceDeadline is K7: the instant after which an occurrence a check-in asked
+// about, and got no answer for, becomes missed.
+//
+// It is measured from reconciledAt — the instant the question actually went out
+// — and never from the occurrence's own starts_at. That is the whole of D-008:
+// missed means "asked and got nothing", so the clock cannot start before the
+// asking did.
+//
+// loc is the device zone (schedule.Zones.Local()), not the item's. K7's wording
+// says "the item's local timezone" and the code deliberately says otherwise:
+// the check-in gathers over [local midnight, now] in the device zone, so a
+// fixed-zone item several hours ahead would already be past its own end of day
+// at the moment it was asked, and would go missed on the next tick. The ask and
+// its deadline have to be in one frame or they disagree about which day they
+// are talking about. docs/01-requirements.md records the amendment.
+//
+// A non-positive graceMinutes is treated as absent rather than honoured. Zero
+// would make the same sixty-second tick both ask and miss, which is K6 defeated
+// by a config value; internal/agent rejects it at the schema too, and this is
+// the backstop for a row that predates the tag or was written by hand.
+//
+// It lives in this leaf for the reason NotificationBody does: both the grace
+// pass and the agent's context injection need the same answer, and neither
+// should have to import the other to get it.
+func GraceDeadline(reconciledAt time.Time, graceMinutes *int, loc *time.Location) time.Time {
+	if graceMinutes != nil && *graceMinutes > 0 {
+		return reconciledAt.Add(time.Duration(*graceMinutes) * time.Minute)
+	}
+	local := reconciledAt.In(loc)
+	// Midnight opening the next local day. Constructed by adding a day to the
+	// date rather than to the instant, so a DST transition inside the window
+	// does not move the boundary off midnight.
+	return time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, loc)
 }
 
 // NewOccurrence is what a caller supplies to materialize an instance. The store

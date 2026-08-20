@@ -20,9 +20,125 @@ func buildConfirmation(toolName string, res agent.Result) string {
 		return renderItemList(res.Items)
 	case "delete_item":
 		return fmt.Sprintf("Archived %q.", itemTitle(res.Item))
+	case "bulk_resolve":
+		return renderResolutions(res.Resolutions)
+	case "pause":
+		return renderPauseConfirmation(res.Item, res.PausedUntil)
 	default: // create_item, update_item
 		return renderNextOccurrences(res.Item, res.NextOccurrences, res.Inferred)
 	}
+}
+
+// renderResolutions confirms a batch in the shape US-4.2 asks for: counts and
+// names, not three separate confirmations, because the reply to "did stretching,
+// vitamins and the walk" should read like an answer rather than a receipt.
+//
+// Rows are grouped by resulting status rather than listed in order. "Marked
+// stretching and vitamins done, the walk skipped" is one sentence; the same
+// three facts in row order are three clauses that repeat the verb.
+//
+// A row that applied nothing is named separately and honestly. Applied false is
+// the idempotency table's second row - it was already in that state - and
+// saying "already done" is both true and more useful than silently claiming
+// credit for a write that did not happen.
+func renderResolutions(rows []agent.Resolved) string {
+	if len(rows) == 0 {
+		return "Nothing to record."
+	}
+
+	byStatus := map[string][]string{}
+	order := []string{}
+	var alreadyDone int
+
+	for _, r := range rows {
+		if !r.Applied {
+			alreadyDone++
+			continue
+		}
+		name := r.ItemTitle
+		if name == "" {
+			// The item could not be read. Counting is the honest degradation:
+			// naming an occurrence id back to a person is worse than not
+			// naming anything.
+			name = "one item"
+		}
+		if _, seen := byStatus[r.Status]; !seen {
+			order = append(order, r.Status)
+		}
+		byStatus[r.Status] = append(byStatus[r.Status], name)
+	}
+
+	var parts []string
+	for _, status := range order {
+		parts = append(parts, fmt.Sprintf("%s %s", joinAnd(byStatus[status]), resolutionVerb(status)))
+	}
+
+	switch {
+	case len(parts) == 0:
+		return fmt.Sprintf("Already recorded - nothing changed (%d).", alreadyDone)
+	case alreadyDone == 0:
+		return "Got it - " + joinClauses(parts) + "."
+	default:
+		return fmt.Sprintf("Got it - %s. %d was already recorded.", joinClauses(parts), alreadyDone)
+	}
+}
+
+// resolutionVerb is how a status reads at the end of a clause. missed has no
+// case because the agent never writes one: a miss is what the reconciler
+// concludes, not what a person reports (R2, behaviouralRules) - but it is
+// handled rather than dropped, since bulk_resolve does accept it.
+func resolutionVerb(status string) string {
+	switch status {
+	case string(domain.StatusCompleted):
+		return "done"
+	case string(domain.StatusSkipped):
+		return "skipped"
+	case string(domain.StatusMissed):
+		return "recorded as missed"
+	default:
+		return "recorded as " + status
+	}
+}
+
+// renderPauseConfirmation confirms a pause the user just set. Item is nil for a
+// global one, which is why this cannot go through renderNextOccurrences: a
+// global pause has no item to name and no next occurrence to show, because the
+// point of it is that there are none.
+//
+// Named at length to keep it distinct from Ladder.renderPause in prompt.go,
+// which renders the standing pause state into the prompt rather than confirming
+// a change to it.
+func renderPauseConfirmation(item *domain.Item, until *string) string {
+	scope := "Everything"
+	if item != nil {
+		scope = fmt.Sprintf("%q", item.Title)
+	}
+	if until == nil {
+		return fmt.Sprintf("%s is running normally again.", scope)
+	}
+	return fmt.Sprintf("%s is paused until %s. Nothing will fire or be checked up on until then.", scope, *until)
+}
+
+// joinAnd is joinOxford's "and" twin - a list of things that were all done,
+// rather than a list of things being asked about.
+func joinAnd(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
+
+// joinClauses joins the per-status clauses with commas only. "stretching and
+// vitamins done, the walk skipped" - a second "and" between the clauses would
+// collide with the one inside the first.
+func joinClauses(parts []string) string {
+	return strings.Join(parts, ", ")
 }
 
 func itemTitle(item *domain.Item) string {

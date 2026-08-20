@@ -6,14 +6,17 @@ import (
 	"github.com/aidenpaleczny/navi/internal/store"
 )
 
-// Compose renders the check-in as the plain templated list D-009 requires as
-// its fallback, in the shape 06-agent-spec's Reconciler composer illustrates:
+// composeTemplate renders the check-in as the plain templated list D-009
+// requires as its fallback, in the shape 06-agent-spec's Reconciler composer
+// illustrates:
 //
 //	Haven't heard about stretching, vitamins, or the evening walk.
 //	Which of those got done?
 //
-// Three rules from that section are structural here rather than left to the
-// model that will eventually replace this:
+// Three rules from that section are structural here rather than entrusted to
+// the model that composes the ordinary path (compose.go). That is the point of
+// a fallback: it cannot get the tone wrong, so it is safe to reach for at the
+// moment there is no way to check.
 //
 //   - One message, never one per item (K4). The whole list is one sentence.
 //   - Never accusatory. It is a question, and it says what was not heard rather
@@ -27,17 +30,11 @@ import (
 // two unresolved occurrences of one reminder are one thing the user did or did
 // not do, and listing "vitamins, vitamins" would be the audit this is not.
 // Order follows the caller's, which is starts_at — earliest first, so the list
-// reads in the order the day happened.
-func Compose(outstanding []store.Unreconciled) string {
-	titles := make([]string, 0, len(outstanding))
-	seen := make(map[string]struct{}, len(outstanding))
-	for _, o := range outstanding {
-		if _, dup := seen[o.ItemID]; dup {
-			continue
-		}
-		seen[o.ItemID] = struct{}{}
-		titles = append(titles, o.ItemTitle)
-	}
+// reads in the order the day happened. The composer is handed the same list
+// from the same helper, so falling back mid-evening does not change which items
+// are named or in what order.
+func composeTemplate(outstanding []store.Unreconciled) string {
+	titles := dedupeTitles(outstanding)
 
 	if len(titles) == 0 {
 		return ""

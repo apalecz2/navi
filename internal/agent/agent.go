@@ -24,6 +24,19 @@ import (
 	"github.com/aidenpaleczny/navi/internal/store"
 )
 
+// Metrics is the catalog's slice of the registry: one method, because
+// bulk_resolve is the only tool that changes an occurrence's status.
+//
+// Every other resolution surface counts its own transitions at its own edge -
+// internal/httpapi, internal/transport/telegram, internal/reconciler - because
+// the store deliberately counts for nobody. This interface is what puts the
+// agent on that list. Without it navi_occurrence_transitions_total{source="agent"}
+// stays a registered zero while the writes happen, which is worse than a
+// missing series: it reads as "the agent never resolves anything".
+type Metrics interface {
+	IncTransition(from, to, source string)
+}
+
 // Tools holds what every handler needs, built once by a caller (main, or
 // naviseed this session) and passed by value into Call - the same shape
 // config.Load's callers use, never a global.
@@ -32,9 +45,14 @@ type Tools struct {
 	mat       *materializer.Materializer
 	defaults  *defaults.Table
 	defaultTZ *time.Location
+
+	// metrics may be nil, which every counting site checks. A caller
+	// exercising the catalog without a registry - a one-off, a hand-driven
+	// check - should not have to build one to call a tool.
+	metrics Metrics
 }
 
-// New builds a Tools.
-func New(st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location) *Tools {
-	return &Tools{store: st, mat: mat, defaults: table, defaultTZ: defaultTZ}
+// New builds a Tools. m may be nil.
+func New(st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location, m Metrics) *Tools {
+	return &Tools{store: st, mat: mat, defaults: table, defaultTZ: defaultTZ, metrics: m}
 }

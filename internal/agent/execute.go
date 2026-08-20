@@ -421,6 +421,11 @@ func handleBulkResolve(ctx context.Context, t *Tools, raw json.RawMessage) (Resu
 	rows := make([]store.BulkResolution, 0, len(args.Resolutions))
 	seen := make(map[string]int, len(args.Resolutions))
 
+	// itemOf is filled from the existence check below, which already loads
+	// every occurrence. The confirmation names items rather than ids - "marked
+	// stretching and vitamins done" - and this is where the mapping is free.
+	itemOf := make(map[string]string, len(args.Resolutions))
+
 	for i, r := range args.Resolutions {
 		field := fmt.Sprintf("resolutions[%d].occurrence_id", i)
 
@@ -435,13 +440,15 @@ func handleBulkResolve(ctx context.Context, t *Tools, raw json.RawMessage) (Resu
 		}
 		seen[r.OccurrenceID] = i
 
-		if _, err := t.store.GetOccurrence(ctx, r.OccurrenceID); err != nil {
+		occ, err := t.store.GetOccurrence(ctx, r.OccurrenceID)
+		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return Result{}, domain.Invalid("occurrence_exists", field,
 					"occurrence %q does not exist", r.OccurrenceID)
 			}
 			return Result{}, err
 		}
+		itemOf[r.OccurrenceID] = occ.ItemID
 
 		// Layer 1's enum tag has already rejected anything outside the three,
 		// so this cannot fail for a decoded argument struct. It is here because
@@ -468,16 +475,54 @@ func handleBulkResolve(ctx context.Context, t *Tools, raw json.RawMessage) (Resu
 	// conversational follow-up would mean, and a resolution has no follow-up to
 	// feed — a batch spanning three items has no single answer to point at
 	// anyway (internal/store/kv.go's doc comment on LastTouchedItemID).
+	titles := t.titlesFor(ctx, itemOf)
+
 	out := make([]Resolved, len(resolved))
 	for i, res := range resolved {
 		out[i] = Resolved{
 			OccurrenceID:   res.Occurrence.ID,
+			ItemTitle:      titles[res.Occurrence.ID],
 			Status:         string(res.Occurrence.Status),
 			Applied:        res.Outcome == domain.OutcomeApplied,
 			ChainCompleted: res.Chain.WasCompleted,
 		}
+
+		// Counted at this edge, per row, and only on a real transition — the
+		// same rule internal/httpapi/resolve.go follows and for the same
+		// reason: a no-op is the idempotency table's second row, not a status
+		// change, and counting it would inflate every completion rate by
+		// however often a button got double-tapped.
+		if t.metrics != nil && res.Outcome == domain.OutcomeApplied {
+			t.metrics.IncTransition(string(res.Previous), string(res.Occurrence.Status),
+				string(domain.ResolvedByAgent))
+		}
 	}
 	return Result{Resolutions: out}, nil
+}
+
+// titlesFor maps occurrence id to item title, reading each distinct item once.
+//
+// A title that cannot be read comes back empty rather than failing the call.
+// The write has already committed by the time this runs, and refusing to
+// confirm a resolution that happened would be the worse of the two outcomes;
+// the renderer falls back to counting.
+func (t *Tools) titlesFor(ctx context.Context, itemOf map[string]string) map[string]string {
+	byItem := make(map[string]string, len(itemOf))
+	out := make(map[string]string, len(itemOf))
+	for occID, itemID := range itemOf {
+		title, ok := byItem[itemID]
+		if !ok {
+			item, err := t.store.GetItem(ctx, itemID)
+			if err != nil {
+				byItem[itemID] = ""
+				continue
+			}
+			title = item.Title
+			byItem[itemID] = title
+		}
+		out[occID] = title
+	}
+	return out
 }
 
 // patchFrom translates the tool-facing ItemChanges into the store's

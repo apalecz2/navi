@@ -202,6 +202,33 @@ message, so one mechanism serves both.
 **Cost.** A resolution state that is deliberately unsettled for several hours. The
 day view must show "awaiting" distinctly from "missed" during that window.
 
+**Built in session 17.** The "asked" half is `occurrences.reconciled_at`, written
+by `store.RecordCheckIn` on every row a check-in named; the "grace elapsed" half
+is `reconciler.ExpireGrace`, which runs after `Reconcile` on every tick. A row
+carrying no `reconciled_at` is invisible to it no matter how old, which is how
+"not by the clock passing midnight" is enforced structurally rather than by a
+guard someone has to remember.
+
+Two consequences that were not obvious from the decision as written:
+
+- **"Awaiting" is not a status, it is a query.** No column was added for it. A
+  row is awaiting when it has a `reconciled_at`, is not yet resolved, and its
+  deadline is in the future — which is one store method, read by both the grace
+  pass and the agent's context injection. The day view P4 builds reads the same
+  one, so the "awaiting distinct from missed" this cost note asks for is a
+  filter rather than a third state to keep in sync.
+- **The window a partial answer stays open for is exactly this window.** That
+  falls out rather than being designed: there is only one set, so an occurrence
+  the agent can still resolve and an occurrence the reconciler has not yet
+  concluded on are the same row by construction.
+
+`resolution_source = 'reconciler'` was added (migration `0004`) rather than
+reusing `sweeper`. The sweeper resolves nothing, and this column exists to
+answer where resolutions actually come from — a source naming a loop that never
+wrote one would have made that number unreadable for the month it takes to
+collect. It is also the only source no user-facing surface can write: nobody
+reports a miss, the system concludes one.
+
 ---
 
 ## D-009: Reconciliation is one message, and it is the same code path as batch completion

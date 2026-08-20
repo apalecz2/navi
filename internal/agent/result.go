@@ -27,8 +27,16 @@ type Occurrence struct {
 // confirmation is better for saying "already done" than for claiming credit.
 type Resolved struct {
 	OccurrenceID string `json:"occurrence_id"`
-	Status       string `json:"status"`
-	Applied      bool   `json:"applied"`
+
+	// ItemTitle is what the confirmation names. A resolution reply says
+	// "marked stretching and vitamins done", never an occurrence id, and this
+	// is the only place the mapping is available for free — the renderer has
+	// no store. Empty when the item could not be read, which the renderer
+	// degrades to a count rather than treating as an error.
+	ItemTitle string `json:"item_title,omitempty"`
+
+	Status  string `json:"status"`
+	Applied bool   `json:"applied"`
 
 	// ChainCompleted is the snooze chain rolled up (D-011, R7): true when any
 	// link of this chain has completed, which is what a streak counts. A

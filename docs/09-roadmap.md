@@ -206,10 +206,28 @@ it is the wrong one to rush. Everything after it is recoverable.
 
 **Goal.** The app stops nagging and starts asking.
 
-- `notify_policy` including `silent`
-- Reconciler loop, per-item and global timing
-- Consolidated check-in composition, with a templated fallback
-- `context_ref` on conversation rows so replies are recognised
+- `notify_policy` including `silent` — done, session 16. It was already excluded
+  from `ListDueOccurrences`; what was missing was the loop that surfaces it
+- Reconciler loop, per-item and global timing — done, session 16.
+  `RECONCILE_AT` is the global time, resolved against the device timezone;
+  `items.reconcile_at` overrides it and **triggers its own pass** rather than
+  joining the global one, which is what US-5.4 asks for. K4's one-message rule
+  therefore binds per pass, and a pass covers every item due to be asked at or
+  before it — so the evening pass still sweeps an afternoon item's later
+  occurrence. `kv.last_reconcile_date` holds the last completed *slot*
+  (`2026-08-19T21:00`), not a bare date, or the afternoon pass would suppress
+  the evening one
+- Consolidated check-in composition, with a templated fallback — the **template**
+  is done, session 16, and it was built first on purpose: it is the fallback
+  D-009 requires, so building it first means it is exercised on every run
+  rather than only when the model is down. The model composer is not built
+- `context_ref` on conversation rows so replies are recognised — written,
+  session 16. `reconcile:{date}` on the check-in's own row. Nothing *reads* it
+  yet; that is the reply path
+- `occurrences.reconciled_at`, written on every row a check-in asked about —
+  session 16, and it is the instant grace measures from. Not on the original
+  list, and it is what makes "already asked" a per-row fact rather than a
+  per-pass one
 - `POST /api/occurrences/bulk-resolve`, atomic — the **tool** moved forward to
   P2 (session 15), because the last P2 exit criterion needed the agent to
   resolve an occurrence and a single-occurrence tool is what 06-agent-spec
@@ -217,16 +235,27 @@ it is the wrong one to rush. Everything after it is recoverable.
   surface that calls it, which is the web app in P4
 - `skipped` distinct from `missed`, with resolution notes
 - Grace period, then `missed` assignment
-- `pause`, item-scoped and global
+- `pause`, item-scoped and global — done, session 16. `POST /api/items/{id}/pause`,
+  `POST /api/pause`, and the agent's `pause` tool, all three reaching
+  `materializer.Pause` / `PauseAll` so a pause set by conversation and one set by
+  the web app cannot come out meaning different things
 
 **Exit criteria**
 
-- [ ] A silent stretching reminder never pushes but appears in the evening check-in
-- [ ] One message covers all outstanding items, not one per item
+- [x] A silent stretching reminder never pushes but appears in the evening check-in
+- [x] One message covers all outstanding items, not one per item
 - [ ] "Stretching and vitamins yes, skipped the walk" resolves all three in one write
 - [ ] "Did everything except the walk, I was away" records a skip with a reason
-- [ ] Nothing is marked missed before the check-in has asked
-- [ ] "Pause everything until Monday" suppresses notifications and reconciliation
+- [x] Nothing is marked missed before the check-in has asked
+- [x] "Pause everything until Monday" suppresses notifications and reconciliation
+
+The first two, the fifth and the sixth are `cmd/naviseed`'s `reportReconcile`
+and `reportPauseEndpoints`, which drive a real check-in against a recording
+transport and both pause routes through a real `httpapi` handler. The two open
+ones are the reply path: `store.BulkResolve` and the tool already exist, so what
+is missing is recognising a reply as an answer to a `context_ref` rather than as
+a new request — that, the grace window, and `missed` assignment land together,
+so the assignment never runs for a session with nothing able to prevent it.
 
 ---
 

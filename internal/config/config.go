@@ -116,7 +116,29 @@ type Schedule struct {
 	// /usr/share/zoneinfo, and a missing tzdb looks like correct behaviour right
 	// up until the first DST boundary.
 	DefaultTZ *time.Location
+
+	// ReconcileAt is the global daily check-in time (K3, K8) as a zero-padded
+	// local HH:MM, resolved against the device timezone rather than any item's.
+	// items.reconcile_at overrides it per item; NULL there means this value.
+	//
+	// An environment variable rather than a constant in internal/reconciler,
+	// against the rule that loop intervals are constants: an interval is a
+	// design fact from the loop table, but what time of day a person wants to
+	// be asked is a preference, and it is the same shape 11-goals-spec gives
+	// BRIEFING_AT for the identical P3.5 job.
+	ReconcileAt string
 }
+
+// LocalTimeLayout is how a wall-clock time of day is spelled in this
+// configuration and in items.reconcile_at: zero-padded 24-hour HH:MM. Fixed
+// width and zero-padded is what makes a lexicographic comparison between two
+// of them the chronological one, which is the property the reconciler's gather
+// query relies on — the same argument domain.TimeLayout makes for instants.
+const LocalTimeLayout = "15:04"
+
+// DefaultReconcileAt is the global check-in time when RECONCILE_AT is unset.
+// 21:00 is the hour US-5.1 and Q-6 both illustrate the evening check-in with.
+const DefaultReconcileAt = "21:00"
 
 // Transport names the adapter filling each transport role. Both point at the
 // same one to start with (D-006); they stay separate because that split is the
@@ -227,6 +249,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Never joins the required set: it always has a default, so
+	// required-when-consumed has nothing to insist on. What it does insist on
+	// is the format, because "9pm" parses as no time at all and the reconciler
+	// compares it as a string against a zero-padded HH:MM.
+	if cfg.Schedule.ReconcileAt, err = envLocalTime("RECONCILE_AT", DefaultReconcileAt); err != nil {
+		return Config{}, err
+	}
+
 	// Required now: the scheduler resolves an adapter from this in the same
 	// commit that reads it.
 	if cfg.Transport.Notify, err = envRequiredString("NOTIFY_TRANSPORT", LoggingTransport); err != nil {
@@ -315,6 +345,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("data_dir", c.Data.Dir),
 		slog.String("config_dir", c.Files.ConfigDir),
 		slog.String("default_tz", c.Schedule.DefaultTZ.String()),
+		slog.String("reconcile_at", c.Schedule.ReconcileAt),
 
 		// Which adapter is delivering reminders is the one setting whose wrong
 		// value looks exactly like a working system, so it goes in the line that
@@ -346,6 +377,17 @@ func envRequiredString(key, def string) (string, error) {
 	}
 	if v == "" {
 		return "", missing(key)
+	}
+	return v, nil
+}
+
+// envLocalTime reads a zero-padded local HH:MM. The layout is time's own, so
+// "21:00" parses and "9pm", "21:0" and "25:00" do not — a rejected value is a
+// failed boot rather than a check-in that never fires.
+func envLocalTime(key, def string) (string, error) {
+	v := envString(key, def)
+	if _, err := time.Parse(LocalTimeLayout, v); err != nil {
+		return "", fmt.Errorf("config: %s: %q is not a local HH:MM time", key, v)
 	}
 	return v, nil
 }

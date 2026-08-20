@@ -237,3 +237,53 @@ func (s *Store) ArchiveItem(
 	}
 	return item, applied, nil
 }
+
+// PauseItemAndMaterialize sets or lifts items.paused_until and re-plans the
+// item's future occurrences, both in one transaction (I6).
+//
+// It is a sibling of ArchiveItem rather than a field on ItemPatch for two
+// reasons. The obvious one is that UpdateItem's SET list does not carry
+// paused_until and adding it would make every unrelated edit able to clear a
+// pause by omission. The load-bearing one is that the caller builds
+// rematerialize from the item *as it will be stored* - already paused - so
+// materializer.run.paused sees the new window, no slot is generated inside it,
+// and every pending row that now falls in it lands in the plan's Delete set.
+// That is 05-schedule-spec's "occurrences that already exist inside a
+// newly-created pause window are deleted if pending" with no code that knows
+// about pauses: the same generate == false machinery an archived item already
+// takes, and the same delete guard that keeps history and overrides out of
+// reach.
+//
+// A nil until lifts the pause, and the same re-materialization then refills the
+// window that was suppressed. Nothing about resuming needs its own path.
+func (s *Store) PauseItemAndMaterialize(
+	ctx context.Context,
+	id string,
+	until *time.Time,
+	now time.Time,
+	rematerialize func(item domain.Item, existing []domain.Occurrence) (Plan, error),
+) (domain.Item, Applied, error) {
+	var item domain.Item
+	var applied Applied
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		row, err := q.PauseItem(ctx, sqlc.PauseItemParams{
+			PausedUntil: formatTimePtr(until),
+			UpdatedAt:   domain.FormatTime(now),
+			ID:          id,
+		})
+		if err != nil {
+			return notFound("store: pause item", err)
+		}
+		if item, err = toDomainItem(row); err != nil {
+			return err
+		}
+		applied, err = s.materializeTx(ctx, q, item, now, func(existing []domain.Occurrence) (Plan, error) {
+			return rematerialize(item, existing)
+		})
+		return err
+	})
+	if err != nil {
+		return domain.Item{}, Applied{}, fmt.Errorf("store: pause item: %w", err)
+	}
+	return item, applied, nil
+}

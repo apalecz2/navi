@@ -118,6 +118,13 @@ done" message is the kind of thing that is pleasant for a week and then noise.
 
 **Leaning:** silence, with the completion visible in the day view.
 
+**Settled in session 16, as the leaning.** `reconciler.Reconcile` sends nothing
+when the gather comes back empty. One wrinkle worth recording because it is not
+obvious from the question: the pass still advances
+`kv.last_reconcile_date` on an empty day. Silence is the absence of a *message*,
+not the absence of a pass, and without the latch advancing the reconciler would
+re-evaluate the same slot every sixty seconds until midnight.
+
 ---
 
 ## Needs an answer before P3.5

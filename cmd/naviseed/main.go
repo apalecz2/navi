@@ -45,6 +45,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/metrics"
 	"github.com/aidenpaleczny/navi/internal/model"
+	"github.com/aidenpaleczny/navi/internal/reconciler"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/scheduler"
 	"github.com/aidenpaleczny/navi/internal/store"
@@ -155,6 +156,21 @@ func run() error {
 	// surface, and the only one that can resolve an occurrence that has not
 	// fired yet.
 	if err := reportBulkResolve(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// After every resolution surface, because the check-in is about what none of
+	// them resolved: it needs a silent row nothing fired, a notified row nothing
+	// answered, and a resolved row to be absent, and only the sections above can
+	// leave the second and third in an honest state.
+	if err := reportReconcile(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// Beside it: pausing is the other half of P3's first session, and the
+	// check-in honouring a pause is asserted inside reportReconcile rather than
+	// here, because it is a property of the check-in and not of the endpoint.
+	if err := reportPauseEndpoints(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
 		return err
 	}
 
@@ -1452,7 +1468,8 @@ func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Lo
 		return err
 	}
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
-		health.New(), m, st, time.Time{}, loc, nil)
+		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, loc),
+		time.Time{}, loc, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/resolve",
@@ -1640,7 +1657,8 @@ func reportSnooze(ctx context.Context, st *store.Store, tz string, fallback *tim
 
 	m := metrics.New()
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
-		health.New(), m, st, time.Time{}, fallback, nil)
+		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, fallback),
+		time.Time{}, fallback, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/snooze",
@@ -2686,6 +2704,539 @@ func reportSnoozeDeltas() {
 		beforeDST, time.Date(2027, 3, 14, 3, 0, 0, 0, toronto), schedule.FoldGap)
 }
 
+// reportReconcile drives the daily check-in end to end against a transport that
+// records instead of delivering, the same way reportFire drives the scheduler.
+//
+// Two scenarios, and they anchor their clocks differently on purpose. The first
+// runs against the real clock, because the notified row in it has to reach
+// notified the way production does - through a real scheduler pass, which
+// claims only rows inside its own recovery window. The second fabricates its
+// instants, because what it checks is which pass sees which item, and two
+// passes at two different times of day are not otherwise observable on a single
+// run.
+//
+// The latch is reset between them. kv.last_reconcile_date is one key shared by
+// every pass, so a scenario that ran at 16:00 would block a fabricated 14:00
+// one - which is the mechanism working, not a bug, and resetting is how the
+// second scenario gets to exercise it from a known state.
+func reportReconcile(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\nreconcile  the daily check-in")
+
+	// The device zone, not DEFAULT_TZ. The reconciler resolves its clock and its
+	// day boundary with schedule.Zones.Local(), and reportZones above has
+	// already moved kv.current_tz to Europe/Lisbon - so a check written against
+	// the deployment default would be five hours out and would fail or pass by
+	// the hour of day it ran at. That is the shape of the from_date assertion
+	// that survived twelve sessions by only failing in the afternoon.
+	zones, err := schedule.LoadZones(ctx, st, fallback)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	m := metrics.New()
+
+	// The layout the reconciler compares slots with has to be the one config
+	// validates RECONCILE_AT against, or a pass could be due by one and not the
+	// other. They are separate constants because internal/config is the
+	// environment reader and nothing outside main depends on it; this is the
+	// assertion that keeps the duplication honest.
+	fmt.Printf("  slot layout             config=%q reconciler=%q  %s\n",
+		config.LocalTimeLayout, reconciler.LocalTimeLayout,
+		verdict(config.LocalTimeLayout == reconciler.LocalTimeLayout))
+
+	resetLatch := func() error {
+		return st.RecordCheckIn(ctx, nil, "", nil, time.Now())
+	}
+	if err := resetLatch(); err != nil {
+		return err
+	}
+
+	// --- scenario one: what a check-in covers -------------------------------
+
+	now := time.Now()
+	nowHM := now.In(loc).Format(reconciler.LocalTimeLayout)
+
+	// The pass runs at the instant this scenario calls "now", so the slot is
+	// now's own local HH:MM: it has arrived by definition, and no lookback can
+	// stray onto yesterday near midnight.
+	rec := &recordingTransport{}
+	r := reconciler.New(log.With("loop", "reconciler"), st, rec, m, nowHM, fallback)
+
+	silent, err := seedFireItem(ctx, st, "reconcile silent probe", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	loud, err := seedFireItem(ctx, st, "reconcile notified probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+	settled, err := seedFireItem(ctx, st, "reconcile resolved probe", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+
+	// A minute ago, but never earlier than local midnight: the pass gathers
+	// [midnight, now], and for the one minute a day when those two are less than
+	// a minute apart a bare now-1min would land on yesterday and be invisible.
+	// The scheduler's claim window is fifteen minutes, so clamping here still
+	// leaves the row claimable.
+	at := now.Add(-time.Minute)
+	local := now.In(loc)
+	if midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc); at.Before(midnight) {
+		at = midnight
+	}
+
+	silentOcc, err := fireOccurrence(ctx, st, silent, at, nil)
+	if err != nil {
+		return err
+	}
+	loudOcc, err := fireOccurrence(ctx, st, loud, at, ptr("reconcile notified body"))
+	if err != nil {
+		return err
+	}
+	settledOcc, err := fireOccurrence(ctx, st, settled, at, ptr("reconcile resolved body"))
+	if err != nil {
+		return err
+	}
+
+	// The at_time row reaches notified through a real scheduler pass. The silent
+	// one does not move: ListDueOccurrences filters notify_policy = 'at_time',
+	// so K2's "a silent item still generates occurrences" and K5's "covers both"
+	// are the same row seen from two loops.
+	if err := fireAll(ctx, st, m, log); err != nil {
+		return err
+	}
+	loudStatus, err := statusOf(ctx, st, loudOcc.ID)
+	if err != nil {
+		return err
+	}
+	silentStatus, err := statusOf(ctx, st, silentOcc.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  before the check-in     silent=%s notified=%s  %s\n",
+		silentStatus, loudStatus,
+		verdict(silentStatus == domain.StatusPending && loudStatus == domain.StatusNotified))
+
+	// Resolved before the check-in, so it is absent from it rather than listed
+	// and then explained away.
+	if _, err := st.ResolveOccurrence(ctx, settledOcc.ID, domain.StatusCompleted,
+		ptr("did it at breakfast"), domain.ResolvedByWeb, time.Now()); err != nil {
+		return err
+	}
+
+	res, err := r.Reconcile(ctx, now)
+	if err != nil {
+		return err
+	}
+	body := ""
+	if len(rec.sent) > 0 {
+		body = rec.sent[len(rec.sent)-1].Body
+	}
+	oneMessage := len(rec.sent) == 1 && res.Sent
+	fmt.Printf("  one message, not one per item  sent=%d covering %d occurrence(s)  %s\n",
+		len(rec.sent), res.Occurrences, verdict(oneMessage))
+	fmt.Printf("    %s\n", strings.ReplaceAll(body, "\n", "\n    "))
+
+	hasSilent := strings.Contains(body, silent.Title)
+	hasLoud := strings.Contains(body, loud.Title)
+	hasSettled := strings.Contains(body, settled.Title)
+	fmt.Printf("  silent item listed      %v  (it never pushed)                 %s\n",
+		hasSilent, verdict(hasSilent))
+	fmt.Printf("  notified item listed    %v  (it pushed and was ignored)       %s\n",
+		hasLoud, verdict(hasLoud))
+	fmt.Printf("  resolved item listed    %v  (absent, K5)                      %s\n",
+		hasSettled, verdict(!hasSettled))
+
+	// reconciled_at is the instant next session's grace window measures from,
+	// and it is written on exactly what was asked about.
+	askedSilent, err := reconciledAt(ctx, st, silentOcc.ID)
+	if err != nil {
+		return err
+	}
+	askedSettled, err := reconciledAt(ctx, st, settledOcc.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  reconciled_at written   asked=%v resolved-row=%v  %s\n",
+		askedSilent, askedSettled, verdict(askedSilent && !askedSettled))
+
+	// Nothing is missed. K6 and D-008: the check-in has asked, and until the
+	// grace window closes on an unanswered question nothing may say otherwise.
+	missed, err := countStatus(ctx, st, []string{silent.ID, loud.ID, settled.ID}, domain.StatusMissed)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  nothing marked missed   %d  %s\n", missed, verdict(missed == 0))
+
+	// The restart case, minus the restart: the latch is durable, so a second
+	// pass at the same slot finds it already run and says nothing.
+	before := len(rec.sent)
+	second, err := r.Reconcile(ctx, now)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  second pass, same slot  slot=%q sent=%d  %s\n",
+		second.Slot, len(rec.sent)-before,
+		verdict(second.Slot == "" && !second.Sent && len(rec.sent) == before))
+
+	// --- pause, at both levels ---------------------------------------------
+
+	if err := resetLatch(); err != nil {
+		return err
+	}
+	pauseOcc, err := fireOccurrence(ctx, st, silent, at, nil)
+	if err != nil {
+		return err
+	}
+	_ = pauseOcc
+
+	if err := st.SetGlobalPauseUntil(ctx, now.Add(72*time.Hour)); err != nil {
+		return err
+	}
+	pausedRes, err := r.Reconcile(ctx, now)
+	if err != nil {
+		return err
+	}
+	latch, _, err := st.LastReconcileSlot(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global pause            suppressed=%v sent=%d latch=%q  %s\n",
+		pausedRes.Paused, len(rec.sent)-before, latch,
+		verdict(pausedRes.Paused && !pausedRes.Sent && len(rec.sent) == before && latch == ""))
+
+	if err := st.ClearGlobalPause(ctx); err != nil {
+		return err
+	}
+
+	// A row on a second item, so the next pass has something to say once the
+	// paused one drops out. Without it the pass would be silent for the ordinary
+	// reason - nothing outstanding - and "the paused item is absent" would pass
+	// for the wrong one.
+	if _, err := fireOccurrence(ctx, st, loud, at, ptr("reconcile unpaused body")); err != nil {
+		return err
+	}
+
+	// One item paused, the rest still asked about. This is what makes pausing a
+	// window rather than a resolution: the occurrence is neither listed nor
+	// skipped, it is simply not the subject of a question.
+	if _, _, err := st.PauseItemAndMaterialize(ctx, silent.ID, ptr(now.Add(72*time.Hour)), now,
+		func(domain.Item, []domain.Occurrence) (store.Plan, error) { return store.Plan{}, nil }); err != nil {
+		return err
+	}
+	itemPausedRes, err := r.Reconcile(ctx, now)
+	if err != nil {
+		return err
+	}
+	pausedBody := ""
+	if len(rec.sent) > 0 {
+		pausedBody = rec.sent[len(rec.sent)-1].Body
+	}
+	stillAsked := itemPausedRes.Sent &&
+		!strings.Contains(pausedBody, silent.Title) &&
+		strings.Contains(pausedBody, loud.Title)
+	fmt.Printf("  one item paused         paused item listed=%v, unpaused one listed=%v  %s\n",
+		strings.Contains(pausedBody, silent.Title),
+		strings.Contains(pausedBody, loud.Title), verdict(stillAsked))
+	if _, _, err := st.PauseItemAndMaterialize(ctx, silent.ID, nil, now,
+		func(domain.Item, []domain.Occurrence) (store.Plan, error) { return store.Plan{}, nil }); err != nil {
+		return err
+	}
+
+	// --- scenario two: per-item timing (K8) vs the one-message rule (K4) ----
+
+	return reportReconcileTiming(ctx, st, tz, fallback, m, log, loc)
+}
+
+// reportReconcileTiming is US-5.4: an item checked at 14:00 rather than 21:00.
+//
+// The decision this asserts is that a per-item reconcile_at triggers its own
+// pass rather than joining the global one, so K4's one-message rule binds per
+// pass. The other half of the decision is that the later pass still sweeps
+// whatever the earlier one could not see yet - an occurrence that started after
+// it - which is what occurrences.reconciled_at makes possible without either
+// pass knowing the other exists.
+//
+// Instants are fabricated so both passes happen on one run whatever the wall
+// clock says.
+func reportReconcileTiming(
+	ctx context.Context,
+	st *store.Store,
+	tz string,
+	fallback *time.Location,
+	m *metrics.Metrics,
+	log *slog.Logger,
+	loc *time.Location,
+) error {
+	if err := st.RecordCheckIn(ctx, nil, "", nil, time.Now()); err != nil {
+		return err
+	}
+
+	rec := &recordingTransport{}
+	r := reconciler.New(log.With("loop", "reconciler-timing"), st, rec, m, "21:00", fallback)
+
+	early, err := seedFireItem(ctx, st, "reconcile midday probe", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	if early.ReconcileAt == nil {
+		updated, _, err := st.UpdateItemAndMaterialize(ctx, early.ID,
+			store.ItemPatch{ReconcileAt: ptr("14:00")}, time.Now(), nil)
+		if err != nil {
+			return err
+		}
+		early = updated
+	}
+	evening, err := seedFireItem(ctx, st, "reconcile evening probe", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+
+	// Yesterday, not today, and for two reasons. A completed day is isolated:
+	// every other section's rows are today's, so neither pass here can see them
+	// and both assertions are about exactly the items this function seeded.
+	// And it keeps the clock this fabricates behind the real one - RecordCheckIn
+	// stamps its conversations row with the pass's own instant, so a pass
+	// fabricated at 21:30 today would write a row dated hours in the future and
+	// sort itself to the top of the history the conversation ladder loads much
+	// later in this run. That is a real property of the row, not an artifact:
+	// the timestamp is the moment the check-in asked.
+	day := time.Now().In(loc).AddDate(0, 0, -1)
+	localAt := func(hour, min int) time.Time {
+		return time.Date(day.Year(), day.Month(), day.Day(), hour, min, 0, 0, loc)
+	}
+
+	// One occurrence of each before the midday pass, plus a second for the
+	// midday item after it - the row only the evening pass can reach.
+	if _, err := fireOccurrence(ctx, st, early, localAt(8, 0), nil); err != nil {
+		return err
+	}
+	if _, err := fireOccurrence(ctx, st, evening, localAt(8, 0), nil); err != nil {
+		return err
+	}
+	if _, err := fireOccurrence(ctx, st, early, localAt(18, 0), nil); err != nil {
+		return err
+	}
+
+	midday, err := r.Reconcile(ctx, localAt(14, 30))
+	if err != nil {
+		return err
+	}
+	middayBody := ""
+	if len(rec.sent) > 0 {
+		middayBody = rec.sent[len(rec.sent)-1].Body
+	}
+	middayOK := midday.Slot == "14:00" &&
+		strings.Contains(middayBody, early.Title) &&
+		!strings.Contains(middayBody, evening.Title)
+	fmt.Printf("  14:00 pass              slot=%q covers the 14:00 item only  %s\n",
+		midday.Slot, verdict(middayOK))
+
+	night, err := r.Reconcile(ctx, localAt(21, 30))
+	if err != nil {
+		return err
+	}
+	nightBody := ""
+	if len(rec.sent) > 0 {
+		nightBody = rec.sent[len(rec.sent)-1].Body
+	}
+	// The 14:00 item is named again, but for its 18:00 row and not its 08:00
+	// one - reconciled_at is per row, so nothing is asked about twice while
+	// nothing outstanding is dropped either (Q-4's leaning).
+	nightOK := night.Slot == "21:00" &&
+		strings.Contains(nightBody, evening.Title) &&
+		strings.Contains(nightBody, early.Title)
+	fmt.Printf("  21:00 pass              slot=%q sweeps the rest, including the later midday row  %s\n",
+		night.Slot, verdict(nightOK))
+	fmt.Printf("    %s\n", strings.ReplaceAll(nightBody, "\n", "\n    "))
+	return nil
+}
+
+// reportPauseEndpoints drives POST /api/items/{id}/pause and POST /api/pause
+// through a real httpapi server, the way reportResolve drives resolution.
+//
+// The state they write is the state reportPause above already checked by
+// setting it by hand; what is new here is the way to set it, and the two things
+// worth asserting are that a pause clears the window's pending rows through the
+// endpoint rather than through a second code path, and that lifting one brings
+// them back.
+func reportPauseEndpoints(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\npause  POST /api/items/{id}/pause and POST /api/pause")
+
+	m := metrics.New()
+	mat := materializer.New(log.With("component", "mat-pause"), st, fallback)
+	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
+		health.New(), m, st, mat, time.Time{}, fallback, nil)
+
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+
+	// A daily item, so there is a fortnight of pending rows for a pause to have
+	// an effect on. The one-off probes the fire path uses would show nothing.
+	item, err := seedPauseItem(ctx, st, tz)
+	if err != nil {
+		return err
+	}
+	if _, err := mat.Item(ctx, item.ID); err != nil {
+		return err
+	}
+
+	// The window the request asks for and the window this counts have to be the
+	// same instants, or a row on the boundary day reads as a pause that did not
+	// work. The endpoint resolves the date to local midnight in the *device*
+	// zone, so this builds it the same way rather than formatting an instant in
+	// DEFAULT_TZ and hoping the two agree - reportZones has already moved the
+	// device zone five hours away from it.
+	zones, err := schedule.LoadZones(ctx, st, fallback)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+
+	now := time.Now()
+	local := now.In(loc)
+	until := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 7)
+	untilDate := until.Format(domain.DateLayout)
+	window := func() (int, error) { return countBetween(ctx, st, item, now, until) }
+
+	before, err := window()
+	if err != nil {
+		return err
+	}
+
+	// A resolved row in the past and an override in the window, both of which
+	// the pause must leave alone: history is immutable (invariant 2) and an
+	// override is a deliberate exception the materializer never touches.
+	history, err := fireOccurrence(ctx, st, item, now.Add(-48*time.Hour), nil)
+	if err != nil {
+		return err
+	}
+	if _, err := st.ResolveOccurrence(ctx, history.ID, domain.StatusCompleted, nil,
+		domain.ResolvedByWeb, time.Now()); err != nil {
+		return err
+	}
+	override, err := fireOccurrence(ctx, st, item, now.Add(72*time.Hour), nil)
+	if err != nil {
+		return err
+	}
+
+	paused := post("/api/items/"+item.ID+"/pause", `{"until":"`+untilDate+`"}`)
+	during, err := window()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  item paused until %s  status %d  window %d -> %d  deleted=%d  %s\n",
+		untilDate, paused.Code, before, during, pausedDeleted(paused.Body.Bytes()),
+		verdict(paused.Code == http.StatusOK && before > 0 && during == 0))
+
+	historyStatus, err := statusOf(ctx, st, history.ID)
+	if err != nil {
+		return err
+	}
+	overrideStatus, err := statusOf(ctx, st, override.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  history and overrides   completed row=%s override row=%s  %s\n",
+		historyStatus, overrideStatus,
+		verdict(historyStatus == domain.StatusCompleted && overrideStatus == domain.StatusPending))
+
+	lifted := post("/api/items/"+item.ID+"/pause", `{"until":null}`)
+	after, err := window()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  item unpaused           status %d  window %d  %s   (redrawn: D-005)\n",
+		lifted.Code, after, verdict(lifted.Code == http.StatusOK && after > 0))
+
+	// Global, and then the fire path, which is the criterion the roadmap
+	// actually states: pausing suppresses notifications.
+	global := post("/api/pause", `{"until":"`+untilDate+`"}`)
+	globalWindow, err := window()
+	if err != nil {
+		return err
+	}
+	due, err := fireOccurrence(ctx, st, item, now.Add(-time.Minute), ptr("paused body"))
+	if err != nil {
+		return err
+	}
+	rec := &recordingTransport{}
+	sched := scheduler.New(log.With("component", "scheduler-pause"), st, rec, m, time.Now())
+	fired, err := sched.Fire(ctx)
+	if err != nil {
+		return err
+	}
+	dueStatus, err := statusOf(ctx, st, due.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global pause            status %d  window %d  fire paused=%v sent=%d row still %s  %s\n",
+		global.Code, globalWindow, fired.Paused, len(rec.sent), dueStatus,
+		verdict(global.Code == http.StatusOK && globalWindow == 0 && fired.Paused &&
+			len(rec.sent) == 0 && dueStatus == domain.StatusPending))
+
+	unpaused := post("/api/pause", `{"until":null}`)
+	globalAfter, err := window()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global unpaused         status %d  window %d  %s\n",
+		unpaused.Code, globalAfter,
+		verdict(unpaused.Code == http.StatusOK && globalAfter > 0))
+
+	bad := post("/api/pause", `{"until":"next monday"}`)
+	fmt.Printf("  malformed until         status %d  %s\n",
+		bad.Code, verdict(bad.Code == http.StatusBadRequest))
+	return nil
+}
+
+// seedPauseItem creates a plain daily reminder on first run and reuses it
+// afterwards - something with enough future rows for a pause window to empty.
+func seedPauseItem(ctx context.Context, st *store.Store, tz string) (domain.Item, error) {
+	const title = "pause endpoint probe"
+
+	existing, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return domain.Item{}, err
+	}
+	for _, it := range existing {
+		if it.Title == title {
+			return it, nil
+		}
+	}
+	return st.CreateItem(ctx, domain.NewItem{
+		Title:    title,
+		Schedule: json.RawMessage(`{"kind":"fixed","rrule":"FREQ=DAILY","at":"07:30"}`),
+		TZ:       tz,
+	})
+}
+
+// pausedDeleted reads occurrences_deleted off a pause response.
+func pausedDeleted(body []byte) int {
+	var out struct {
+		OccurrencesDeleted int `json:"occurrences_deleted"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return -1
+	}
+	return out.OccurrencesDeleted
+}
+
+// reconciledAt reports whether the check-in has already asked about a row.
+func reconciledAt(ctx context.Context, st *store.Store, id string) (bool, error) {
+	occ, err := st.GetOccurrence(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return occ.ReconciledAt != nil, nil
+}
+
 // currentState reads the current_state field a 409 body carries.
 func currentState(body []byte) string {
 	var out struct {
@@ -3581,7 +4132,97 @@ func reportAgentTools(ctx context.Context, st *store.Store, table *defaults.Tabl
 	if err := reportUpdateScopes(ctx, t, st, mat, defaultTZ); err != nil {
 		return err
 	}
+	if err := reportPauseTool(ctx, t, st); err != nil {
+		return err
+	}
 	return reportDeleteItem(ctx, t, st)
+}
+
+// reportPauseTool drives the pause tool at both scopes, plus the two Layer 2
+// rejections that are the whole of its semantic validation.
+//
+// The tool and the endpoint reach the same two materializer entry points, so
+// what is worth checking here is the argument handling the endpoint does not
+// share: that scope and item_id have to agree, and that a global pause records
+// no last touched item because it resolved to none.
+func reportPauseTool(ctx context.Context, t *agent.Tools, st *store.Store) error {
+	fmt.Println("\nagent pause")
+
+	item, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "agent pause probe",
+		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("08:15")},
+	})
+	if err != nil {
+		return err
+	}
+	id := item.Item.ID
+
+	until := time.Now().AddDate(0, 0, 5).Format(domain.DateLayout)
+	scoped, err := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "item", Until: until, ItemID: &id})
+	if err != nil {
+		return err
+	}
+	paused, err := st.GetItem(ctx, id)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  scope=item until %s   paused_until=%s deleted=%d  %s\n",
+		until, presence(paused.PausedUntil != nil), scoped.Applied.Deleted,
+		verdict(paused.PausedUntil != nil && scoped.Applied.Deleted > 0))
+
+	touched, _, err := st.LastTouchedItemID(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  last touched recorded  %v  %s\n", touched == id, verdict(touched == id))
+
+	if _, err := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "item", ItemID: &id}); err != nil {
+		return err
+	}
+	lifted, err := st.GetItem(ctx, id)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  empty until resumes    paused_until=%s  %s\n",
+		presence(lifted.PausedUntil != nil), verdict(lifted.PausedUntil == nil))
+
+	// scope=global writes kv rather than a column, and touches no item.
+	if _, err := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "global", Until: until}); err != nil {
+		return err
+	}
+	globalUntil, set, err := st.GlobalPauseUntil(ctx)
+	if err != nil {
+		return err
+	}
+	afterGlobal, _, err := st.LastTouchedItemID(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  scope=global until %s  set=%v last touched unchanged=%v  %s\n",
+		until, set, afterGlobal == touched,
+		verdict(set && globalUntil.After(time.Now()) && afterGlobal == touched))
+
+	if _, err := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "global"}); err != nil {
+		return err
+	}
+	_, stillSet, err := st.GlobalPauseUntil(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global resumed         key cleared=%v  %s\n", !stillSet, verdict(!stillSet))
+
+	// The two Layer 2 rejections. Neither reaches a write.
+	_, missingID := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "item", Until: until})
+	_, strayID := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "global", Until: until, ItemID: &id})
+	_, badDate := callTool(ctx, t, "pause", agent.PauseArgs{Scope: "global", Until: "next monday"})
+	var ve *domain.ValidationError
+	rejected := errors.As(missingID, &ve) && errors.As(strayID, &ve) && errors.As(badDate, &ve)
+	fmt.Printf("  layer 2 rejections     item without id, global with id, unparseable date  %s\n",
+		verdict(rejected))
+	if errors.As(missingID, &ve) {
+		fmt.Printf("    %s\n", ve.Message)
+	}
+	return nil
 }
 
 // callTool marshals args and drives them through Tools.Call, exactly as a

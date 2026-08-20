@@ -149,3 +149,56 @@ WHERE o.starts_at >= ?
   AND o.starts_at < ?
   AND i.archived_at IS NULL
 ORDER BY o.starts_at, o.id;
+
+-- ListUnreconciled is what the daily check-in asks about (K5): everything
+-- still unresolved for the local day and never yet asked about, across every
+-- item. The bounds are the day's local midnight and now, resolved in the
+-- device zone, so an occurrence later today is future rather than outstanding.
+--
+-- Deliberately no notify_policy filter, which is the one difference from
+-- ListDueOccurrences above. K5 wants silent items - which never pushed and
+-- would otherwise be invisible - and at_time items that were notified and
+-- ignored, in the same message; naming the policies here would be a list to
+-- forget to update when Q-5 decides digest's fate.
+--
+-- reconciled_at IS NULL is what makes a row asked about at most once. It is a
+-- per-row fact rather than a per-pass one, so the 21:00 pass does not re-ask
+-- about an item whose own 14:00 override already covered it, and next
+-- session's grace window has the instant it measures from (K6, D-008).
+--
+-- The last predicate is K8: ifnull(reconcile_at, <global>) <= <this pass>.
+-- Both binds are zero-padded local HH:MM, so the string comparison is the
+-- chronological one. A pass therefore covers every item due to be asked at or
+-- before it, which is what lets the evening pass sweep an afternoon item's
+-- later occurrence. The cast is there for sqlc rather than for SQLite: without
+-- it the analyzer cannot infer a type for a bare placeholder inside ifnull and
+-- emits an interface{} parameter, which is a hole in exactly the typing this
+-- whole arrangement exists to get.
+--
+-- name: ListUnreconciled :many
+SELECT o.id, o.item_id, o.starts_at, o.status, i.title
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.status IN ('pending', 'notified')
+  AND o.reconciled_at IS NULL
+  AND o.starts_at >= ?
+  AND o.starts_at <= ?
+  AND i.kind = 'reminder'
+  AND i.active = 1
+  AND i.archived_at IS NULL
+  AND ifnull(i.paused_until, '0000-01-01T00:00:00Z') <= ?
+  AND ifnull(i.reconcile_at, cast(? as text)) <= ?
+ORDER BY o.starts_at, o.id;
+
+-- MarkReconciled records that the check-in asked about this row. It is not a
+-- status transition and must never be one: the occurrence is still pending or
+-- notified, and what it is waiting for is an answer. The reconciled_at IS NULL
+-- guard makes a re-run write nothing rather than move the instant grace is
+-- measured from, the same defence every other guarded write in this file
+-- carries.
+--
+-- name: MarkReconciled :execrows
+UPDATE occurrences
+SET reconciled_at = ?
+WHERE id = ?
+  AND reconciled_at IS NULL;

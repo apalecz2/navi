@@ -71,3 +71,24 @@ WHERE id = ? AND archived_at IS NULL
 RETURNING id, kind, title, notes, schedule, tz, tz_mode, notify_policy, priority,
     grace_period_minutes, reconcile_at, snooze_cap, active, paused_until, archived_at,
     attrs, source, external_id, etag, last_synced_at, created_at, updated_at;
+
+-- PauseItem is the only statement in this file that writes paused_until (I6).
+-- UpdateItem deliberately does not carry the column: pausing is a lifecycle
+-- change like archiving, not a field edit, and it re-materializes for a
+-- different reason - to clear the pending rows that now fall inside the
+-- window. A NULL first parameter lifts the pause, which is the same statement
+-- rather than a second one, because "away until Monday" is as revocable as it
+-- is settable.
+--
+-- Pending occurrences inside the new window are deleted by the caller's
+-- re-materialization, not here, exactly as ArchiveItem's are. See UpdateItem's
+-- comment above for why RETURNING spells out its columns and this file stays
+-- ASCII-only.
+--
+-- name: PauseItem :one
+UPDATE items
+SET paused_until = ?, updated_at = ?
+WHERE id = ? AND archived_at IS NULL
+RETURNING id, kind, title, notes, schedule, tz, tz_mode, notify_policy, priority,
+    grace_period_minutes, reconcile_at, snooze_cap, active, paused_until, archived_at,
+    attrs, source, external_id, etag, last_synced_at, created_at, updated_at;

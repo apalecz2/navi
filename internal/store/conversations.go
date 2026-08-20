@@ -50,17 +50,7 @@ func (s *Store) CreateConversation(ctx context.Context, n domain.NewConversation
 			}
 		}
 
-		row, err := q.CreateConversation(ctx, sqlc.CreateConversationParams{
-			ID:         domain.NewID(),
-			Role:       string(n.Role),
-			Content:    n.Content,
-			ToolCalls:  n.ToolCalls,
-			ToolCallID: n.ToolCallID,
-			Transport:  n.Transport,
-			ExternalID: n.ExternalID,
-			ContextRef: n.ContextRef,
-			CreatedAt:  domain.FormatTime(time.Now()),
-		})
+		row, err := q.CreateConversation(ctx, newConversationParams(n, domain.FormatTime(time.Now())))
 		if err != nil {
 			return fmt.Errorf("store: create conversation: %w", err)
 		}
@@ -75,6 +65,26 @@ func (s *Store) CreateConversation(ctx context.Context, n domain.NewConversation
 		return domain.Conversation{}, false, err
 	}
 	return conv, inserted, nil
+}
+
+// newConversationParams maps a domain row onto sqlc's insert parameters. It is
+// shared with RecordCheckIn, which writes its conversation row inside the same
+// transaction as the reconciliation it belongs to and so cannot call
+// CreateConversation - two copies of this mapping would be two places for a
+// field to be forgotten, and context_ref is exactly the field a second copy
+// would forget.
+func newConversationParams(n domain.NewConversation, createdAt string) sqlc.CreateConversationParams {
+	return sqlc.CreateConversationParams{
+		ID:         domain.NewID(),
+		Role:       string(n.Role),
+		Content:    n.Content,
+		ToolCalls:  n.ToolCalls,
+		ToolCallID: n.ToolCallID,
+		Transport:  n.Transport,
+		ExternalID: n.ExternalID,
+		ContextRef: n.ContextRef,
+		CreatedAt:  createdAt,
+	}
 }
 
 // GetConversation returns one conversation row, or ErrNotFound.

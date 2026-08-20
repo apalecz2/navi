@@ -310,6 +310,95 @@ func handleDeleteItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	return Result{Item: &archived, Applied: applied}, nil
 }
 
+// handlePause suspends everything, or one item, until a date (I6).
+//
+// It is the tool 06-agent-spec tells the model to prefer over a run of skips,
+// and the reason that preference matters is statistical rather than
+// conversational: eighteen skips are eighteen decisions in the completion
+// record, and a week away is one.
+//
+// Layer 2 is the scope/item_id pairing and the date format. Layer 3 is
+// materializer.Pause or PauseAll, which own the write and the re-plan together
+// — the same two entry points POST /api/items/{id}/pause and POST /api/pause
+// reach, so a pause set by conversation and one set by the web app cannot come
+// out meaning different things.
+//
+// The global scope makes two store calls rather than the usual one, which is
+// the one place this file's "exactly one store call per handler" shape does not
+// hold. It cannot: the kv write has to land before the re-plan reads it, and
+// putting a full materialization inside one transaction would hold the single
+// writer connection for the length of a nightly run. See PauseAll.
+func handlePause(ctx context.Context, t *Tools, raw json.RawMessage) (Result, error) {
+	args, err := decode[PauseArgs](raw)
+	if err != nil {
+		return Result{}, err
+	}
+
+	global := args.Scope == "global"
+	switch {
+	case global && args.ItemID != nil:
+		return Result{}, domain.Invalid("scope_item_id", "item_id",
+			"scope=global pauses everything and takes no item_id")
+	case !global && (args.ItemID == nil || *args.ItemID == ""):
+		return Result{}, domain.Invalid("scope_item_id", "item_id",
+			"scope=item requires item_id")
+	}
+
+	// The date resolves in the device zone rather than the item's, on the same
+	// argument the check-in's clock does: "until Monday" is a statement about
+	// where the user will be, not about where a reminder is anchored.
+	zones := schedule.Zones{Fallback: t.defaultTZ}
+	if name, ok, err := t.store.CurrentTZ(ctx); err == nil && ok {
+		if loc, err := schedule.LoadLocation(name); err == nil {
+			zones.Device = loc
+		}
+	}
+
+	var until *time.Time
+	if args.Until != "" {
+		at, err := time.ParseInLocation(domain.DateLayout, args.Until, zones.Local())
+		if err != nil {
+			return Result{}, domain.Invalid("pause_until_format", "until",
+				"until %q is not a date like 2006-01-02", args.Until)
+		}
+		until = &at
+	}
+
+	if global {
+		res, err := t.mat.PauseAll(ctx, until)
+		if err != nil {
+			return Result{}, wrapValidation(err)
+		}
+		// No SetLastTouchedItem: a global pause resolves to no item, so there
+		// is nothing for a follow-up "it" to mean.
+		return Result{PausedUntil: formatTimePtr(until), Applied: res.Applied}, nil
+	}
+
+	item, err := t.store.LiveItem(ctx, *args.ItemID)
+	if err != nil {
+		return Result{}, err
+	}
+
+	paused, applied, err := t.mat.Pause(ctx, item.ID, until)
+	if err != nil {
+		return Result{}, wrapValidation(err)
+	}
+	if err := t.store.SetLastTouchedItem(ctx, paused.ID); err != nil {
+		return Result{}, err
+	}
+	return Result{Item: &paused, PausedUntil: formatTimePtr(paused.PausedUntil), Applied: applied}, nil
+}
+
+// formatTimePtr renders an optional instant through domain.FormatTime, keeping
+// nil nil - the layout every timestamp this package hands outward uses.
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := domain.FormatTime(*t)
+	return &s
+}
+
 // handleBulkResolve records a batch of outcomes in one transaction.
 //
 // It is the tool behind "stretching and vitamins yes, skipped the walk" and

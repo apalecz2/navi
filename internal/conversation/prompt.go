@@ -19,10 +19,18 @@ const roleAndScope = `You are the conversational agent for Navi, a single-user r
 
 // behaviouralRules is system-prompt part 4. It names only the tools the
 // catalog actually has - list_items, create_item, update_item, delete_item,
-// bulk_resolve, request_escalation - and deliberately omits the doc's rules
-// about pause and propose_change, neither of which exists yet: an instruction
-// naming a tool that is not offered would mislead the model rather than help
-// it.
+// bulk_resolve, pause, request_escalation - and deliberately omits the doc's
+// rule about propose_change, which does not exist yet: an instruction naming a
+// tool that is not offered would mislead the model rather than help it. pause
+// joined the catalog and this list in the same commit, which is the discipline
+// that keeps the two honest.
+//
+// pause's rule is 06-agent-spec's "prefer pause over multiple skips when the
+// user indicates absence". It is worth stating rather than leaving to the tool
+// description because the wrong behaviour is plausible: "I'm away until Monday"
+// reads as a report about eighteen occurrences, and resolving it that way
+// produces eighteen skips in the completion record where the truth is one
+// absence.
 //
 // bulk_resolve's rule is 06-agent-spec's own, verbatim in intent: prefer it for
 // any message containing a completion, including exactly one. The tool is
@@ -34,15 +42,20 @@ const behaviouralRules = `Rules:
 - Always confirm a write in plain language, naming the next concrete occurrence times.
 - When a delete is clearly requested, call delete_item directly with confirmed=true rather than asking first - the tool itself rejects an unconfirmed delete, and that rejection is your cue to retry with confirmed=true, not a reason to reply in prose instead.
 - Prefer bulk_resolve for any message reporting that something was done, skipped, or missed - including a single one, and including something already done earlier in the day. It takes a list and writes all of it in one transaction, so one call covers "did everything except the walk". Take the occurrence ids from the Today's occurrences block; never guess one.
+- Prefer pause over a run of skips when the user says they are away or unavailable for a stretch of time. "I'm away until Monday" is one pause with scope=global, not a skip for every occurrence in between. Use scope=item when only one reminder is affected. Pausing with no until resumes normal operation.
 - Call request_escalation when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable.
 - Always respond by calling exactly one tool. A plain-text reply with no tool call is treated as a failure, not an answer.`
 
 // buildSystemPrompt assembles the five-part system prompt
 // (docs/06-agent-spec.md#system-prompt-structure). Part 5, injected context,
 // is the full block this session: current time, device timezone, global
-// pause, active items, today's occurrences, and last touched. context_ref
-// stays absent - nothing writes it before P3's reconciliation check-ins
-// exist.
+// pause, active items, today's occurrences, and last touched.
+//
+// context_ref is still absent from the prompt even though the reconciler now
+// writes one onto its check-in row. It belongs in the *turn's* context - "this
+// message is a reply to reconcile:2026-08-19" - and that is the reply path,
+// which does not exist yet. Rendering the check-in's own context_ref here would
+// tell the model it is answering a question when it is being asked a new one.
 func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	var b strings.Builder
 

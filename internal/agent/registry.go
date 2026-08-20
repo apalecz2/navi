@@ -35,6 +35,7 @@ var registrations = []registration{
 	{"update_item", "Change an existing item's fields or schedule, at a chosen scope.", handleUpdateItem, UpdateItemArgs{}},
 	{"delete_item", "Archive an item and remove its pending occurrences. Requires confirmed=true.", handleDeleteItem, DeleteItemArgs{}},
 	{"bulk_resolve", "Record outcomes for one or more occurrences in a single atomic write. Use this for any message reporting a completion, a skip, or several at once — including a single one, and including something already done earlier today.", handleBulkResolve, BulkResolveArgs{}},
+	{"pause", "Suspend everything, or one item, until a date. Use this whenever the user says they are away or unavailable, instead of skipping each occurrence. An empty until resumes.", handlePause, PauseArgs{}},
 	{"request_escalation", "Terminate this turn and retry at the next tier. Call when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable. Writes nothing.", handleRequestEscalation, RequestEscalationArgs{}},
 }
 

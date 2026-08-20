@@ -15,6 +15,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/health"
+	"github.com/aidenpaleczny/navi/internal/materializer"
 	"github.com/aidenpaleczny/navi/internal/metrics"
 	"github.com/aidenpaleczny/navi/internal/store"
 )
@@ -42,7 +43,17 @@ type Store interface {
 	// CurrentTZ is read once per snooze, before the transaction opens, so the
 	// delta resolves against the zone the device is actually in (C6).
 	CurrentTZ(ctx context.Context) (string, bool, error)
+
+	// The three pause writes (I6). Item-scoped pausing re-materializes inside
+	// its own transaction, so it takes the same rematerialize callback
+	// UpdateItemAndMaterialize does; the global pair writes one kv row each and
+	// leaves the re-plan to the handler, which is where the materializer is.
+	PauseItemAndMaterialize(ctx context.Context, id string, until *time.Time, now time.Time,
+		rematerialize func(domain.Item, []domain.Occurrence) (store.Plan, error)) (domain.Item, store.Applied, error)
+	SetGlobalPauseUntil(ctx context.Context, until time.Time) error
+	ClearGlobalPause(ctx context.Context) error
 }
+
 
 // Server holds what the handlers read. Nothing in this struct is written after
 // New returns.
@@ -51,6 +62,16 @@ type Server struct {
 	health  *health.Registry
 	metrics *metrics.Metrics
 	store   Store
+
+	// mat re-plans an item's occurrences after a pause is set or lifted, which
+	// is what actually clears the pending rows inside a new window.
+	//
+	// A concrete type rather than a consumer-declared interface, which is the
+	// one place this package departs from the rule Store's comment states: the
+	// Begin/PlanFor handshake returns materializer's unexported run type, so no
+	// interface anywhere can name those methods. internal/agent holds it
+	// concretely for exactly the same reason.
+	mat *materializer.Materializer
 
 	// claimFloor is the scheduler's oldest firable start time. It is a value
 	// rather than a callback because the floor is fixed at process start and
@@ -77,9 +98,9 @@ type Server struct {
 // names nothing (still the default outside P1 testing), in which case the
 // route is never registered and a POST to it 404s from the mux itself rather
 // than reaching a handler with nothing configured to verify against.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler) *http.Server {
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler) *http.Server {
 	s := &Server{
-		log: log, health: h, metrics: m, store: st,
+		log: log, health: h, metrics: m, store: st, mat: mat,
 		claimFloor: claimFloor, defaultTZ: defaultTZ,
 	}
 
@@ -97,6 +118,13 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	// child rather than in the row that was asked about (D-010).
 	mux.HandleFunc("POST /api/occurrences/{id}/resolve", s.handleResolveOccurrence)
 	mux.HandleFunc("POST /api/occurrences/{id}/snooze", s.handleSnoozeOccurrence)
+
+	// Two more, one mechanism at two scopes (I6). Neither is a resolution and
+	// neither touches the state machine: pausing suspends a window, and the
+	// occurrences inside it stop existing rather than acquiring an outcome —
+	// which is the whole point, since "away until Monday" is not eighteen skips.
+	mux.HandleFunc("POST /api/items/{id}/pause", s.handlePauseItem)
+	mux.HandleFunc("POST /api/pause", s.handlePauseGlobal)
 
 	// /metrics is served on the same listener but is deliberately absent from
 	// the tunnel ingress table: it carries no secrets, but it describes usage

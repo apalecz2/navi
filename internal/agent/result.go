@@ -40,12 +40,19 @@ type Resolved struct {
 // Result is what every handler returns. Fields are populated per tool:
 // list_items sets Items; create_item and update_item set Item, Applied,
 // NextOccurrences and Inferred; delete_item sets Item and Applied only;
-// bulk_resolve sets Resolutions only.
+// bulk_resolve sets Resolutions only; pause sets PausedUntil and Applied, plus
+// Item when it is item-scoped.
 type Result struct {
 	Item            *domain.Item  `json:"item,omitempty"`
 	Items           []domain.Item `json:"items,omitempty"`
 	NextOccurrences []Occurrence  `json:"next_occurrences,omitempty"`
 	Resolutions     []Resolved    `json:"resolutions,omitempty"`
+
+	// PausedUntil is the window pause just set, formatted, or nil when it just
+	// lifted one. It is a separate field rather than read off Item because a
+	// global pause has no item to read it off — kv.global_pause_until is not a
+	// column on anything.
+	PausedUntil *string `json:"paused_until,omitempty"`
 
 	// Inferred is the vocabulary-default fields resolveSchedule filled in
 	// that the caller did not supply - A5's "state every inferred

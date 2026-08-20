@@ -36,6 +36,9 @@ type Metrics struct {
 	claimsReleased      prometheus.Counter
 	copywriterFallbacks prometheus.Counter
 
+	checkIns              prometheus.Counter
+	reconciledOccurrences prometheus.Counter
+
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
 
@@ -103,6 +106,14 @@ func New() *Metrics {
 			Name: "navi_copywriter_fallback_total",
 			Help: "Notifications sent as the plain item title because no generated text existed.",
 		}),
+		checkIns: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_reconcile_checkins_total",
+			Help: "Daily check-in messages sent (K4). One per pass, never one per item.",
+		}),
+		reconciledOccurrences: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_reconcile_occurrences_total",
+			Help: "Occurrences a check-in asked about, across all passes.",
+		}),
 		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "navi_inbound_messages_accepted_total",
 			Help: "Inbound messages recorded to conversations, by transport.",
@@ -128,6 +139,8 @@ func New() *Metrics {
 		m.transitions,
 		m.claimsReleased,
 		m.copywriterFallbacks,
+		m.checkIns,
+		m.reconciledOccurrences,
 		m.inboundAccepted,
 		m.inboundDropped,
 		m.llmCalls,
@@ -198,6 +211,23 @@ func (m *Metrics) IncClaimReleased() { m.claimsReleased.Inc() }
 // observe it: it knows what it failed to generate, not what was actually sent,
 // and the number worth having is how often a reminder reached the user plain.
 func (m *Metrics) IncCopywriterFallback() { m.copywriterFallbacks.Inc() }
+
+// IncCheckIn counts one daily check-in sent. Counted after the send returns,
+// not when the pass decides to run: a check-in that never reached the user
+// asked nobody anything, and D-008 turns on that distinction.
+//
+// Both of these are plain counters and neither carries a status label, because
+// nothing this session writes a status. When the grace pass starts assigning
+// missed, that goes to navi_occurrence_transitions_total like every other edge.
+func (m *Metrics) IncCheckIn() { m.checkIns.Inc() }
+
+// AddReconciledOccurrences counts how many occurrences a check-in asked about.
+// Read against navi_reconcile_checkins_total it is the average size of an
+// evening's outstanding list, which is the number that says whether
+// consolidation (K4, D-009) is earning its keep.
+func (m *Metrics) AddReconciledOccurrences(n int) {
+	m.reconciledOccurrences.Add(float64(n))
+}
 
 // IncInboundAccepted counts one inbound message actually recorded to
 // conversations — not one webhook call, so a retried delivery that hit the

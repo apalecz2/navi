@@ -59,6 +59,22 @@ func (z Zones) For(item domain.Item) (*time.Location, error) {
 		"item %s is floating and no timezone is known: current_tz is unset, the item has none, and there is no default", item.ID)
 }
 
+// Local returns the person's own clock: the device zone when it is known, the
+// deployment default underneath.
+//
+// This is deliberately not For with a made-up item. For answers "which zone do
+// this item's wall clocks mean", and its fixed rung is what keeps a standing
+// call with someone abroad at the right hour. Local answers a different
+// question — what time is it where the user is — which is the one the daily
+// check-in's clock and its day boundary resolve against, because a check-in is
+// one message to one person about their day rather than a property of any item.
+func (z Zones) Local() *time.Location {
+	if z.Device != nil {
+		return z.Device
+	}
+	return z.Fallback
+}
+
 // load resolves an IANA name, reporting the failure in the form the escalation
 // ladder wants rather than as the tzdata package's wording.
 func (z Zones) load(name string) (*time.Location, error) {

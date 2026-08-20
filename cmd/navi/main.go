@@ -196,7 +196,15 @@ func run() error {
 		mat.Loop(),
 		sched.Loop(),
 		copywriter.New(log.With("loop", copywriter.Name)).Loop(),
-		reconciler.New(log.With("loop", reconciler.Name)).Loop(),
+
+		// The reconciler sends through the same notifier the scheduler does. A
+		// check-in and a reminder go to the same person by the same route, and
+		// there is no second adapter to choose from — which is also why a
+		// Telegram outage takes out delivery and its own backstop together
+		// (03-architecture's one correlated failure, accepted in D-006).
+		reconciler.New(log.With("loop", reconciler.Name), st, notifier, m,
+			cfg.Schedule.ReconcileAt, cfg.Schedule.DefaultTZ).Loop(),
+
 		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
 	}
 	if chatIntake != nil {
@@ -205,7 +213,11 @@ func run() error {
 	sup.Register(loops...)
 	sup.Start(loopCtx)
 
-	srv := httpapi.New(cfg.HTTP, log, h, m, st, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook)
+	// mat again, and the same instance the supervisor and the sweeper drive:
+	// the pause routes re-plan the items whose occurrences a new window
+	// suppresses, and a second materializer would mean two random generators
+	// drawing for the same items.
+	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)

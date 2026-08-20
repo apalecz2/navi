@@ -102,6 +102,25 @@ type ResolutionArg struct {
 	Note         *string `json:"note,omitempty"`
 }
 
+// PauseArgs is pause's arguments, verbatim from
+// docs/06-agent-spec.md#tool-catalog.
+//
+// until is an ISO date rather than an instant, because "I'm away until Monday"
+// is a date and resolving it to a wall clock is the server's job, not the
+// model's. An empty until lifts the pause, which is how "I'm back" is expressed
+// without a second tool.
+//
+// item_id is required for scope=item and must be absent for scope=global -
+// enforced at Layer 2, not by the schema, because JSON Schema cannot express
+// "required depending on another field" in a form every model reads reliably,
+// and a rejection naming the rule is more useful to the escalation ladder than
+// a schema error naming a keyword.
+type PauseArgs struct {
+	Scope  string  `json:"scope" jsonschema:"required,enum=global,enum=item"`
+	Until  string  `json:"until"`
+	ItemID *string `json:"item_id,omitempty"`
+}
+
 // RequestEscalationArgs is request_escalation's arguments - the escalation
 // ladder's own trigger (docs/06-agent-spec.md#escalation-ladder, L4), not
 // one of the four P1 CRUD tools. It writes nothing; see escalation.go.

@@ -30,6 +30,14 @@ const (
 	KeyCurrentTZ = "current_tz"
 
 	// KeyLastReconcileDate prevents a duplicate check-in after a restart.
+	//
+	// It holds the last completed reconciliation *slot*, not a bare date:
+	// "2026-08-19T21:00", a local date and a local HH:MM joined by a T. A bare
+	// date would be wrong the moment an item carries its own reconcile_at
+	// (K8), because the 14:00 pass would then suppress the 21:00 one - which
+	// is a legitimately separate pass, not a duplicate. Both halves are
+	// fixed-width and zero-padded, so "has this slot already run" is a string
+	// comparison, and it is monotonic within a day and across days.
 	KeyLastReconcileDate = "last_reconcile_date"
 
 	// KeyGlobalPauseUntil is vacation mode (I6).
@@ -153,6 +161,33 @@ func (s *Store) GlobalPauseUntil(ctx context.Context) (time.Time, bool, error) {
 // whether it wants to wait for the answer.
 func (s *Store) SetGlobalPauseUntil(ctx context.Context, until time.Time) error {
 	return s.setKV(ctx, KeyGlobalPauseUntil, domain.FormatTime(until))
+}
+
+// ClearGlobalPause lifts vacation mode by deleting the key, so the absent case
+// GlobalPauseUntil already handles is the only "not paused" state there is.
+// Writing an instant in the past would work identically today and would leave
+// a value nobody can tell from a stale one.
+//
+// Same division of labour as its setter: it writes one row, and the caller
+// re-materializes the items whose occurrences the lifted window was
+// suppressing.
+func (s *Store) ClearGlobalPause(ctx context.Context) error {
+	err := s.tx(ctx, func(q *sqlc.Queries) error {
+		return q.DeleteKV(ctx, KeyGlobalPauseUntil)
+	})
+	if err != nil {
+		return fmt.Errorf("store: clear %s: %w", KeyGlobalPauseUntil, err)
+	}
+	return nil
+}
+
+// LastReconcileSlot returns the last completed reconciliation slot and whether
+// one has ever run. The value is opaque to this package - see
+// KeyLastReconcileDate for its shape and why it is a slot rather than a date -
+// so it goes through no parse on the way out, and comparing two of them is the
+// reconciler's business.
+func (s *Store) LastReconcileSlot(ctx context.Context) (string, bool, error) {
+	return s.getKV(ctx, KeyLastReconcileDate)
 }
 
 // CurrentTZ returns the device timezone and whether it has ever been set. It is

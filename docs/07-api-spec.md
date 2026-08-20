@@ -331,7 +331,44 @@ Sets `archived_at`, deletes `pending` occurrences, retains resolved history.
 { "until": "2026-08-12" }
 ```
 
-Item-scoped and global respectively.
+Item-scoped and global respectively. `until` is a date, not an instant, and it
+resolves to local midnight in the **device** timezone — "until Monday" means
+through Sunday night and back to normal at Monday 00:00 local. The item's own
+zone is not consulted: a pause is a statement about where the user will be.
+
+`{ "until": null }` lifts the pause. The spec originally showed only the setting
+half; a suspension with no way out would make "I'm away until Monday" a worse
+deal than the eighteen individual skips [I6](01-requirements.md) exists to
+replace, and the same statement writes both, so it is one field rather than a
+second endpoint. Item-scoped clears `items.paused_until`; global deletes
+`kv.global_pause_until` outright, so "absent" stays the only representation of
+"not paused".
+
+Both re-materialize before returning, which is what actually empties the
+calendar: a paused item is not skipped by the materializer, it is materialized
+to an *empty set*, so the same pass that stops generating new rows deletes the
+pending ones already sitting inside the window
+([05-schedule-spec.md](05-schedule-spec.md#pause)). History and `is_override`
+rows are untouched, enforced by the delete guard in SQL rather than by this
+endpoint.
+
+```json
+{
+  "paused_until": "2026-08-12T04:00:00Z",
+  "item": { "id": "itm_01H...", "title": "stretching", "active": true,
+            "paused_until": "2026-08-12T04:00:00Z" },
+  "occurrences_deleted": 18
+}
+```
+
+The global route returns `items` (how many were re-planned) in place of `item`.
+`occurrences_deleted` is the count the request has no way to predict and every
+caller wants: it is the eighteen skips that did not happen, made visible.
+
+Neither route consults the status state machine, and neither can return a 409.
+A pause is not a resolution — the occurrences inside the window are *deleted*,
+not completed, skipped, or missed, and keeping those two mechanisms apart is the
+whole of what I6 buys.
 
 ---
 

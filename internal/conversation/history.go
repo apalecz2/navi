@@ -46,6 +46,20 @@ func (l *Ladder) seedHistory(ctx context.Context, in transport.IncomingMessage) 
 		rows = rows[:historyLimit]
 	}
 
+	// The trim above can land inside a tool-call pair: persistToolRung
+	// always writes the assistant tool-call row before its tool-result row,
+	// so the tool row is the newer of the two, and if the cut falls between
+	// them the surviving oldest row is a tool-result message with no
+	// assistant call anywhere in the window - the pair's older half was cut,
+	// not just uninspected. toolCallNames can't invent a name for a row
+	// whose pair isn't in rows at all, and neither can Gemini's compat shim,
+	// which 400s on a nameless function_response. Only the oldest kept row
+	// can ever be orphaned this way (every pair fully inside the window
+	// keeps both members, since they're adjacent), so one check suffices.
+	if len(rows) > 0 && rows[len(rows)-1].Role == domain.RoleTool {
+		rows = rows[:len(rows)-1]
+	}
+
 	toolNames, err := toolCallNames(rows)
 	if err != nil {
 		return nil, fmt.Errorf("conversation: load history: %w", err)

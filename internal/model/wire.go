@@ -28,6 +28,10 @@ type chatMessage struct {
 	Content    string         `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+
+	// Name is set on a tool-role message - see Message.Name for why it
+	// exists.
+	Name string `json:"name,omitempty"`
 }
 
 type chatTool struct {
@@ -121,6 +125,7 @@ func toWireMessage(m Message) chatMessage {
 		Role:       string(m.Role),
 		Content:    m.Content,
 		ToolCallID: m.ToolCallID,
+		Name:       m.Name,
 	}
 	if len(m.ToolCalls) > 0 {
 		wm.ToolCalls = make([]chatToolCall, len(m.ToolCalls))

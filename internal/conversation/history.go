@@ -46,10 +46,15 @@ func (l *Ladder) seedHistory(ctx context.Context, in transport.IncomingMessage) 
 		rows = rows[:historyLimit]
 	}
 
+	toolNames, err := toolCallNames(rows)
+	if err != nil {
+		return nil, fmt.Errorf("conversation: load history: %w", err)
+	}
+
 	// rows is newest first; the wire format wants oldest first.
 	msgs := make([]model.Message, 0, len(rows))
 	for i := len(rows) - 1; i >= 0; i-- {
-		msg, err := toModelMessage(rows[i])
+		msg, err := toModelMessage(rows[i], toolNames)
 		if err != nil {
 			return nil, fmt.Errorf("conversation: load history: %w", err)
 		}
@@ -58,13 +63,38 @@ func (l *Ladder) seedHistory(ctx context.Context, in transport.IncomingMessage) 
 	return msgs, nil
 }
 
+// toolCallNames maps every ToolCallID appearing in rows back to the function
+// name it invoked, read out of the assistant tool-call row that carries it.
+// persistToolRung always writes that row immediately before the matching
+// tool-result row (ladder.go's "pair"), but this scans the whole window
+// rather than assuming adjacency, since a Gemini-bound tool-role message
+// needs its name (model.Message.Name) and the tool-result row itself never
+// stores one.
+func toolCallNames(rows []domain.Conversation) (map[string]string, error) {
+	names := make(map[string]string)
+	for _, c := range rows {
+		if c.Role != domain.RoleAssistant || c.ToolCalls == nil || *c.ToolCalls == "" {
+			continue
+		}
+		var calls []model.ToolCall
+		if err := json.Unmarshal([]byte(*c.ToolCalls), &calls); err != nil {
+			return nil, fmt.Errorf("decode stored tool_calls: %w", err)
+		}
+		for _, tc := range calls {
+			names[tc.ID] = tc.Name
+		}
+	}
+	return names, nil
+}
+
 // toModelMessage translates one persisted conversations row back into the
 // shape model.Client.Complete sends. The inverse of ladder.go's
 // persistAssistantProse and persistToolRung: a plain assistant or user row
 // round-trips through Content alone, and an assistant tool-call row's
 // ToolCalls JSON (written as []model.ToolCall with exactly one entry) is
-// decoded back rather than replayed as text.
-func toModelMessage(c domain.Conversation) (model.Message, error) {
+// decoded back rather than replayed as text. toolNames is toolCallNames'
+// output, looked up here rather than recomputed per row.
+func toModelMessage(c domain.Conversation, toolNames map[string]string) (model.Message, error) {
 	switch c.Role {
 	case domain.RoleUser:
 		return model.Message{Role: model.RoleUser, Content: c.Content}, nil
@@ -73,7 +103,10 @@ func toModelMessage(c domain.Conversation) (model.Message, error) {
 		if c.ToolCallID != nil {
 			toolCallID = *c.ToolCallID
 		}
-		return model.Message{Role: model.RoleTool, Content: c.Content, ToolCallID: toolCallID}, nil
+		return model.Message{
+			Role: model.RoleTool, Content: c.Content, ToolCallID: toolCallID,
+			Name: toolNames[toolCallID],
+		}, nil
 	case domain.RoleAssistant:
 		msg := model.Message{Role: model.RoleAssistant, Content: c.Content}
 		if c.ToolCalls != nil && *c.ToolCalls != "" {

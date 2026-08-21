@@ -111,7 +111,7 @@ tierLoop:
 				}
 				messages = append(messages,
 					model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{tc}},
-					model.Message{Role: model.RoleTool, ToolCallID: tc.ID, Content: reason},
+					model.Message{Role: model.RoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: reason},
 				)
 				lastReason = escReq.Reason
 				break // to the next tier's first attempt, no retry spent (L4)
@@ -122,7 +122,7 @@ tierLoop:
 				}
 				messages = append(messages,
 					model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{tc}},
-					model.Message{Role: model.RoleTool, ToolCallID: tc.ID, Content: callErr.Error()},
+					model.Message{Role: model.RoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: callErr.Error()},
 				)
 				lastReason = callErr.Error()
 				if retryLeft > 0 {

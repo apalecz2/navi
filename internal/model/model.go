@@ -65,6 +65,14 @@ type Message struct {
 
 	// ToolCallID is set on a tool-role message answering one ToolCall by id.
 	ToolCallID string
+
+	// Name is the tool that ToolCallID answers, set alongside it on a
+	// tool-role message. OpenRouter's OpenAI-compatible backends accept a
+	// bare tool_call_id and don't need this, but Gemini's own compat shim
+	// maps a tool-role message to a native function_response and 400s with
+	// "Name cannot be empty" without it - carry it through regardless of
+	// which provider is configured rather than special-casing one.
+	Name string
 }
 
 // Tool is one entry of the catalog advertised to the model. Parameters stays

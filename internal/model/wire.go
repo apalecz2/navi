@@ -94,12 +94,13 @@ type chatAPIErr struct {
 
 // toWireRequest builds the request body for one attempt.
 func toWireRequest(model string, thinking bool, messages []Message, tools []Tool) chatRequest {
+	wire := make([]chatMessage, len(messages))
+	for i, m := range messages {
+		wire[i] = toWireMessage(m)
+	}
 	req := chatRequest{
 		Model:    model,
-		Messages: make([]chatMessage, len(messages)),
-	}
-	for i, m := range messages {
-		req.Messages[i] = toWireMessage(m)
+		Messages: normalizeToolTurns(wire),
 	}
 	if len(tools) > 0 {
 		req.Tools = make([]chatTool, len(tools))
@@ -118,6 +119,43 @@ func toWireRequest(model string, thinking bool, messages []Message, tools []Tool
 		req.Reasoning = &chatReasoning{Enabled: true}
 	}
 	return req
+}
+
+// toolTurnFiller is the connective tissue normalizeToolTurns inserts. It
+// only ever fills a structural gap Gemini's compat shim won't tolerate - a
+// gap this codebase leaves on purpose, since the ladder's own in-turn
+// nudges (ladder.go's toolCallInstruction) are never persisted and a
+// history replay months later has nothing truer to put here.
+const toolTurnFiller = "Continue."
+
+// normalizeToolTurns enforces the one structural rule on top of the wire
+// format that Gemini's OpenAI-compat shim adds and OpenRouter's real
+// OpenAI-compatible backends don't: a message carrying a function call
+// (tool_calls) must immediately follow a user turn or a function-response
+// (tool) turn. Nothing upstream guarantees that across a turn boundary -
+// the ladder persists every rung's real content (persistAssistantProse,
+// persistToolRung) but deliberately never persists the synthetic nudge that
+// connects a bare-prose rung to the tool-call rung that follows it
+// (ladder.go's toolCallInstruction), so a later turn's replayed history can
+// legally contain two adjacent assistant-role rows where the second is a
+// tool call. Rather than persisting ladder scaffolding to patch that over,
+// this patches the wire request at the one place a provider quirk belongs
+// (see the package doc): it only ever inserts a filler user turn, never
+// drops or reorders anything, so a sequence that was already legal is
+// untouched.
+func normalizeToolTurns(msgs []chatMessage) []chatMessage {
+	out := make([]chatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if len(m.ToolCalls) > 0 {
+			prevOK := len(out) > 0 &&
+				(out[len(out)-1].Role == string(RoleUser) || out[len(out)-1].Role == string(RoleTool))
+			if !prevOK {
+				out = append(out, chatMessage{Role: string(RoleUser), Content: toolTurnFiller})
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func toWireMessage(m Message) chatMessage {

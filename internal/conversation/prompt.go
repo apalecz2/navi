@@ -95,6 +95,8 @@ func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	b.WriteString("\n")
 	b.WriteString(l.renderTodaysOccurrences(ctx, loc))
 	b.WriteString("\n")
+	b.WriteString(l.renderActiveGoals(ctx, loc))
+	b.WriteString("\n")
 	b.WriteString(l.renderLastTouched(ctx))
 	b.WriteString(l.renderContextRef(ctx, loc))
 
@@ -216,6 +218,46 @@ func (l *Ladder) renderTodaysOccurrences(ctx context.Context, loc *time.Location
 			status = fmt.Sprintf("%s  (%s, %s)", status, source, o.ResolvedAt.In(loc).Format("15:04"))
 		}
 		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", o.ID, o.StartsAt.In(loc).Format("15:04"), o.ItemTitle, status)
+	}
+	tw.Flush()
+	return b.String()
+}
+
+// renderActiveGoals is the context block's "Active goals" list (P3.5,
+// docs/06-agent-spec.md#context-injection): id, quoted title, shape, and the
+// current progress. It reads the widened ListGoalProgress rather than a second
+// "what's active" query, and the progress it prints is computed fresh in that
+// call - a count over chains for an item-linked goal, the newest goal_updates
+// row for a freestanding one. The briefing composer reads the same block next
+// session, so a goal named in the morning message and one the agent discusses
+// mid-conversation show identical numbers.
+func (l *Ladder) renderActiveGoals(ctx context.Context, loc *time.Location) string {
+	goals, err := l.store.ListGoalProgress(ctx, store.GoalFilterActive, loc)
+	if err != nil || len(goals) == 0 {
+		return "Active goals: none\n"
+	}
+	var b strings.Builder
+	b.WriteString("Active goals:\n")
+	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
+	for _, p := range goals {
+		kind := "freestanding"
+		progress := "no updates yet"
+		switch {
+		case p.ItemLinked:
+			kind = "item-linked"
+			progress = fmt.Sprintf("%d/%d this period", p.Completed, p.Target)
+		case p.HasUpdate:
+			updated := "updated " + p.UpdatedAt.In(loc).Format(domain.DateLayout)
+			switch {
+			case p.LatestPct != nil && p.LatestNote != nil && *p.LatestNote != "":
+				progress = fmt.Sprintf("%d%%, %q, %s", *p.LatestPct, *p.LatestNote, updated)
+			case p.LatestPct != nil:
+				progress = fmt.Sprintf("%d%%, %s", *p.LatestPct, updated)
+			case p.LatestNote != nil:
+				progress = fmt.Sprintf("%q, %s", *p.LatestNote, updated)
+			}
+		}
+		fmt.Fprintf(tw, "  %s\t%q\t%s\t%s\n", p.Goal.ID, p.Goal.Title, kind, progress)
 	}
 	tw.Flush()
 	return b.String()

@@ -16,6 +16,28 @@ type Conversation struct {
 	CreatedAt  string
 }
 
+type Goal struct {
+	ID          string
+	Title       string
+	PeriodKind  string
+	PeriodStart string
+	PeriodEnd   string
+	ItemID      *string
+	TargetCount *int64
+	Status      string
+	CreatedAt   string
+	UpdatedAt   string
+}
+
+type GoalUpdate struct {
+	ID          string
+	GoalID      string
+	Note        *string
+	ProgressPct *int64
+	Source      string
+	CreatedAt   string
+}
+
 type Item struct {
 	ID                 string
 	Kind               string

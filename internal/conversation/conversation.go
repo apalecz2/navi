@@ -38,6 +38,13 @@ type Store interface {
 	LastTouchedItemID(ctx context.Context) (string, bool, error)
 	GetItem(ctx context.Context, id string) (domain.Item, error)
 
+	// Active goals and their current progress, for the context-injection block
+	// both the agent and (next session) the briefing composer read - a widened
+	// read of "what's active", not a second path. Progress is computed fresh
+	// inside this call: a count over chains for an item-linked goal, the newest
+	// goal_updates row for a freestanding one, never a stored counter.
+	ListGoalProgress(ctx context.Context, filter store.GoalFilter, loc *time.Location) ([]store.GoalProgress, error)
+
 	// The Context ref block's two reads. The first says which occurrences a
 	// check-in asked about and has not been answered for; the second says which
 	// check-in that was. They are separate because they answer different

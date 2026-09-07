@@ -36,6 +36,10 @@ var registrations = []registration{
 	{"delete_item", "Archive an item and remove its pending occurrences. Requires confirmed=true.", handleDeleteItem, DeleteItemArgs{}},
 	{"bulk_resolve", "Record outcomes for one or more occurrences in a single atomic write. Use this for any message reporting a completion, a skip, or several at once — including a single one, and including something already done earlier today.", handleBulkResolve, BulkResolveArgs{}},
 	{"pause", "Suspend everything, or one item, until a date. Use this whenever the user says they are away or unavailable, instead of skipping each occurrence. An empty until resumes.", handlePause, PauseArgs{}},
+	{"create_goal", "Set a target over a period. Link it to an existing item with item_id plus a target_count (\"gym four times this week\"), or leave both off for a freestanding goal tracked by conversation (\"ship the report by Friday\"). period_kind is day, week, month, or custom; for custom, give period_end.", handleCreateGoal, CreateGoalArgs{}},
+	{"update_goal", "Change a goal's title, period_end, or target_count, or set status to abandoned to drop it. Rejected on a goal that has already ended (met, missed, or abandoned).", handleUpdateGoal, UpdateGoalArgs{}},
+	{"list_goals", "List goals, active by default or all.", handleListGoals, ListGoalsArgs{}},
+	{"log_goal_progress", "Record progress on a freestanding goal from the conversation - a percent, a note, or both. Not for occurrences: a goal is not resolved and does not go through the status machine. Rejected on a goal that has already ended.", handleLogGoalProgress, LogGoalProgressArgs{}},
 	{"request_escalation", "Terminate this turn and retry at the next tier. Call when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable. Writes nothing.", handleRequestEscalation, RequestEscalationArgs{}},
 }
 

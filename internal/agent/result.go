@@ -62,6 +62,16 @@ type Result struct {
 	// column on anything.
 	PausedUntil *string `json:"paused_until,omitempty"`
 
+	// Goal tools (P3.5). Goal and GoalProgress are set by create_goal and
+	// update_goal; Goals by list_goals; GoalUpdate by log_goal_progress. The
+	// progress on all of them is store.GoalProgress, computed fresh from chains
+	// or from the newest goal_updates row - never a stored counter - so the
+	// number a confirmation states is the same one context injection shows.
+	Goal         *domain.Goal         `json:"goal,omitempty"`
+	Goals        []store.GoalProgress `json:"goals,omitempty"`
+	GoalUpdate   *domain.GoalUpdate   `json:"goal_update,omitempty"`
+	GoalProgress *store.GoalProgress  `json:"goal_progress,omitempty"`
+
 	// Inferred is the vocabulary-default fields resolveSchedule filled in
 	// that the caller did not supply - A5's "state every inferred
 	// parameter." Empty when the schedule was fully specified, or for a

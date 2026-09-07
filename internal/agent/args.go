@@ -127,6 +127,62 @@ type PauseArgs struct {
 	ItemID *string `json:"item_id,omitempty"`
 }
 
+// The four goal tool argument structs (P3.5, docs/06-agent-spec.md#tool-catalog,
+// docs/11-goals-spec.md). Same three validation layers and same registry as the
+// P1 tools; nothing in the escalation ladder changes to admit them.
+
+// CreateGoalArgs is create_goal's arguments.
+//
+// period_start defaults to today and period_end is computed from period_kind
+// when omitted; for period_kind=custom, period_end is required. item_id set
+// makes it item-linked and then target_count is required and must be >= 1;
+// item_id absent makes it freestanding and target_count must be absent. That
+// XOR is Layer 2, not a schema constraint, because JSON Schema cannot express
+// "required depending on another field" in a form every model reads, and a
+// rejection naming the rule helps the ladder more than a keyword error.
+type CreateGoalArgs struct {
+	Title       string  `json:"title" jsonschema:"required"`
+	PeriodKind  string  `json:"period_kind" jsonschema:"required,enum=day,enum=week,enum=month,enum=custom"`
+	PeriodStart *string `json:"period_start,omitempty"`
+	PeriodEnd   *string `json:"period_end,omitempty"`
+	ItemID      *string `json:"item_id,omitempty"`
+	TargetCount *int    `json:"target_count,omitempty" jsonschema:"minimum=1"`
+}
+
+// GoalChanges is update_goal's "only fields being changed" - not spelled out in
+// 06-agent-spec.md, designed here as the all-optional mirror ItemChanges is for
+// update_item. period_kind is deliberately absent: changing the shape of the
+// window is a new goal, not an edit. status carries only abandoned, the one
+// terminal transition a user drives; met and missed are the sweeper's to write.
+type GoalChanges struct {
+	Title       *string `json:"title,omitempty"`
+	PeriodStart *string `json:"period_start,omitempty"`
+	PeriodEnd   *string `json:"period_end,omitempty"`
+	TargetCount *int    `json:"target_count,omitempty" jsonschema:"minimum=1"`
+	Status      *string `json:"status,omitempty" jsonschema:"enum=abandoned"`
+}
+
+// UpdateGoalArgs is update_goal's arguments.
+type UpdateGoalArgs struct {
+	GoalID  string      `json:"goal_id" jsonschema:"required"`
+	Changes GoalChanges `json:"changes" jsonschema:"required"`
+}
+
+// ListGoalsArgs is list_goals' arguments.
+type ListGoalsArgs struct {
+	Filter string `json:"filter,omitempty" jsonschema:"enum=active,enum=all,default=active"`
+}
+
+// LogGoalProgressArgs is log_goal_progress's arguments - a conversational turn,
+// not a resolution. At least one of progress_pct or note is required (Layer 2):
+// a call with neither writes nothing and is rejected the same shape as any
+// other under-specified tool call.
+type LogGoalProgressArgs struct {
+	GoalID      string  `json:"goal_id" jsonschema:"required"`
+	ProgressPct *int    `json:"progress_pct,omitempty" jsonschema:"minimum=0,maximum=100"`
+	Note        *string `json:"note,omitempty"`
+}
+
 // RequestEscalationArgs is request_escalation's arguments - the escalation
 // ladder's own trigger (docs/06-agent-spec.md#escalation-ladder, L4), not
 // one of the four P1 CRUD tools. It writes nothing; see escalation.go.

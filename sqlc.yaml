@@ -36,6 +36,7 @@ sql:
     schema:
       - "internal/store/migrations/0001_init.sql"
       - "internal/store/migrations/0003_conversations_dedup.sql"
+      - "internal/store/migrations/0005_goals.sql"
     queries: "internal/store/queries"
     gen:
       go:

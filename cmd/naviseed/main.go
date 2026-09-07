@@ -197,6 +197,15 @@ func run() error {
 		return err
 	}
 
+	// P3.5 goals: item-linked progress read live from chains, freestanding
+	// progress as the newest goal_updates row, the validation table, and the
+	// sweeper's period-end pass. After every occurrence section, since the
+	// item-linked check completes real occurrences and the past-period checks
+	// hand-insert some.
+	if err := reportGoals(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// After fire, since it exercises the other direction — inbound rather
 	// than outbound — and needs nothing fire left behind.
 	if err := reportConversations(ctx, st, log); err != nil {
@@ -689,7 +698,7 @@ func reportMaterialization(ctx context.Context, st *store.Store, defaultTZ *time
 	if err := reportHorizon(ctx, st); err != nil {
 		return err
 	}
-	return reportBackfill(ctx, st, mat, log)
+	return reportBackfill(ctx, st, mat, defaultTZ, log)
 }
 
 // reportPause enters vacation mode for three days, re-materializes, and counts
@@ -744,7 +753,7 @@ func reportPause(ctx context.Context, st *store.Store, mat *materializer.Materia
 // This is the backstop for a missed nightly run, and it is the one path in the
 // system with no other way to notice it is broken: a horizon that stops moving
 // looks exactly like a healthy one until the last materialized row fires.
-func reportBackfill(ctx context.Context, st *store.Store, mat *materializer.Materializer, log *slog.Logger) error {
+func reportBackfill(ctx context.Context, st *store.Store, mat *materializer.Materializer, defaultTZ *time.Location, log *slog.Logger) error {
 	short := time.Now().AddDate(0, 0, sweeper.MinHorizonDays-1)
 	if err := st.SetLastMaterializedThrough(ctx, short); err != nil {
 		return err
@@ -755,7 +764,7 @@ func reportBackfill(ctx context.Context, st *store.Store, mat *materializer.Mate
 		return err
 	}
 
-	sw := sweeper.New(log.With("component", "sweeper"), st, mat)
+	sw := sweeper.New(log.With("component", "sweeper"), st, mat, defaultTZ)
 	if err := sw.Tick(ctx); err != nil {
 		return err
 	}
@@ -5314,4 +5323,324 @@ func sameRows(a, b []domain.Occurrence) bool {
 		}
 	}
 	return true
+}
+
+// reportGoals is P3.5: item-linked progress read live from the chains view,
+// freestanding progress as the newest goal_updates row, every validation-table
+// row, and the sweeper's period-end pass. Every number it checks is derived, so
+// the section is mostly "make something true in the data, read it back the long
+// way, and confirm it agrees."
+func reportGoals(ctx context.Context, st *store.Store, table *defaults.Table, tz string, defaultTZ *time.Location, log *slog.Logger) error {
+	fmt.Println("\ngoals (P3.5)")
+
+	mat := materializer.New(log.With("component", "materializer-goals"), st, defaultTZ)
+	t := agent.New(st, mat, table, defaultTZ, nil)
+
+	// The person's zone, resolved exactly as create_goal and the sweeper resolve
+	// it. reportZones has already moved kv.current_tz to Europe/Lisbon, so an
+	// expected period date computed here must use this and not DEFAULT_TZ - the
+	// shape of the from_date bug that survived twelve sessions.
+	zones, err := schedule.LoadZones(ctx, st, defaultTZ)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	now := time.Now()
+	today := now.In(loc)
+	mondayOffset := (int(today.Weekday()) + 6) % 7
+
+	// ---- item-linked: "gym four times this week" ----
+	gym, err := callTool(ctx, t, "create_item", agent.CreateItemArgs{
+		Title:    "gym (goal probe)",
+		Schedule: schedule.Schedule{Kind: schedule.KindFixed, RRule: ptr("FREQ=DAILY"), At: ptr("18:00")},
+	})
+	if err != nil {
+		return err
+	}
+	gymID := gym.Item.ID
+
+	created, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title:       "gym four times this week",
+		PeriodKind:  "week",
+		ItemID:      &gymID,
+		TargetCount: ptr(4),
+	})
+	if err != nil {
+		return fmt.Errorf("naviseed: create_goal item-linked: %w", err)
+	}
+	goal := created.Goal
+	if goal == nil || created.GoalProgress == nil {
+		fmt.Printf("  create item-linked week goal   %s\n", verdict(false))
+		return fmt.Errorf("naviseed: create_goal returned no goal/progress")
+	}
+
+	monday := today.AddDate(0, 0, -mondayOffset).Format(domain.DateLayout)
+	sunday := today.AddDate(0, 0, 6-mondayOffset).Format(domain.DateLayout)
+	periodOK := goal.PeriodStart == monday && goal.PeriodEnd == sunday &&
+		goal.IsItemLinked() && goal.TargetCount != nil && *goal.TargetCount == 4
+	fmt.Printf("  create item-linked week goal   period %s..%s target 4  %s\n",
+		goal.PeriodStart, goal.PeriodEnd, verdict(periodOK))
+	fmt.Printf("  progress reads from chains     %d/%d, no goal_updates rows  %s\n",
+		created.GoalProgress.Completed, created.GoalProgress.Target,
+		verdict(created.GoalProgress.Completed == 0 && created.GoalProgress.Target == 4))
+
+	fromUTC, toExclUTC, err := domain.GoalPeriodBounds(goal.PeriodStart, goal.PeriodEnd, loc)
+	if err != nil {
+		return err
+	}
+	occs, err := st.ListOccurrencesForItem(ctx, gymID)
+	if err != nil {
+		return err
+	}
+	completed := 0
+	for _, o := range occs {
+		if completed == 2 {
+			break
+		}
+		if o.Status != domain.StatusPending || o.StartsAt.Before(fromUTC) || !o.StartsAt.Before(toExclUTC) {
+			continue
+		}
+		if _, err := st.ResolveOccurrence(ctx, o.ID, domain.StatusCompleted, nil, domain.ResolvedByAgent, time.Now()); err != nil {
+			return err
+		}
+		completed++
+	}
+
+	goalAfter, err := st.GetGoal(ctx, goal.ID)
+	if err != nil {
+		return err
+	}
+	progAfter, err := st.GoalProgressFor(ctx, goalAfter, loc)
+	if err != nil {
+		return err
+	}
+	noGoalWrite := goalAfter.UpdatedAt.Equal(goal.UpdatedAt)
+	fmt.Printf("  completing occurrences moves it %d/%d, goals.updated_at unchanged=%v  %s\n",
+		progAfter.Completed, progAfter.Target, noGoalWrite,
+		verdict(progAfter.Completed == completed && noGoalWrite))
+
+	// Independent hand count over the same window, re-reading the rows: no snooze
+	// chains here, so a completed chain is just a completed occurrence.
+	fresh, err := st.ListOccurrencesForItem(ctx, gymID)
+	if err != nil {
+		return err
+	}
+	hand := 0
+	for _, o := range fresh {
+		if o.Status == domain.StatusCompleted && !o.StartsAt.Before(fromUTC) && o.StartsAt.Before(toExclUTC) {
+			hand++
+		}
+	}
+	fmt.Printf("  progress matches a hand count  chains=%d hand=%d  %s\n",
+		progAfter.Completed, hand, verdict(progAfter.Completed == hand))
+
+	vel := progAfter.Velocity(now, loc)
+	velVal := -1.0
+	if vel != nil {
+		velVal = *vel
+	}
+	fmt.Printf("  velocity per elapsed week      %.1f (hand count %d)  %s\n",
+		velVal, hand, verdict(vel != nil && *vel == float64(hand)))
+
+	// ---- freestanding: "ship the report by Friday" ----
+	fridayStr := today.AddDate(0, 0, (int(time.Friday)-int(today.Weekday())+7)%7).Format(domain.DateLayout)
+	if fridayStr == today.Format(domain.DateLayout) {
+		fridayStr = today.AddDate(0, 0, 7).Format(domain.DateLayout)
+	}
+	fs, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title:      "ship the report by Friday",
+		PeriodKind: "custom",
+		PeriodEnd:  &fridayStr,
+	})
+	if err != nil {
+		return fmt.Errorf("naviseed: create_goal freestanding: %w", err)
+	}
+	fsGoal := fs.Goal
+	if fsGoal == nil {
+		return fmt.Errorf("naviseed: create_goal freestanding returned no goal")
+	}
+	fmt.Printf("  create freestanding goal       custom ..%s, no target  %s\n",
+		fridayStr, verdict(!fsGoal.IsItemLinked() && fsGoal.TargetCount == nil))
+
+	if _, err := callTool(ctx, t, "log_goal_progress", agent.LogGoalProgressArgs{
+		GoalID: fsGoal.ID, ProgressPct: ptr(40), Note: ptr("outline done"),
+	}); err != nil {
+		return fmt.Errorf("naviseed: log_goal_progress 40: %w", err)
+	}
+	loggedRes, err := callTool(ctx, t, "log_goal_progress", agent.LogGoalProgressArgs{
+		GoalID: fsGoal.ID, ProgressPct: ptr(60),
+	})
+	if err != nil {
+		return fmt.Errorf("naviseed: log_goal_progress 60: %w", err)
+	}
+	lp := loggedRes.GoalProgress
+	fmt.Printf("  conversational update appends   current = newest of two rows = %s%%  %s\n",
+		goalPctText(lp), verdict(lp != nil && lp.LatestPct != nil && *lp.LatestPct == 60))
+
+	// Current progress is the newest row, never a stored max: a third, lower
+	// update becomes current immediately.
+	if _, err := st.AppendGoalUpdate(ctx, domain.NewGoalUpdate{
+		GoalID: fsGoal.ID, ProgressPct: ptr(55), Source: domain.GoalUpdateByWeb,
+	}, time.Now()); err != nil {
+		return err
+	}
+	reread, err := st.GoalProgressFor(ctx, *fsGoal, loc)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  newest row wins even when lower  55%% after 60%%  %s\n",
+		verdict(reread.LatestPct != nil && *reread.LatestPct == 55))
+
+	// ---- validation table: every row rejects with a *domain.ValidationError ----
+	fmt.Println("  validation table")
+	var ve *domain.ValidationError
+	badStart := today.AddDate(0, 0, 3).Format(domain.DateLayout)
+	badEnd := today.Format(domain.DateLayout)
+	wed := today.AddDate(0, 0, (int(time.Wednesday)-int(today.Weekday())+7)%7).Format(domain.DateLayout)
+	if wed == monday {
+		wed = today.AddDate(0, 0, 2).Format(domain.DateLayout)
+	}
+	badItem := "itm_does_not_exist"
+	rows := []struct {
+		name string
+		run  func() error
+	}{
+		{"period unordered (custom)", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "custom", PeriodStart: &badStart, PeriodEnd: &badEnd})
+			return e
+		}},
+		{"week range misaligned", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "week", PeriodStart: &wed})
+			return e
+		}},
+		{"item-linked, no target", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "week", ItemID: &gymID})
+			return e
+		}},
+		{"freestanding, with target", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "week", TargetCount: ptr(3)})
+			return e
+		}},
+		{"item_id does not resolve", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "week", ItemID: &badItem, TargetCount: ptr(2)})
+			return e
+		}},
+		{"custom without period_end", func() error {
+			_, e := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "x", PeriodKind: "custom"})
+			return e
+		}},
+		{"log_goal_progress, neither field", func() error {
+			_, e := callTool(ctx, t, "log_goal_progress", agent.LogGoalProgressArgs{GoalID: fsGoal.ID})
+			return e
+		}},
+	}
+	for _, r := range rows {
+		e := r.run()
+		ok := errors.As(e, &ve)
+		msg := ""
+		if ok {
+			msg = ve.Rule + ": " + ve.Message
+		}
+		fmt.Printf("    %-28s %s  %s\n", r.name, verdict(ok), msg)
+	}
+
+	// terminal-goal guard: abandon a goal, then confirm both writers bounce.
+	ab, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{Title: "to abandon", PeriodKind: "week"})
+	if err != nil {
+		return err
+	}
+	if _, err := callTool(ctx, t, "update_goal", agent.UpdateGoalArgs{
+		GoalID: ab.Goal.ID, Changes: agent.GoalChanges{Status: ptr("abandoned")},
+	}); err != nil {
+		return fmt.Errorf("naviseed: abandon goal: %w", err)
+	}
+	_, uErr := callTool(ctx, t, "update_goal", agent.UpdateGoalArgs{GoalID: ab.Goal.ID, Changes: agent.GoalChanges{Title: ptr("nope")}})
+	_, lErr := callTool(ctx, t, "log_goal_progress", agent.LogGoalProgressArgs{GoalID: ab.Goal.ID, Note: ptr("still going")})
+	fmt.Printf("    %-28s %s\n", "update_goal on terminal", verdict(errors.As(uErr, &ve)))
+	fmt.Printf("    %-28s %s\n", "log_goal_progress on terminal", verdict(errors.As(lErr, &ve)))
+
+	// ---- period-end evaluation: the sweeper's pass, not the clock ----
+	fmt.Println("  period-end evaluation")
+	lastMon := today.AddDate(0, 0, -7-mondayOffset)
+	lwStart := lastMon.Format(domain.DateLayout)
+	lwEnd := lastMon.AddDate(0, 0, 6).Format(domain.DateLayout)
+
+	missGoal, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title: "gym last week", PeriodKind: "custom",
+		PeriodStart: &lwStart, PeriodEnd: &lwEnd, ItemID: &gymID, TargetCount: ptr(3),
+	})
+	if err != nil {
+		return err
+	}
+
+	metItem, err := seedFireItem(ctx, st, "gym met probe", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	metItemID := metItem.ID
+	pastAt := time.Date(lastMon.Year(), lastMon.Month(), lastMon.Day()+2, 12, 0, 0, 0, loc)
+	pastOcc, err := fireOccurrence(ctx, st, metItem, pastAt, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := st.ResolveOccurrence(ctx, pastOcc.ID, domain.StatusCompleted, nil, domain.ResolvedByAgent, time.Now()); err != nil {
+		return err
+	}
+	metGoal, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title: "met last week", PeriodKind: "custom",
+		PeriodStart: &lwStart, PeriodEnd: &lwEnd, ItemID: &metItemID, TargetCount: ptr(1),
+	})
+	if err != nil {
+		return err
+	}
+
+	fsMiss, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title: "unreported last week", PeriodKind: "custom", PeriodStart: &lwStart, PeriodEnd: &lwEnd,
+	})
+	if err != nil {
+		return err
+	}
+	fsMet, err := callTool(ctx, t, "create_goal", agent.CreateGoalArgs{
+		Title: "done last week", PeriodKind: "custom", PeriodStart: &lwStart, PeriodEnd: &lwEnd,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := st.AppendGoalUpdate(ctx, domain.NewGoalUpdate{
+		GoalID: fsMet.Goal.ID, ProgressPct: ptr(100), Source: domain.GoalUpdateByAgent,
+	}, time.Now()); err != nil {
+		return err
+	}
+
+	sw := sweeper.New(log.With("component", "sweeper-goals"), st, mat, defaultTZ)
+	if err := sw.Tick(ctx); err != nil {
+		return err
+	}
+
+	check := func(label, id string, want domain.GoalStatus) {
+		g, e := st.GetGoal(ctx, id)
+		fmt.Printf("    %-28s %-7s (want %s)  %s\n", label, g.Status, want, verdict(e == nil && g.Status == want))
+	}
+	check("item-linked short", missGoal.Goal.ID, domain.GoalMissed)
+	check("item-linked reached", metGoal.Goal.ID, domain.GoalMet)
+	check("freestanding, no updates", fsMiss.Goal.ID, domain.GoalMissed)
+	check("freestanding 100pct", fsMet.Goal.ID, domain.GoalMet)
+	check("current-week goal untouched", goal.ID, domain.GoalActive)
+
+	eval2, err := st.EvaluateDueGoals(ctx, time.Now(), loc)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("    %-28s considered=%d met=%d missed=%d  %s\n", "second pass is a no-op",
+		eval2.Considered, eval2.Met, eval2.Missed, verdict(eval2.Met == 0 && eval2.Missed == 0))
+
+	return nil
+}
+
+// goalPctText renders a store.GoalProgress' latest percent for a log line.
+func goalPctText(p *store.GoalProgress) string {
+	if p == nil || p.LatestPct == nil {
+		return "?"
+	}
+	return fmt.Sprintf("%d", *p.LatestPct)
 }

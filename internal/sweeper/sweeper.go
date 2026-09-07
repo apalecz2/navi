@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/materializer"
+	"github.com/aidenpaleczny/navi/internal/schedule"
+	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/supervisor"
 )
 
@@ -48,12 +50,20 @@ const MinHorizonDays = 25
 const LLMCallRetention = 90 * 24 * time.Hour
 
 // Store is the narrow view this loop needs. Declared here rather than taken as
-// the concrete type because the horizon and llm_calls retention are the only
-// things it asks the database for, and saying so is what keeps the backstop
-// from growing into a second scheduler.
+// the concrete type because the horizon, llm_calls retention, and the goal
+// period-end pass are all this backstop asks the database for, and saying so is
+// what keeps it from growing into a second scheduler.
 type Store interface {
 	Horizon(ctx context.Context) (int, bool, error)
 	PruneLLMCalls(ctx context.Context, before time.Time) (int64, error)
+
+	// The goal period-end pass (P3.5). CurrentTZ resolves the person's zone the
+	// same way the reconciler's grace pass does, so "the period ended" agrees
+	// with how a goal's local dates were written; EvaluateDueGoals reads
+	// period_end < today and writes met or missed - code, not the clock, the
+	// same principle K6 gives missed on occurrences.
+	CurrentTZ(ctx context.Context) (string, bool, error)
+	EvaluateDueGoals(ctx context.Context, now time.Time, loc *time.Location) (store.GoalEvaluation, error)
 }
 
 // Materializer is the one call this loop makes into the expansion path. The
@@ -63,16 +73,19 @@ type Materializer interface {
 	All(ctx context.Context) (materializer.Result, error)
 }
 
-// Sweeper enforces caps, applies retention, and backfills materialization.
+// Sweeper enforces caps, applies retention, backfills materialization, and
+// evaluates goals whose period has ended.
 type Sweeper struct {
-	log   *slog.Logger
-	store Store
-	mat   Materializer
+	log       *slog.Logger
+	store     Store
+	mat       Materializer
+	defaultTZ *time.Location
 }
 
-// New returns a sweeper.
-func New(log *slog.Logger, st Store, mat Materializer) *Sweeper {
-	return &Sweeper{log: log, store: st, mat: mat}
+// New returns a sweeper. defaultTZ is the deployment default zone, the fallback
+// under kv.current_tz when resolving the person's clock for goal evaluation.
+func New(log *slog.Logger, st Store, mat Materializer, defaultTZ *time.Location) *Sweeper {
+	return &Sweeper{log: log, store: st, mat: mat, defaultTZ: defaultTZ}
 }
 
 // Loop describes this loop to the supervisor.
@@ -105,6 +118,23 @@ func (s *Sweeper) Tick(ctx context.Context) error {
 	}
 	if pruned > 0 {
 		s.log.Info("llm_calls pruned", "rows", pruned)
+	}
+
+	// Goal period-end evaluation (P3.5, docs/11-goals-spec.md#lifecycle). Runs
+	// every tick: the SELECT behind it filters status = 'active' and the write
+	// is one-way, so an hourly re-pass over a goal already concluded is a
+	// zero-row update, not a second verdict. The zone is the person's, resolved
+	// like the reconciler's grace pass resolves its own.
+	zones, err := schedule.LoadZones(ctx, s.store, s.defaultTZ)
+	if err != nil {
+		return err
+	}
+	eval, err := s.store.EvaluateDueGoals(ctx, time.Now(), zones.Local())
+	if err != nil {
+		return err
+	}
+	if eval.Met+eval.Missed > 0 {
+		s.log.Info("goals evaluated", "met", eval.Met, "missed", eval.Missed, "considered", eval.Considered)
 	}
 	return nil
 }

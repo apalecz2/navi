@@ -247,7 +247,7 @@ func run() error {
 		reconciler.New(log.With("loop", reconciler.Name), st, notifier, m, composer,
 			cfg.Schedule.ReconcileAt, cfg.Schedule.DefaultTZ).Loop(),
 
-		sweeper.New(log.With("loop", sweeper.Name), st, mat).Loop(),
+		sweeper.New(log.With("loop", sweeper.Name), st, mat, cfg.Schedule.DefaultTZ).Loop(),
 	}
 	if chatIntake != nil {
 		loops = append(loops, chatIntake.Loop())

@@ -7,6 +7,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/schedule"
+	"github.com/aidenpaleczny/navi/internal/store"
 )
 
 // buildConfirmation renders a plain-language reply naming up to the next
@@ -24,6 +25,12 @@ func buildConfirmation(toolName string, res agent.Result) string {
 		return renderResolutions(res.Resolutions)
 	case "pause":
 		return renderPauseConfirmation(res.Item, res.PausedUntil)
+	case "create_goal", "update_goal":
+		return renderGoalConfirmation(toolName, res.Goal, res.GoalProgress)
+	case "list_goals":
+		return renderGoalList(res.Goals)
+	case "log_goal_progress":
+		return renderGoalProgressLogged(res.Goal, res.GoalUpdate, res.GoalProgress)
 	default: // create_item, update_item
 		return renderNextOccurrences(res.Item, res.NextOccurrences, res.Inferred)
 	}
@@ -181,6 +188,92 @@ func formatTimestamps(occs []agent.Occurrence) string {
 		texts[i] = o.StartsAt
 	}
 	return strings.Join(texts, ", ")
+}
+
+// renderGoalConfirmation confirms a create_goal or update_goal write in plain
+// language, naming the shape and the current progress - which for an item-linked
+// goal is already whatever its chains say, so "0 of 4 so far" is honest on the
+// first turn rather than a placeholder.
+func renderGoalConfirmation(toolName string, goal *domain.Goal, prog *store.GoalProgress) string {
+	if goal == nil {
+		return "Goal saved."
+	}
+	verb := "Tracking"
+	if toolName == "update_goal" {
+		verb = "Updated"
+		if goal.Status == domain.GoalAbandoned {
+			return fmt.Sprintf("Dropped %q.", goal.Title)
+		}
+	}
+	period := goalPeriodPhrase(*goal)
+	if prog == nil {
+		return fmt.Sprintf("%s %q %s.", verb, goal.Title, period)
+	}
+	return fmt.Sprintf("%s %q %s. %s.", verb, goal.Title, period, goalProgressPhrase(*prog))
+}
+
+// renderGoalProgressLogged confirms a log_goal_progress append. It states the
+// new current progress, which is the row just written - the trail is the data,
+// so there is nothing else it could be.
+func renderGoalProgressLogged(goal *domain.Goal, upd *domain.GoalUpdate, prog *store.GoalProgress) string {
+	name := "the goal"
+	if goal != nil {
+		name = fmt.Sprintf("%q", goal.Title)
+	}
+	if prog != nil && !prog.ItemLinked {
+		return fmt.Sprintf("Logged. %s is %s.", name, goalProgressPhrase(*prog))
+	}
+	if upd != nil && upd.Note != nil && *upd.Note != "" {
+		return fmt.Sprintf("Logged against %s: %q.", name, *upd.Note)
+	}
+	return fmt.Sprintf("Logged against %s.", name)
+}
+
+// renderGoalList is list_goals' reply: a count and each goal's progress in one
+// line, the same numbers context injection shows.
+func renderGoalList(goals []store.GoalProgress) string {
+	if len(goals) == 0 {
+		return "You have no goals set."
+	}
+	parts := make([]string, len(goals))
+	for i, p := range goals {
+		parts[i] = fmt.Sprintf("%q (%s)", p.Goal.Title, goalProgressPhrase(p))
+	}
+	return fmt.Sprintf("You have %d goal(s): %s.", len(goals), strings.Join(parts, "; "))
+}
+
+// goalPeriodPhrase reads a goal's window back the way a person would say it.
+func goalPeriodPhrase(g domain.Goal) string {
+	switch g.PeriodKind {
+	case domain.GoalPeriodDay:
+		return "for " + g.PeriodStart
+	case domain.GoalPeriodWeek:
+		return fmt.Sprintf("for the week of %s", g.PeriodStart)
+	case domain.GoalPeriodMonth:
+		return fmt.Sprintf("for %s", g.PeriodStart[:7])
+	default:
+		return fmt.Sprintf("from %s to %s", g.PeriodStart, g.PeriodEnd)
+	}
+}
+
+// goalProgressPhrase renders store.GoalProgress for a confirmation.
+func goalProgressPhrase(p store.GoalProgress) string {
+	if p.ItemLinked {
+		return fmt.Sprintf("%d of %d so far", p.Completed, p.Target)
+	}
+	if !p.HasUpdate {
+		return "no progress logged yet"
+	}
+	switch {
+	case p.LatestPct != nil && p.LatestNote != nil && *p.LatestNote != "":
+		return fmt.Sprintf("at %d%% (%q)", *p.LatestPct, *p.LatestNote)
+	case p.LatestPct != nil:
+		return fmt.Sprintf("at %d%%", *p.LatestPct)
+	case p.LatestNote != nil:
+		return fmt.Sprintf("last noted %q", *p.LatestNote)
+	default:
+		return "in progress"
+	}
 }
 
 // buildApology is the terminal reply when the last failure was

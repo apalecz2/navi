@@ -317,23 +317,41 @@ full design.
 - Velocity for item-linked goals, computed from `chains`, never a stored
   counter
 - Morning briefing loop: composed ahead of send time (invariant 1), plain-
-  template fallback, no new occurrence kind
-- Response tracking for the briefing: `kv.awaiting_response:{date}` and a
-  grace-window evaluation, reusing reconciliation's shape
-- `persona.md` gains whatever Q-16 resolves to before this phase ships
+  template fallback, no new occurrence kind — **done, session 19.**
+  `internal/briefing`, the first new loop since session 1, three phases on a
+  60s tick (compose ~30 min ahead into `kv.briefing_pending`, send from that
+  slot at `BRIEFING_AT`, evaluate every tick), `BRIEFING_AT` format-checked at
+  boot like `RECONCILE_AT`. A missed compose window templates synchronously at
+  send with no model call
+- Response tracking for the briefing: `kv.briefing_awaiting_response` and a
+  grace-window evaluation, reusing reconciliation's shape — **done, session
+  19.** Any inbound message after `sent_at` (`store.HasInboundSince`) clears it;
+  a closed grace window with none increments `navi_briefing_unanswered_total`
+  and writes nothing else, because there is no occurrence to transition
+- `persona.md` gains whatever Q-16 resolves to before this phase ships —
+  **done, session 19.** Q-16 resolved *G8 wins outright* (see
+  [10-open-questions.md](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing));
+  a minimal `config/persona.md` draft carries it, P5 expands it
 
 **Exit criteria**
 
-- [ ] A weekly item-linked goal ("gym four times this week") tracks progress
-      from `chains` automatically, with no separate write
-- [ ] A freeform goal ("ship the report by Friday") accepts a conversational
-      progress update and evaluates `met`/`missed` at period end
-- [ ] The morning briefing arrives at the configured time with no model call
+- [x] A weekly item-linked goal ("gym four times this week") tracks progress
+      from `chains` automatically, with no separate write — session 18,
+      `reportGoals`
+- [x] A freeform goal ("ship the report by Friday") accepts a conversational
+      progress update and evaluates `met`/`missed` at period end — session 18
+- [x] The morning briefing arrives at the configured time with no model call
       in the firing path, and degrades to a plain summary on generation failure
-- [ ] A briefing that gets no reply is detected after its grace window, the
-      same shape as an occurrence going `missed`
+      — session 19. `reportBriefing` drives compose-ahead, restart-safe send,
+      broken-model → template, and missed-window → synchronous template
+- [x] A briefing that gets no reply is detected after its grace window — session
+      19. Same deterministic-window shape as the `missed` grace pass, but the
+      conclusion is a counter and a log line, not a status transition (there is
+      no occurrence)
 - [ ] Goal progress and velocity numbers from the agent match the dashboard's
-      numbers exactly, same as V6 already requires for item statistics
+      numbers exactly — **agent half verified** against a hand count over
+      `chains` (`reportGoals`, session 18); the dashboard half is **blocked on
+      P4**, which is where `GET /api/stats/summary` and the charts land
 
 ---
 

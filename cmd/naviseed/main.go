@@ -36,6 +36,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/aidenpaleczny/navi/internal/agent"
+	"github.com/aidenpaleczny/navi/internal/briefing"
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/defaults"
@@ -203,6 +204,13 @@ func run() error {
 	// item-linked check completes real occurrences and the past-period checks
 	// hand-insert some.
 	if err := reportGoals(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// The morning briefing: the last of P3.5. After goals, because its context
+	// blob reads the same goal progress, and after the reconciler sections,
+	// because it reuses their grace-window shape and their recording transport.
+	if err := reportBriefing(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
 		return err
 	}
 
@@ -3717,6 +3725,338 @@ func reportGrace(ctx context.Context, st *store.Store, tz string, fallback *time
 	return nil
 }
 
+// reportBriefing drives the morning briefing through all three of its phases -
+// compose, send, evaluate - against a recording transport, the same no-network
+// way reportReconcile drives the check-in.
+//
+// The things that have to be true at once: the text is composed ahead of the
+// send and a restart in between loses none of it; a second pass after the send
+// sends nothing; killing the model still produces a briefing, as the plain
+// template; any inbound message clears the awaiting marker; and a window that
+// closes with none is recorded unanswered without anything being marked missed.
+//
+// Clocks are fabricated against the device zone so every phase happens on one
+// run whatever the wall clock says - reportZones has already moved that zone,
+// so a fabricated instant has to be built in loc, not in DEFAULT_TZ.
+func reportBriefing(ctx context.Context, st *store.Store, tz string, fallback *time.Location, log *slog.Logger) error {
+	fmt.Println("\nbriefing  the morning briefing")
+
+	zones, err := schedule.LoadZones(ctx, st, fallback)
+	if err != nil {
+		return err
+	}
+	loc := zones.Local()
+	m := metrics.New()
+
+	// The layout the briefing compares its send time with has to be the one
+	// config validates BRIEFING_AT against - separate constants, same reason
+	// reconciler.LocalTimeLayout duplicates it, same honesty check.
+	fmt.Printf("  slot layout             config=%q briefing=%q  %s\n",
+		config.LocalTimeLayout, briefing.LocalTimeLayout,
+		verdict(config.LocalTimeLayout == briefing.LocalTimeLayout))
+
+	if err := st.ClearGlobalPause(ctx); err != nil {
+		return err
+	}
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+
+	const at = "07:00"
+
+	// A loud item and a silent one, plus one occurrence of each today, so the
+	// briefing has something to say and "silent, no ping" is a real line.
+	loud, err := seedFireItem(ctx, st, "briefing vitamins", domain.NotifyAtTime, tz)
+	if err != nil {
+		return err
+	}
+	silent, err := seedFireItem(ctx, st, "briefing stretch", domain.NotifySilent, tz)
+	if err != nil {
+		return err
+	}
+	base := time.Now().In(loc)
+	noon := time.Date(base.Year(), base.Month(), base.Day(), 12, 0, 0, 0, loc)
+	if _, err := fireOccurrence(ctx, st, loud, noon, ptr("take em")); err != nil {
+		return err
+	}
+	if _, err := fireOccurrence(ctx, st, silent, noon, nil); err != nil {
+		return err
+	}
+
+	day := base.Format(domain.DateLayout)
+	composeNow := time.Date(base.Year(), base.Month(), base.Day(), 6, 40, 0, 0, loc)
+	sendNow := time.Date(base.Year(), base.Month(), base.Day(), 7, 1, 0, 0, loc)
+
+	// runCompose stages a briefing with one composer and returns the staged
+	// text. Each call clears the slot first so the bodies are comparable.
+	runCompose := func(c briefing.Composer) (string, error) {
+		if err := st.ClearBriefingState(ctx); err != nil {
+			return "", err
+		}
+		br := briefing.New(log.With("loop", "briefing-compose"), st, &recordingTransport{}, m, c, at, fallback)
+		res, err := br.Run(ctx, composeNow)
+		if err != nil {
+			return "", err
+		}
+		if res.Phase != briefing.PhaseCompose {
+			return "", fmt.Errorf("expected compose phase, got %q", res.Phase)
+		}
+		_, text, ok, err := st.BriefingPending(ctx)
+		if err != nil || !ok {
+			return "", fmt.Errorf("nothing staged: ok=%v err=%w", ok, err)
+		}
+		return text, nil
+	}
+
+	newComposer := func(srv *httptest.Server) briefing.Composer {
+		routing := &model.Routing{Tasks: map[model.Task]model.TaskRouting{
+			model.TaskBriefing: {Tiers: []model.Tier{
+				{Model: "naviseed-briefing", BaseURL: srv.URL, TimeoutSeconds: 5},
+			}},
+		}}
+		client := model.New(log.With("component", "model-briefing"), routing, "", st, m)
+		return briefing.NewModelComposer(client, routing, "config/persona.md.does-not-exist")
+	}
+
+	// --- composition: model prose, and the fallback to template --------------
+
+	templateText, err := runCompose(nil)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  no composer -> template  %q  %s\n",
+		truncate(templateText, 56), verdict(templateText != ""))
+
+	const composed = "Wednesday. Vitamins is on deck at noon; stretch is silent. Anything else for today?"
+	okSrv := composeServer(composed)
+	defer okSrv.Close()
+	proseText, err := runCompose(newComposer(okSrv))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  composed briefing staged  %q  %s\n",
+		truncate(proseText, 56), verdict(proseText == composed && proseText != templateText))
+
+	downSrv := brokenServer()
+	defer downSrv.Close()
+	brokenText, err := runCompose(newComposer(downSrv))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  model down -> template   %q  %s\n",
+		truncate(brokenText, 56), verdict(brokenText == templateText))
+
+	// --- compose ahead of send, then a restart-safe send --------------------
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	rec := &recordingTransport{}
+	br := briefing.New(log.With("loop", "briefing"), st, rec, m, nil, at, fallback)
+
+	cRes, err := br.Run(ctx, composeNow)
+	if err != nil {
+		return err
+	}
+	pDate, pText, pOK, err := st.BriefingPending(ctx)
+	if err != nil {
+		return err
+	}
+	lastAfterCompose, _, err := st.LastBriefingDate(ctx)
+	if err != nil {
+		return err
+	}
+	composedAhead := cRes.Phase == briefing.PhaseCompose && pOK && pDate == day &&
+		len(rec.sent) == 0 && lastAfterCompose == ""
+	fmt.Printf("  composed ~30m ahead     staged=%v sent=%d latch=%q  %s\n",
+		pOK && pDate == day, len(rec.sent), lastAfterCompose, verdict(composedAhead))
+
+	// The send phase, with the staged text left exactly as the compose phase
+	// wrote it - this is the restart, minus the restart.
+	sRes, err := br.Run(ctx, sendNow)
+	if err != nil {
+		return err
+	}
+	var body string
+	if len(rec.sent) == 1 {
+		body = rec.sent[0].Body
+	}
+	lastNow, _, err := st.LastBriefingDate(ctx)
+	if err != nil {
+		return err
+	}
+	awDate, _, awOK, err := st.BriefingAwaiting(ctx)
+	if err != nil {
+		return err
+	}
+	_, _, pendLeft, err := st.BriefingPending(ctx)
+	if err != nil {
+		return err
+	}
+	ref, refOK, err := st.LatestContextRef(ctx, store.ContextRefBriefing)
+	if err != nil {
+		return err
+	}
+	sentClean := sRes.Sent && len(rec.sent) == 1 && body == pText &&
+		lastNow == day && awOK && awDate == day && !pendLeft &&
+		refOK && ref == "briefing:"+day
+	fmt.Printf("  sent the staged text    body==staged=%v latch=%q awaiting=%v pending-cleared=%v ref=%q  %s\n",
+		body == pText, lastNow, awOK, !pendLeft, ref, verdict(sentClean))
+
+	// A second pass on the same day sends nothing: last_briefing_date is the
+	// latch, and it is durable.
+	before := len(rec.sent)
+	d3, err := br.Run(ctx, sendNow.Add(2*time.Minute))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  no double send          phase=%q sent=%d  %s\n",
+		d3.Phase, len(rec.sent)-before, verdict(!d3.Sent && len(rec.sent) == before))
+
+	// --- the compose window was missed entirely: template at send time ------
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	rec2 := &recordingTransport{}
+	br2 := briefing.New(log.With("loop", "briefing-missed"), st, rec2, m, nil, at, fallback)
+	mRes, err := br2.Run(ctx, sendNow)
+	if err != nil {
+		return err
+	}
+	missBody := ""
+	if len(rec2.sent) == 1 {
+		missBody = rec2.sent[0].Body
+	}
+	fmt.Printf("  window missed -> sent    sent=%d fallback=%v names item=%v  %s\n",
+		len(rec2.sent), mRes.Fallback, strings.Contains(missBody, loud.Title),
+		verdict(mRes.Sent && mRes.Fallback && strings.Contains(missBody, loud.Title)))
+
+	// --- no reply, grace window closes: recorded unanswered, nothing missed -
+	//
+	// This runs before the answered case on purpose: that case is the only
+	// thing in this section that writes an inbound row, so running it second
+	// keeps "no message has arrived since sent_at" true here without needing a
+	// future-dated marker (which would sort to the top of the history the
+	// conversation ladder loads later in the same run - the from_date-shaped
+	// trap CLAUDE.md records).
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	sentAt := time.Now()
+	sentDay := sentAt.In(loc).Format(domain.DateLayout)
+	if err := st.RecordBriefing(ctx, sentDay, "the briefing", "briefing:"+sentDay, sentAt); err != nil {
+		return err
+	}
+	missedBefore, err := countAllMissed(ctx, st)
+	if err != nil {
+		return err
+	}
+	// A day and change past sent_at: past the end-of-local-day deadline K7 gives
+	// a briefing with no per-item grace of its own.
+	evUnans, err := br.EvaluateResponse(ctx, sentAt.Add(25*time.Hour))
+	if err != nil {
+		return err
+	}
+	_, _, stillMarked, err := st.BriefingAwaiting(ctx)
+	if err != nil {
+		return err
+	}
+	missedAfter, err := countAllMissed(ctx, st)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  no reply -> unanswered   unanswered=%v marker-cleared=%v occurrences-missed+%d  %s\n",
+		evUnans.Unanswered, !stillMarked, missedAfter-missedBefore,
+		verdict(evUnans.Unanswered && !stillMarked && missedAfter == missedBefore))
+
+	// --- any inbound message clears the awaiting marker -------------------
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	t1 := time.Now()
+	if err := st.RecordBriefing(ctx, day, "today's briefing", "briefing:"+day, t1); err != nil {
+		return err
+	}
+	if _, _, err := st.CreateConversation(ctx, domain.NewConversation{
+		Role: domain.RoleUser, Content: "also remind me to call the dentist",
+	}); err != nil {
+		return err
+	}
+	evAns, err := br.EvaluateResponse(ctx, t1.Add(time.Minute))
+	if err != nil {
+		return err
+	}
+	_, _, stillAwaiting, err := st.BriefingAwaiting(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  any reply clears it      answered=%v unanswered=%v marker-cleared=%v  %s\n",
+		evAns.Answered, evAns.Unanswered, !stillAwaiting,
+		verdict(evAns.Answered && !evAns.Unanswered && !stillAwaiting))
+
+	// --- a global pause suppresses every phase ----------------------------
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	if err := st.SetGlobalPauseUntil(ctx, time.Now().Add(72*time.Hour)); err != nil {
+		return err
+	}
+	recP := &recordingTransport{}
+	brP := briefing.New(log.With("loop", "briefing-paused"), st, recP, m, nil, at, fallback)
+	pRun, err := brP.Run(ctx, composeNow)
+	if err != nil {
+		return err
+	}
+	pEval, err := brP.EvaluateResponse(ctx, composeNow)
+	if err != nil {
+		return err
+	}
+	_, _, pStaged, err := st.BriefingPending(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  global pause suppresses  run-paused=%v eval-paused=%v staged=%v sent=%d  %s\n",
+		pRun.Paused, pEval.Paused, pStaged, len(recP.sent),
+		verdict(pRun.Paused && pEval.Paused && !pStaged && len(recP.sent) == 0))
+	if err := st.ClearGlobalPause(ctx); err != nil {
+		return err
+	}
+
+	// --- the two counters, mirroring the reconciler's --------------------
+
+	metricsRec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	out := metricsRec.Body.String()
+	wantSent := strings.Contains(out, "navi_briefing_sent_total 2")
+	wantFallback := strings.Contains(out, "navi_briefing_fallback_total 4")
+	wantUnanswered := strings.Contains(out, "navi_briefing_unanswered_total 1")
+	fmt.Printf("  metrics                 sent=2 fallback=4 unanswered=1  %s\n",
+		verdict(wantSent && wantFallback && wantUnanswered))
+
+	if err := st.ClearBriefingState(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// countAllMissed is the occurrence-missed total across the whole database, so
+// the briefing's unanswered evaluation can be shown to add nothing to it.
+func countAllMissed(ctx context.Context, st *store.Store) (int, error) {
+	items, err := st.ListActiveItems(ctx)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]string, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ID)
+	}
+	return countStatus(ctx, st, ids, domain.StatusMissed)
+}
+
 // reportPauseEndpoints drives POST /api/items/{id}/pause and POST /api/pause
 // through a real httpapi server, the way reportResolve drives resolution.
 //
@@ -4169,7 +4509,7 @@ func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, r
 		taskCount = len(real.Tasks)
 	}
 	fmt.Printf("  %s                     tasks=%d  %s\n",
-		routingPath, taskCount, verdict(loadErr == nil && taskCount == 5))
+		routingPath, taskCount, verdict(loadErr == nil && taskCount == 6))
 
 	// Checked against whichever MODEL_PROVIDER this run is actually
 	// configured with — the same check main runs before wiring a Client —

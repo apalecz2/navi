@@ -27,6 +27,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/aidenpaleczny/navi/internal/agent"
+	"github.com/aidenpaleczny/navi/internal/briefing"
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/copywriter"
@@ -156,6 +157,15 @@ func run() error {
 	if modelClient != nil {
 		composer = reconciler.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
 	}
+
+	// The briefing's composer follows the identical nil-able pattern and shares
+	// the same model stack (modelStack above): no chat transport means no model
+	// client means every morning briefing is the plain template, which is the
+	// right answer there.
+	var briefingComposer briefing.Composer
+	if modelClient != nil {
+		briefingComposer = briefing.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
+	}
 	if chatWebhook != nil {
 		// Zero-value on start (RegisterLoop's argument): a webhook that has
 		// never seen a message should read as "no data yet" and not be
@@ -246,6 +256,14 @@ func run() error {
 		// (03-architecture's one correlated failure, accepted in D-006).
 		reconciler.New(log.With("loop", reconciler.Name), st, notifier, m, composer,
 			cfg.Schedule.ReconcileAt, cfg.Schedule.DefaultTZ).Loop(),
+
+		// The briefing sends through the same notifier the scheduler and
+		// reconciler use — one chat adapter, and replies come back through the
+		// chat webhook that already exists. This inherits D-006's one correlated
+		// failure: a Telegram outage takes delivery, the check-in, and the
+		// morning briefing together.
+		briefing.New(log.With("loop", briefing.Name), st, notifier, m, briefingComposer,
+			cfg.Schedule.BriefingAt, cfg.Schedule.DefaultTZ).Loop(),
 
 		sweeper.New(log.With("loop", sweeper.Name), st, mat, cfg.Schedule.DefaultTZ).Loop(),
 	}

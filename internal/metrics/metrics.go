@@ -40,6 +40,10 @@ type Metrics struct {
 	reconciledOccurrences prometheus.Counter
 	checkInFallbacks      prometheus.Counter
 
+	briefingsSent       prometheus.Counter
+	briefingFallbacks   prometheus.Counter
+	briefingsUnanswered prometheus.Counter
+
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
 
@@ -119,6 +123,18 @@ func New() *Metrics {
 			Name: "navi_reconcile_fallback_total",
 			Help: "Check-ins sent as the plain template because no composed text was produced.",
 		}),
+		briefingsSent: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_briefing_sent_total",
+			Help: "Morning briefings sent (O6). One per day.",
+		}),
+		briefingFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_briefing_fallback_total",
+			Help: "Briefings sent as the plain template because no composed text was produced.",
+		}),
+		briefingsUnanswered: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_briefing_unanswered_total",
+			Help: "Morning briefings that got no reply before their grace window closed (O8).",
+		}),
 		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "navi_inbound_messages_accepted_total",
 			Help: "Inbound messages recorded to conversations, by transport.",
@@ -147,6 +163,9 @@ func New() *Metrics {
 		m.checkIns,
 		m.reconciledOccurrences,
 		m.checkInFallbacks,
+		m.briefingsSent,
+		m.briefingFallbacks,
+		m.briefingsUnanswered,
 		m.inboundAccepted,
 		m.inboundDropped,
 		m.llmCalls,
@@ -237,6 +256,25 @@ func (m *Metrics) IncCheckIn() { m.checkIns.Inc() }
 // no llm_calls row at all — a deployment with no chat transport has no model
 // client, never calls one, and templates every night.
 func (m *Metrics) IncCheckInFallback() { m.checkInFallbacks.Inc() }
+
+// IncBriefingSent counts one morning briefing delivered. Counted after the send
+// returns, like IncCheckIn, and for the same reason: a briefing that never
+// reached the user asked nobody anything, and O8's grace window turns on that.
+func (m *Metrics) IncBriefingSent() { m.briefingsSent.Inc() }
+
+// IncBriefingFallback counts one briefing sent as the plain template rather
+// than as composed text — the exact parallel of IncCheckInFallback, and the
+// number worth having for the same reason: how often the user got the boring
+// version, which llm_calls cannot answer because the commonest fallback (no
+// chat transport, so no model client) writes no llm_calls row.
+func (m *Metrics) IncBriefingFallback() { m.briefingFallbacks.Inc() }
+
+// IncBriefingUnanswered counts one briefing whose grace window closed with no
+// reply (O8). Unlike the reconciler's grace pass there is no occurrence
+// transition to fold this into, so it is its own plain counter — the only
+// signal "the briefing went unanswered" produces, read later by the day's tone
+// strategy.
+func (m *Metrics) IncBriefingUnanswered() { m.briefingsUnanswered.Inc() }
 
 // AddReconciledOccurrences counts how many occurrences a check-in asked about.
 // Read against navi_reconcile_checkins_total it is the average size of an

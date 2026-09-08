@@ -7,9 +7,12 @@ that expects a reply rather than just delivering one. Both are new relative to
 build on mechanisms those already established rather than inventing parallel
 ones.
 
-**Status: specified, not built.** Scheduled as [P3.5](09-roadmap.md#p35-goals--briefing),
-after resolution and reconciliation land. See D-024 and D-025 for why goals are
-their own entity and why this waits for real completion data.
+**Status: built.** Goals landed in session 18, the morning briefing in session
+19, closing [P3.5](09-roadmap.md#p35-goals--briefing). This document is now a
+record of the shipped design rather than a forward specification; where the
+implementation diverged from the text below it is noted inline. See D-024 and
+D-025 for why goals are their own entity and why this waited for real completion
+data.
 
 ## What a goal is
 
@@ -204,13 +207,23 @@ injection already assembles for the agent, rendered without a model call —
 the same degrade-to-boring rule N3 gives reminders.
 
 ```
-morning briefing loop (new, daily, fires once at BRIEFING_AT local)
+morning briefing loop (internal/briefing, daily, 60s tick, three phases)
   T minus ~30 minutes: compose from the same context blob the agent's
     system prompt uses (active items, today's occurrences, active goals
-    and their current progress), store on a new kv-backed pending slot
-  BRIEFING_AT: scheduler-shaped send — read the stored text, send it,
-    mark kv.awaiting_response:{date} = sent_at
+    and their current progress), store in kv.briefing_pending
+  BRIEFING_AT: send kv.briefing_pending (or the template synchronously if
+    it is absent, no model call); in one tx write the conversations row
+    with context_ref = briefing:{date}, kv.last_briefing_date = {date},
+    kv.briefing_awaiting_response = {date}\t{sent_at}, delete the pending slot
+  every tick: clear kv.briefing_awaiting_response on any inbound message
+    after sent_at; else record unanswered once the grace window closes
 ```
+
+**As built (session 19):** the three `kv` slots are singletons carrying the
+date in their value rather than `key:{date}` families — the `last_reconcile_date`
+pattern this section cites. `kv.awaiting_response:{date}` in the prose below is
+`kv.briefing_awaiting_response`. The response check runs on the briefing loop
+itself, not the sweeper.
 
 This is deliberately not a new occurrence kind. There is no `starts_at` row
 to claim with `BEGIN IMMEDIATE` for something that happens once a day at one
@@ -221,13 +234,16 @@ daily event.
 
 ### Response tracking
 
-`kv.awaiting_response:{date}` is set when the briefing sends and cleared the
-moment any reply arrives on the conversation transport while it is set —
-recognized the same way a reconciliation reply is recognized, via
-`context_ref = briefing:{date}` on the outbound `conversations` row. A
-sweeper-timed check (same shape as K6's grace window for `missed`) reads
-whatever is still `awaiting_response` past a grace period and evaluates it as
-unanswered.
+`kv.briefing_awaiting_response` is set when the briefing sends and cleared the
+moment any inbound message arrives after `sent_at` (`store.HasInboundSince`,
+a `role='user'` row — the message is never parsed, because the briefing asks an
+open question and engagement is the signal). The briefing is already in
+cross-turn history and carries `context_ref = briefing:{date}`, and the agent's
+context block gets a `Context ref: briefing:{date}` line while the marker is set
+— recognition is context injection, the same as reconciliation, not a classifier
+or a separate route. The briefing loop's own grace pass (same shape as K6's
+window for `missed`) reads the marker once its grace period closes and evaluates
+it as unanswered.
 
 This mirrors reconciliation's grace-then-act shape deliberately: **triggers
 are deterministic, responses are generative** (invariant 3) applies here
@@ -237,18 +253,16 @@ which is a state-machine transition. A briefing has no occurrence to
 transition; going unanswered produces nothing but the confirmation that it
 did, which is read by the day's tone strategy.
 
-### Tone on non-response is unresolved
+### Tone on non-response — resolved, session 19
 
-`persona.md`'s existing hard rule — never guilt, never scold — was written for
-reminder copy and reconciliation questions, both of which are about a single
-task. Whether a morning briefing gets to escalate its firmness when ignored,
-and how that squares with G8, is deliberately not decided by this document.
-See [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing).
-Nothing in the schema or the loop shape above depends on the answer — the
-`awaiting_response` mechanism only needs to know *whether* a reply arrived,
-not what the next message should say about it. The tone ladder in
-[06-agent-spec.md](06-agent-spec.md#tone-ladder) is where that answer lands
-once there is one.
+[Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing) was
+resolved as **G8 wins outright**: on repeated non-response the briefing may
+become shorter and more direct — lead with the decision that most needs one,
+drop the softening, ask plainly — but never anything a reasonable reading calls
+guilt or scolding. A minimal `config/persona.md` draft written this session
+carries the rule; P5 expands the file and may revisit the wording, not the
+principle. Nothing in the schema or the loop depended on the answer — the
+`briefing_awaiting_response` mechanism only records *whether* a reply arrived.
 
 ## Validation
 

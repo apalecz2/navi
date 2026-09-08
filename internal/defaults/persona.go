@@ -10,12 +10,12 @@ import (
 // without a rebuild is a P5 exit criterion (G5) and the vocabulary table has
 // no such requirement.
 //
-// persona.md does not exist until P5: this session builds the system
-// prompt's part-2 slot, not the prose that fills it. A missing file is
-// therefore not an error - it means "no persona configured yet" - and
-// returns ("", nil) so a caller can omit the section entirely rather than
-// injecting an empty heading. Any other read failure is returned so a caller
-// can decide whether to log it and continue with "".
+// A minimal persona.md draft landed in session 19 to resolve Q-16 (tone for an
+// unanswered morning briefing); P5 expands it with the full tone ladder. A
+// missing file is still not an error - a deployment can delete it - it means
+// "no persona configured yet" and returns ("", nil) so a caller omits the
+// section rather than injecting an empty heading. Any other read failure is
+// returned so a caller can decide whether to log it and continue with "".
 func GetPersona(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

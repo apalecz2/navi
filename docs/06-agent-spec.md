@@ -9,7 +9,7 @@ modes.
 | **Conversational agent** | On inbound message | Tell the user, write nothing | Seconds, user is waiting |
 | **Copywriter** | Ahead of each occurrence | Fall back to plain title | Minutes, nobody is waiting |
 | **Reconciler composer** | Once daily | Fall back to a templated list | Seconds |
-| **Briefing composer** (P3.5, not yet built) | Once daily, ahead of `BRIEFING_AT` | Fall back to a plain template built from context injection | Minutes, nobody is waiting |
+| **Briefing composer** (P3.5, session 19) | Once daily, ~30 min ahead of `BRIEFING_AT` | Fall back to a plain template built from context injection | Minutes, nobody is waiting |
 
 ## Conversational agent
 
@@ -90,7 +90,7 @@ type RequestEscalationArgs struct {
     Reason string `json:"reason" jsonschema:"required"`
 }
 
-// P3.5, not yet built — see 11-goals-spec.md
+// P3.5, session 18 — see 11-goals-spec.md
 type CreateGoalArgs struct {
     Title       string `json:"title" jsonschema:"required"`
     PeriodKind  string `json:"period_kind" jsonschema:"required,enum=day,enum=week,enum=month,enum=custom"`
@@ -182,7 +182,7 @@ Today's occurrences:
   occ_01H..  07:30  morning stretch  pending
   occ_01H..  18:40  evening walk     pending
 
-Active goals:                                    [P3.5, not yet built]
+Active goals:                                    [P3.5, session 18]
   gol_01H..  "gym 4x this week"   item-linked  2/4 this period
   gol_01H..  "ship the report"    freestanding 60%, updated 2026-08-04
 
@@ -190,7 +190,7 @@ Last touched: itm_01H.. ("evening walk")
 Context ref:  reconcile:2026-08-05   [present only while a check-in awaits an answer]
   awaiting:  occ_01H..  morning stretch
              occ_01H..  evening walk
-Context ref:  briefing:2026-08-05    [present only when replying to a briefing, P3.5]
+Context ref:  briefing:2026-08-05    [present while this morning's briefing awaits a reply, P3.5]
 ```
 
 Today's occurrences with status are the addition that makes "everything except the
@@ -502,7 +502,7 @@ implementation:
   stalling the grace pass behind it, and staling `/healthz`. The component with
   the good failure mode is the one that should give up first.
 
-## Briefing composer (P3.5, not yet built)
+## Briefing composer (P3.5, session 19)
 
 Runs once daily, roughly 30 minutes ahead of the configured `BRIEFING_AT`,
 reusing the copywriter's shape rather than inventing a third generation
@@ -530,11 +530,17 @@ Rules:
   leftovers.
 - Sent with `context_ref = briefing:{date}`, mirroring reconciliation's
   `context_ref = reconcile:{date}`, so a reply is recognised as answering the
-  briefing rather than starting a new request.
-- Falls back to a plain templated summary if the model call fails — the same
-  item and goal lists, rendered without a model, never silence.
-- Tone on non-response is [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing),
-  unresolved. Nothing about composition or fallback depends on the answer.
+  briefing rather than starting a new request. Recognition is a context-block
+  line (`renderBriefingContextRef`) and `store.HasInboundSince` in the grace
+  pass — no classifier, no separate route.
+- Falls back to a plain templated summary if the model call fails, if there is
+  no model client at all, or if the compose window was missed — the same item
+  and goal lists, rendered without a model, never silence.
+- Tone on non-response was [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing),
+  resolved in session 19 as *G8 wins outright*: on repeated non-response the
+  briefing may be shorter and more direct, never guilt or scolding. Nothing
+  about composition or fallback depended on the answer; the loop only records
+  *whether* a reply arrived.
 
 ## Proactive behaviour
 
@@ -549,7 +555,7 @@ unpredictable behaviour.
 | 3 snoozes on one occurrence | `propose_change` suggesting a different time |
 | 14 days dormant on an active item | Ask whether to keep it |
 | Weekly, Sunday evening | Digest with statistics and one observation |
-| Morning briefing unanswered past grace (P3.5) | Whatever [Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing) resolves to |
+| Morning briefing unanswered past grace (P3.5) | Next briefing shorter and more direct — never guilt or scolding ([Q-16](10-open-questions.md#q-16-tone-for-an-unanswered-morning-briefing), resolved session 19) |
 | Goal at risk of missing its period, P3.5 | Named in the next morning briefing, not a separate interruption |
 
 Cap unprompted messages at three per day, tracked in `kv.proactive_count:{date}`.

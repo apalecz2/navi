@@ -106,6 +106,35 @@ func (q *Queries) GetConversationByTransportExternalID(ctx context.Context, arg 
 	return i, err
 }
 
+const hasInboundSince = `-- name: HasInboundSince :one
+SELECT EXISTS (
+  SELECT 1 FROM conversations
+  WHERE role = ? AND created_at >= ?
+)
+`
+
+type HasInboundSinceParams struct {
+	Role      string
+	CreatedAt string
+}
+
+// HasInboundSince answers "did the person send anything after this instant" -
+// the whole of the morning briefing's reply detection (O8). It is a role check
+// and a timestamp compare, deliberately not a context_ref match: the briefing
+// asks an open question ("anything else for today?"), so any engagement counts
+// as an answer and the message is never parsed. Recognition is context
+// injection, not a gate, exactly as reconciliation does it.
+//
+// created_at is a fixed-width domain.TimeLayout string, so the >= compares
+// chronologically as text. No index is warranted - conversations is capped by
+// retention and this runs once per briefing-loop tick while the marker is set.
+func (q *Queries) HasInboundSince(ctx context.Context, arg HasInboundSinceParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasInboundSince, arg.Role, arg.CreatedAt)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const latestContextRef = `-- name: LatestContextRef :one
 SELECT context_ref FROM conversations
 WHERE context_ref LIKE ?

@@ -112,9 +112,15 @@ func (s *Store) GetConversationByExternalID(ctx context.Context, transport, exte
 }
 
 // ContextRefReconcile is the LIKE pattern matching a check-in's context_ref.
-// The value itself is "reconcile:{date}", written by RecordCheckIn; P3.5's
-// briefing writes "briefing:{date}" and gets its own constant beside this one.
+// The value itself is "reconcile:{date}", written by RecordCheckIn.
 const ContextRefReconcile = "reconcile:%"
+
+// ContextRefBriefing is the same for the morning briefing: the value is
+// "briefing:{date}", written by RecordBriefing, and the agent's Context ref
+// block names it so a reply is recognised as answering the briefing rather than
+// starting a new request (O8, 06-agent-spec). Same LIKE shape as
+// ContextRefReconcile rather than a second query.
+const ContextRefBriefing = "briefing:%"
 
 // LatestContextRef returns the most recent context_ref matching pattern, and
 // whether there was one at all.
@@ -138,6 +144,21 @@ func (s *Store) LatestContextRef(ctx context.Context, pattern string) (string, b
 		return "", false, nil
 	}
 	return *ref, true, nil
+}
+
+// HasInboundSince reports whether any inbound (role user) message has been
+// recorded at or after t. It is the morning briefing's reply detection (O8):
+// the briefing sets an awaiting marker on send, and the first inbound message
+// after that instant - whatever it says - clears it.
+func (s *Store) HasInboundSince(ctx context.Context, t time.Time) (bool, error) {
+	got, err := s.read.HasInboundSince(ctx, sqlc.HasInboundSinceParams{
+		Role:      string(domain.RoleUser),
+		CreatedAt: domain.FormatTime(t),
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: has inbound since: %w", err)
+	}
+	return got, nil
 }
 
 // ListRecentConversations returns the most recent conversation rows, newest

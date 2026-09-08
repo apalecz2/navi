@@ -127,6 +127,17 @@ type Schedule struct {
 	// be asked is a preference, and it is the same shape 11-goals-spec gives
 	// BRIEFING_AT for the identical P3.5 job.
 	ReconcileAt string
+
+	// BriefingAt is the daily morning-briefing time (O6) as a zero-padded local
+	// HH:MM, resolved against the device timezone the same way ReconcileAt is.
+	// There is no per-item override — the briefing is one message about the
+	// whole day, not a per-item question.
+	//
+	// Same shape and same reasoning as ReconcileAt: an environment variable
+	// rather than a constant in internal/briefing, because when a person wants
+	// their day summarised is a preference and not a design fact from the loop
+	// table.
+	BriefingAt string
 }
 
 // LocalTimeLayout is how a wall-clock time of day is spelled in this
@@ -139,6 +150,11 @@ const LocalTimeLayout = "15:04"
 // DefaultReconcileAt is the global check-in time when RECONCILE_AT is unset.
 // 21:00 is the hour US-5.1 and Q-6 both illustrate the evening check-in with.
 const DefaultReconcileAt = "21:00"
+
+// DefaultBriefingAt is the morning-briefing time when BRIEFING_AT is unset.
+// 07:00 is an ordinary "start of the day" hour; 11-goals-spec pins no specific
+// value, only that it is configurable and local.
+const DefaultBriefingAt = "07:00"
 
 // Transport names the adapter filling each transport role. Both point at the
 // same one to start with (D-006); they stay separate because that split is the
@@ -257,6 +273,13 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Same treatment as RECONCILE_AT: always defaulted, so it never joins the
+	// required set, but "7am" parses as no time at all and the briefing loop
+	// compares it as a zero-padded string against the local clock.
+	if cfg.Schedule.BriefingAt, err = envLocalTime("BRIEFING_AT", DefaultBriefingAt); err != nil {
+		return Config{}, err
+	}
+
 	// Required now: the scheduler resolves an adapter from this in the same
 	// commit that reads it.
 	if cfg.Transport.Notify, err = envRequiredString("NOTIFY_TRANSPORT", LoggingTransport); err != nil {
@@ -346,6 +369,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("config_dir", c.Files.ConfigDir),
 		slog.String("default_tz", c.Schedule.DefaultTZ.String()),
 		slog.String("reconcile_at", c.Schedule.ReconcileAt),
+		slog.String("briefing_at", c.Schedule.BriefingAt),
 
 		// Which adapter is delivering reminders is the one setting whose wrong
 		// value looks exactly like a working system, so it goes in the line that

@@ -40,6 +40,7 @@ const (
 	TaskBulkResolve Task = "bulk_resolve"
 	TaskCopywriter  Task = "copywriter"
 	TaskReconcile   Task = "reconcile"
+	TaskBriefing    Task = "briefing"
 	TaskDigest      Task = "digest"
 )
 

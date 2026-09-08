@@ -52,6 +52,12 @@ type Store interface {
 	// "still answerable" and "not yet missed" have to be the same set.
 	ListAwaitingReconciliation(ctx context.Context, loc *time.Location) ([]store.Awaiting, error)
 	LatestContextRef(ctx context.Context, pattern string) (string, bool, error)
+
+	// The briefing's equivalent of the first read: is a morning briefing still
+	// waiting on a reply, and which day's. A widened "awaiting read", sibling to
+	// ListAwaitingReconciliation rather than a second recognition mechanism -
+	// the briefing loop's EvaluateResponse reads the same slot.
+	BriefingAwaiting(ctx context.Context) (date string, sentAt time.Time, ok bool, err error)
 }
 
 // Sender is the outbound half this package needs - Send only, satisfied

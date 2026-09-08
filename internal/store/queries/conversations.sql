@@ -44,3 +44,20 @@ SELECT context_ref FROM conversations
 WHERE context_ref LIKE ?
 ORDER BY created_at DESC, id DESC
 LIMIT 1;
+
+-- HasInboundSince answers "did the person send anything after this instant" -
+-- the whole of the morning briefing's reply detection (O8). It is a role check
+-- and a timestamp compare, deliberately not a context_ref match: the briefing
+-- asks an open question ("anything else for today?"), so any engagement counts
+-- as an answer and the message is never parsed. Recognition is context
+-- injection, not a gate, exactly as reconciliation does it.
+--
+-- created_at is a fixed-width domain.TimeLayout string, so the >= compares
+-- chronologically as text. No index is warranted - conversations is capped by
+-- retention and this runs once per briefing-loop tick while the marker is set.
+--
+-- name: HasInboundSince :one
+SELECT EXISTS (
+  SELECT 1 FROM conversations
+  WHERE role = ? AND created_at >= ?
+);

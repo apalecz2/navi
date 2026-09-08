@@ -77,6 +77,20 @@ tasks:
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 130
 
+  # Same shape as reconcile (docs/06-agent-spec.md#model-routing): composing one
+  # message from a list, not reasoning over it. Fires once a day, ~30 minutes
+  # ahead of BRIEFING_AT, and falls back to a plain template on any failure, so
+  # the second tier is a courtesy rather than a necessity.
+  briefing:
+    thinking: false
+    tiers:
+      - model: "gemma-4-31b-it"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        timeout_seconds: 120
+      - model: "gemini-3.5-flash-lite"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        timeout_seconds: 130
+
   # Weekly, and it actually reasons over statistics, so cost is negligible at
   # that frequency and both tiers get more time than the others.
   digest:

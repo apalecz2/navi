@@ -182,6 +182,18 @@ examples to react to — the same way G7's tone ladder states were only really
 legible once they existed as example copy rather than a table of rules. Not
 worth deciding from first principles before that draft exists.
 
+**Resolved, P3.5 session 19 — shape 1: the G8 rule wins outright.** A minimal
+`config/persona.md` draft was written this session (rather than waiting for
+P5's full draft) specifically so the answer had worked copy to land against.
+The briefing may become *shorter and more direct* on repeated non-response —
+lead with the decision that most needs one, drop the softening, ask plainly —
+and that is the whole of the escalation. It may not become anything a
+reasonable reading calls guilt or scolding; directness is not an exception to
+G8. Nothing in the loop or the schema depended on the answer either way — the
+`briefing_awaiting_response` mechanism only records *whether* a reply arrived —
+so the phase closed on its other criteria regardless. P5 expands `persona.md`
+with the full tone ladder and can revisit the wording, not the principle.
+
 ---
 
 ## Needs an answer before P5

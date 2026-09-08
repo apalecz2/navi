@@ -48,6 +48,30 @@ const (
 	// the item. Holds a bare item id; empty or absent both mean "nothing
 	// touched yet."
 	KeyLastTouchedItem = "last_touched_item"
+
+	// KeyBriefingPending holds the morning briefing composed ahead of send time
+	// (O6, invariant 1): "{date}\n{text}", a local ISO date and the composed
+	// body joined by a newline. Written by the briefing loop's compose phase
+	// ~30 minutes early, read and deleted by its send phase. Absent means
+	// nothing has been composed for today yet, in which case the send phase
+	// renders the plain template with no model call.
+	KeyBriefingPending = "briefing_pending"
+
+	// KeyLastBriefingDate is the local date of the last briefing actually sent -
+	// the latch that stops the send phase running twice across a restart, the
+	// same role KeyLastReconcileDate plays for the check-in. A bare date is
+	// enough here because there is only ever one briefing per day and no
+	// per-item override.
+	KeyLastBriefingDate = "last_briefing_date"
+
+	// KeyBriefingAwaiting records that a briefing is waiting on a reply (O8):
+	// "{date}\t{sent_at}", the local ISO date and the RFC3339 instant it went
+	// out, tab-separated. Set by the send phase, cleared by the evaluate phase
+	// the moment any inbound message lands after sent_at or once the grace
+	// window closes with none. Its presence is the only "still awaiting" state
+	// there is - deleting it ends the evaluation, so there is no separate
+	// "evaluated" flag.
+	KeyBriefingAwaiting = "briefing_awaiting_response"
 )
 
 // getKV returns a raw value and whether it was present. Absence is not an

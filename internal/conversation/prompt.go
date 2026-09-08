@@ -45,6 +45,7 @@ const behaviouralRules = `Rules:
 - Prefer bulk_resolve for any message reporting that something was done, skipped, or missed - including a single one, and including something already done earlier in the day. It takes a list and writes all of it in one transaction, so one call covers "did everything except the walk". Take the occurrence ids from the Today's occurrences block; never guess one.
 - Record a skip, not a miss, whenever the user says why something did not happen, and put their own words in the note: "did everything except the walk, I was away" is a completed set plus one skipped walk with note "I was away". Never choose missed. A miss is not something a person reports - it is what the system concludes when nobody said anything at all.
 - A "Context ref" block below means the last thing you sent was an end-of-day check-in and those occurrences are still waiting on an answer. The user's message may be that answer. If it reports what was or was not done, call bulk_resolve for exactly the occurrences it names and say nothing about the ones it left out - an item the user did not mention is not a skip, and it is not your job to ask again. If the message is a new request instead, treat it as one: a check-in does not oblige the user to answer it before saying anything else. Ids for these may come from the Context ref block or from Today's occurrences; after midnight only the Context ref block still lists them.
+- A "Context ref: briefing:" line means the last thing you sent was this morning's briefing, which asked what today should include. The user's message may be adding to today, or may be an unrelated new request - treat it on its face and act on it with the right tool. A briefing obliges no answer, so do not prompt for one.
 - Prefer pause over a run of skips when the user says they are away or unavailable for a stretch of time. "I'm away until Monday" is one pause with scope=global, not a skip for every occurrence in between. Use scope=item when only one reminder is affected. Pausing with no until resumes normal operation.
 - Call request_escalation when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable.
 - Always respond by calling exactly one tool. A plain-text reply with no tool call is treated as a failure, not an answer.`
@@ -99,8 +100,34 @@ func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	b.WriteString("\n")
 	b.WriteString(l.renderLastTouched(ctx))
 	b.WriteString(l.renderContextRef(ctx, loc))
+	b.WriteString(l.renderBriefingContextRef(ctx))
 
 	return b.String()
+}
+
+// renderBriefingContextRef is the context block's briefing line: present only
+// while this morning's briefing is still waiting on a reply (O8). Like
+// renderContextRef it is a single line and is omitted entirely when nothing is
+// awaiting - an empty "Context ref: briefing:" would tell the model it is
+// answering a question nobody asked.
+//
+// Unlike the check-in there is nothing to list: a briefing has no occurrences,
+// and a reply to "what else should today include" is a new request the model
+// acts on directly. The line exists so the model reads the message as possibly
+// answering the briefing rather than as arriving out of nowhere.
+//
+// The date comes from BriefingAwaiting, cross-checked against the outbound row's
+// own context_ref; a mismatch or a store error degrades to no line, matching
+// renderContextRef and renderPause.
+func (l *Ladder) renderBriefingContextRef(ctx context.Context) string {
+	date, _, ok, err := l.store.BriefingAwaiting(ctx)
+	if err != nil || !ok {
+		return ""
+	}
+	if ref, ok, err := l.store.LatestContextRef(ctx, store.ContextRefBriefing); err == nil && ok {
+		return fmt.Sprintf("Context ref:  %s\n", ref)
+	}
+	return fmt.Sprintf("Context ref:  briefing:%s\n", date)
 }
 
 // renderContextRef is the context block's "Context ref" section: the check-in

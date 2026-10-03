@@ -142,7 +142,7 @@ WHERE parent_occurrence_id = ?;
 --
 -- name: ListOccurrencesInRange :many
 SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
-       i.title
+       o.snooze_depth, i.title, i.notify_policy, i.priority
 FROM occurrences o
 JOIN items i ON i.id = o.item_id
 WHERE o.starts_at >= ?

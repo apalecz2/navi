@@ -421,6 +421,37 @@ type TodayOccurrence struct {
 
 	ResolvedAt       *time.Time
 	ResolutionSource *domain.ResolutionSource
+
+	// The three columns GET /api/today and the day view add to what the agent's
+	// context block needs. Widened here rather than read by a second query:
+	// "what is due today" has one implementation.
+	NotifyPolicy domain.NotifyPolicy
+	Priority     int
+	SnoozeDepth  int
+}
+
+// TodayCounts is the counts block of GET /api/today.
+type TodayCounts struct {
+	Total, Resolved, Outstanding int
+}
+
+// CountToday tallies a day's rows. A snoozed row is superseded by its child, so
+// it is in neither bucket: counting both links would count one chain twice
+// (D-011). Outstanding is the two live statuses; everything else has an outcome.
+func CountToday(occs []TodayOccurrence) TodayCounts {
+	var c TodayCounts
+	for _, o := range occs {
+		switch {
+		case o.Status == domain.StatusSnoozed:
+			continue
+		case o.Status == domain.StatusPending || o.Status == domain.StatusNotified:
+			c.Outstanding++
+		default:
+			c.Resolved++
+		}
+		c.Total++
+	}
+	return c
 }
 
 // TodaysOccurrences returns every occurrence starting inside loc's current
@@ -464,6 +495,9 @@ func (s *Store) TodaysOccurrences(ctx context.Context, loc *time.Location) ([]To
 			Status:           domain.Status(row.Status),
 			ResolvedAt:       resolvedAt,
 			ResolutionSource: source,
+			NotifyPolicy:     domain.NotifyPolicy(row.NotifyPolicy),
+			Priority:         int(row.Priority),
+			SnoozeDepth:      int(row.SnoozeDepth),
 		})
 	}
 	return out, nil

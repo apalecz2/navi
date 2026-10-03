@@ -3,6 +3,8 @@ module github.com/aidenpaleczny/navi
 go 1.25.0
 
 require (
+	github.com/a-h/templ v0.3.1020
+	github.com/invopop/jsonschema v0.14.0
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/prometheus/client_golang v1.20.5
 	github.com/teambition/rrule-go v1.8.2
@@ -17,7 +19,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

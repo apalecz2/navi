@@ -1,0 +1,126 @@
+package web
+
+import "fmt"
+
+// shell is the document every page shares. Every URL in it is same-origin: the
+// image is scratch, the app sits behind Access, and the service worker can only
+// cache what it can fetch from its own origin. The manifest link carries
+// crossorigin="use-credentials" because behind Access a credential-less
+// manifest fetch is redirected to the login page and the install prompt never
+// appears.
+templ shell(title, version string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+			<meta name="theme-color" content="#14532d"/>
+			<meta name="apple-mobile-web-app-capable" content="yes"/>
+			<meta name="mobile-web-app-capable" content="yes"/>
+			<title>{ title }</title>
+			<link rel="manifest" href="/app/manifest.webmanifest" crossorigin="use-credentials"/>
+			<link rel="apple-touch-icon" href={ "/app/static/apple-touch-icon.png?v=" + version }/>
+			<link rel="icon" type="image/png" href={ "/app/static/icon-192.png?v=" + version }/>
+			<link rel="stylesheet" href={ "/app/static/app.css?v=" + version }/>
+			<script defer src={ "/app/static/app.js?v=" + version }></script>
+			<script defer src={ "/app/static/htmx.min.js?v=" + version }></script>
+			<script defer src={ "/app/static/alpine.min.js?v=" + version }></script>
+		</head>
+		<body>
+			{ children... }
+		</body>
+	</html>
+}
+
+// Page is the day view at /app/.
+templ Page(day Day, version string) {
+	@shell("Today · Navi", version) {
+		<main id="day" x-data="day()" data-labels={ labelsJSON() }>
+			<header class="top">
+				<h1>{ day.Heading }</h1>
+				<p class="sub">{ day.Timezone }</p>
+			</header>
+			<p class="notice" x-show="offline" x-cloak>Offline: what you see may be out of date.</p>
+			<div id="day-body" aria-live="polite">
+				@DayBody(day)
+			</div>
+		</main>
+	}
+}
+
+// DayBody is the counts and the list: the fragment every settle swaps in.
+templ DayBody(day Day) {
+	<p class="counts">
+		<span>{ fmt.Sprint(day.Counts.Resolved) } of { fmt.Sprint(day.Counts.Total) } done</span>
+		if day.Counts.Outstanding > 0 {
+			<span class="out">{ fmt.Sprint(day.Counts.Outstanding) } to go</span>
+		}
+	</p>
+	if len(day.Rows) == 0 {
+		<p class="empty">Nothing scheduled today.</p>
+	} else {
+		<ul class="rows">
+			for _, r := range day.Rows {
+				@rowView(r)
+			}
+		</ul>
+	}
+}
+
+templ rowView(r Row) {
+	<li
+		class={ "row", "st-" + r.Status }
+		data-id={ r.ID }
+		x-data={ "{ s: '" + r.Status + "', menu: false, err: '' }" }
+		x-bind:class="'st-' + s"
+	>
+		<span class="time">{ r.Time }</span>
+		<span class="what">
+			<span class="title">{ r.Title }</span>
+			<span class="meta">
+				if r.SnoozeDepth > 0 {
+					<span class="tag">snoozed ×{ fmt.Sprint(r.SnoozeDepth) }</span>
+				}
+				if r.Silent {
+					<span class="tag">silent</span>
+				}
+				if r.Meta != "" {
+					<span>{ r.Meta }</span>
+				}
+				<span class="err" x-show="err" x-text="err" x-cloak></span>
+			</span>
+		</span>
+		<span class="badge" x-text="labels[s] || s">{ r.Label }</span>
+		if r.Resolvable {
+			<span class="acts" x-show="s === 'pending' || s === 'notified'">
+				<button type="button" class="done" x-on:click={ "act($data, '" + r.ID + "', 'complete')" }>Done</button>
+				<button type="button" class="skip" x-on:click={ "act($data, '" + r.ID + "', 'skip')" }>Skip</button>
+				if r.Snoozable {
+					<button type="button" class="snz" x-on:click="menu = !menu" x-bind:aria-expanded="menu">Snooze</button>
+				}
+			</span>
+		}
+		if r.Snoozable {
+			<span class="menu" x-show="menu && s === 'notified'" x-cloak>
+				<button type="button" x-on:click={ "act($data, '" + r.ID + "', 'snooze', '10m')" }>10 min</button>
+				<button type="button" x-on:click={ "act($data, '" + r.ID + "', 'snooze', '1h')" }>1 hour</button>
+				<button type="button" x-on:click={ "act($data, '" + r.ID + "', 'snooze', 'tonight')" }>Tonight</button>
+				<button type="button" x-on:click={ "act($data, '" + r.ID + "', 'snooze', 'tomorrow')" }>Tomorrow</button>
+			</span>
+		}
+	</li>
+}
+
+// Offline is what a navigation falls back to when the network is unreachable.
+// Deliberately static: a cached day view that looks live is worse than none.
+templ Offline(version string) {
+	@shell("Offline · Navi", version) {
+		<main>
+			<header class="top">
+				<h1>You're offline</h1>
+				<p class="sub">The day view needs a connection. It is never shown from a cache, because stale would look live.</p>
+			</header>
+			<p><a href="/app/">Try again</a></p>
+		</main>
+	}
+}

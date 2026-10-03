@@ -153,6 +153,12 @@ func run() error {
 		return err
 	}
 
+	// Last of the surfaces: the day view reads what they wrote and writes through
+	// the two endpoints above, so it follows all of them.
+	if err := reportDayView(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// Beside it, and last of the resolution sections: bulk_resolve is the third
 	// surface, and the only one that can resolve an occurrence that has not
 	// fired yet.
@@ -1509,7 +1515,7 @@ func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Lo
 	}
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, loc),
-		time.Time{}, loc, nil)
+		time.Time{}, loc, nil, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/resolve",
@@ -1698,7 +1704,7 @@ func reportSnooze(ctx context.Context, st *store.Store, tz string, fallback *tim
 	m := metrics.New()
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, fallback),
-		time.Time{}, fallback, nil)
+		time.Time{}, fallback, nil, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/snooze",
@@ -4071,7 +4077,7 @@ func reportPauseEndpoints(ctx context.Context, st *store.Store, tz string, fallb
 	m := metrics.New()
 	mat := materializer.New(log.With("component", "mat-pause"), st, fallback)
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
-		health.New(), m, st, mat, time.Time{}, fallback, nil)
+		health.New(), m, st, mat, time.Time{}, fallback, nil, nil)
 
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

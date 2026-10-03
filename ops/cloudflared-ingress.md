@@ -66,8 +66,13 @@ callback query on `/webhook/telegram`, already authenticated by the shared secre
 and already filtered by the sender allowlist (D8, D-006). There is no
 session-less public action path in this service.
 
-`/healthz`, `/webhook/telegram` and — since session 13 —
-`POST /api/occurrences/{id}/resolve` exist today. The rest are listed so the
+`/healthz`, `/webhook/telegram`, the `/api` resolve, snooze and `GET /api/today`
+routes and — since session 20 — the `/app` day view exist today. The ingress
+regex above already matches `/app`, `/app/` and everything under it, so no rule
+changes; what must be true is that the Access policy for `/app/*` is applied in
+the dashboard (it is the same policy as `/api/*`). The web manifest is fetched
+with credentials (`crossorigin="use-credentials"`) so Access does not redirect it
+to the login page. The remaining routes (calendar, stats) are listed so the
 ingress rule does not need revisiting as each one lands.
 
 **`/api` carries no in-process authentication, by design.** The container trusts

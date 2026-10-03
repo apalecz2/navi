@@ -40,6 +40,10 @@ type Store interface {
 	SnoozeOccurrence(ctx context.Context, id string, source domain.ResolutionSource,
 		now time.Time, at func(domain.Item, domain.Occurrence) (time.Time, error)) (store.Snooze, error)
 
+	// TodaysOccurrences backs GET /api/today. It is the method the agent's
+	// context block reads too: one "what is due today".
+	TodaysOccurrences(ctx context.Context, loc *time.Location) ([]store.TodayOccurrence, error)
+
 	// CurrentTZ is read once per snooze, before the transaction opens, so the
 	// delta resolves against the zone the device is actually in (C6).
 	CurrentTZ(ctx context.Context) (string, bool, error)
@@ -54,6 +58,12 @@ type Store interface {
 	ClearGlobalPause(ctx context.Context) error
 }
 
+// Mounter registers a group of routes on the mux. *web.App is the one
+// implementation; it is an interface so this package names no web internals and
+// a nil one simply leaves /app unregistered.
+type Mounter interface {
+	Mount(mux *http.ServeMux)
+}
 
 // Server holds what the handlers read. Nothing in this struct is written after
 // New returns.
@@ -98,7 +108,7 @@ type Server struct {
 // names nothing (still the default outside P1 testing), in which case the
 // route is never registered and a POST to it 404s from the mux itself rather
 // than reaching a handler with nothing configured to verify against.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler) *http.Server {
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler, app Mounter) *http.Server {
 	s := &Server{
 		log: log, health: h, metrics: m, store: st, mat: mat,
 		claimFloor: claimFloor, defaultTZ: defaultTZ,
@@ -118,6 +128,14 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	// child rather than in the row that was asked about (D-010).
 	mux.HandleFunc("POST /api/occurrences/{id}/resolve", s.handleResolveOccurrence)
 	mux.HandleFunc("POST /api/occurrences/{id}/snooze", s.handleSnoozeOccurrence)
+	mux.HandleFunc("GET /api/today", s.handleToday)
+
+	// The browser surface, behind the same Access policy as /api. Its routes are
+	// all reads; the day view writes by POSTing to the two routes above, so the
+	// outcome mapping is not reimplemented there (D-014).
+	if app != nil {
+		app.Mount(mux)
+	}
 
 	// Two more, one mechanism at two scopes (I6). Neither is a resolution and
 	// neither touches the state machine: pausing suspends a window, and the

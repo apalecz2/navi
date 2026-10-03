@@ -361,6 +361,7 @@ full design.
 
 - `templ` templates and a base layout; HTMX wired to the existing endpoints
 - Day view: today's occurrences, one-tap resolution, optimistic updates via Alpine
+  (**built session 20**; checkboxes below await a real phone)
 - PWA manifest and service worker, installable to the home screen
 - Calendar view over `/api/occurrences`, colour-coded by item and status
 - Statistics: completion rate over time, streaks, median lag, time-of-day heatmap,

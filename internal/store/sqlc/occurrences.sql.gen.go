@@ -486,7 +486,7 @@ func (q *Queries) ListOccurrencesForItem(ctx context.Context, itemID string) ([]
 
 const listOccurrencesInRange = `-- name: ListOccurrencesInRange :many
 SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
-       i.title
+       o.snooze_depth, i.title, i.notify_policy, i.priority
 FROM occurrences o
 JOIN items i ON i.id = o.item_id
 WHERE o.starts_at >= ?
@@ -507,7 +507,10 @@ type ListOccurrencesInRangeRow struct {
 	Status           string
 	ResolvedAt       *string
 	ResolutionSource *string
+	SnoozeDepth      int64
 	Title            string
+	NotifyPolicy     string
+	Priority         int64
 }
 
 // ListOccurrencesInRange is the agent's "today's occurrences" context block
@@ -532,7 +535,10 @@ func (q *Queries) ListOccurrencesInRange(ctx context.Context, arg ListOccurrence
 			&i.Status,
 			&i.ResolvedAt,
 			&i.ResolutionSource,
+			&i.SnoozeDepth,
 			&i.Title,
+			&i.NotifyPolicy,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}

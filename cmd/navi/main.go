@@ -44,6 +44,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/supervisor"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
+	"github.com/aidenpaleczny/navi/internal/web"
 	"github.com/aidenpaleczny/navi/internal/transport/logging"
 	"github.com/aidenpaleczny/navi/internal/transport/telegram"
 )
@@ -277,7 +278,8 @@ func run() error {
 	// the pause routes re-plan the items whose occurrences a new window
 	// suppresses, and a second materializer would mean two random generators
 	// drawing for the same items.
-	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook)
+	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook,
+		web.New(log.With("component", "web"), st, cfg.Schedule.DefaultTZ))
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)

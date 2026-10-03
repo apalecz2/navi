@@ -242,6 +242,25 @@ func ParseResolvableStatus(s string) (Status, bool) {
 	}
 }
 
+// Statuses is every value an occurrence's status column can hold, in the order
+// the specification introduces them.
+var Statuses = []Status{
+	StatusPending, StatusNotified, StatusCompleted, StatusSkipped, StatusSnoozed, StatusMissed,
+	StatusOccurred, StatusCancelled,
+}
+
+// ParseStatus decodes any status, for a filter rather than a transition target:
+// GET /api/occurrences?status= may ask for snoozed or pending, which
+// ParseResolvableStatus refuses on purpose.
+func ParseStatus(s string) (Status, bool) {
+	for _, st := range Statuses {
+		if string(st) == s {
+			return st, true
+		}
+	}
+	return "", false
+}
+
 // ResolvableStatuses names the same set for an error message or a schema enum,
 // in the order the specification lists it.
 var ResolvableStatuses = []Status{StatusCompleted, StatusSkipped, StatusMissed}

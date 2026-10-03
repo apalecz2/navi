@@ -16,9 +16,19 @@ document.addEventListener('alpine:init', () => {
     init() {
       this.labels = JSON.parse(this.$el.dataset.labels || '{}');
       const refresh = () => { if (!document.hidden && this.inflight === 0) this.settle(); };
-      document.addEventListener('visibilitychange', refresh);
-      window.addEventListener('online', () => { this.offline = false; refresh(); });
-      window.addEventListener('offline', () => { this.offline = true; });
+      this.listeners = [
+        [document, 'visibilitychange', refresh],
+        [window, 'online', () => { this.offline = false; refresh(); }],
+        [window, 'offline', () => { this.offline = true; }],
+      ];
+      this.listeners.forEach(([t, e, f]) => t.addEventListener(e, f));
+    },
+
+    // The calendar's detail panel is swapped in and out of the page, and each
+    // instance adds window listeners. Without this they would accumulate, and a
+    // panel opened ten times would refetch ten times on every tab focus.
+    destroy() {
+      (this.listeners || []).forEach(([t, e, f]) => t.removeEventListener(e, f));
     },
 
     // row is the row's own Alpine scope ($data), so flipping row.s is the
@@ -61,6 +71,11 @@ document.addEventListener('alpine:init', () => {
       if (this.inflight === 0 && this.reached) await this.settle();
     },
 
+    // The day view settles by refetching /app/today into #day-body. The calendar's
+    // detail panel names its own pair through data-settle and data-target: the
+    // month with the panel open, into the whole calendar body. Same act(), same
+    // POST, same "discard the guess" rule - only the thing re-rendered differs.
+    //
     // settle replaces the list with the server's rendering. It runs once, when
     // the last tap in a burst has landed, so a slow first response cannot wipe
     // a second row's flip with a list rendered before its request arrived.
@@ -69,9 +84,11 @@ document.addEventListener('alpine:init', () => {
       this.touched = [];
       this.reached = false;
       try {
-        const res = await fetch('/app/today', { credentials: 'same-origin', cache: 'no-store' });
+        const url = this.$el.dataset.settle || '/app/today';
+        const target = this.$el.dataset.target || '#day-body';
+        const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
         if (!res.ok) throw new Error('status ' + res.status);
-        htmx.swap('#day-body', await res.text(), { swapStyle: 'innerHTML' });
+        htmx.swap(target, await res.text(), { swapStyle: 'innerHTML' });
         this.offline = false;
       } catch (e) {
         // Sent, but the answer could not be read. The row is showing a guess;

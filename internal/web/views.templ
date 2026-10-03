@@ -36,6 +36,7 @@ templ shell(title, version string) {
 templ Page(day Day, version string) {
 	@shell("Today · Navi", version) {
 		<main id="day" x-data="day()" data-labels={ labelsJSON() }>
+			@tabs("today")
 			<header class="top">
 				<h1>{ day.Heading }</h1>
 				<p class="sub">{ day.Timezone }</p>

@@ -159,6 +159,13 @@ func run() error {
 		return err
 	}
 
+	// Beside the day view and after it: the calendar reads what every section above
+	// wrote and resolves through the same endpoints, so it adds only a range read and
+	// its own history rows.
+	if err := reportCalendar(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// Beside it, and last of the resolution sections: bulk_resolve is the third
 	// surface, and the only one that can resolve an occurrence that has not
 	// fired yet.

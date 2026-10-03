@@ -252,3 +252,49 @@ WHERE o.reconciled_at IS NOT NULL
   AND i.kind = 'reminder'
   AND i.archived_at IS NULL
 ORDER BY o.starts_at, o.id;
+
+-- The calendar's date-range read (V4): three statements for one question,
+-- because SQLite will not use an index through an optional-filter predicate.
+-- Measured: with (? = '' OR o.status = ?) written into a single statement the
+-- plan is a full table scan, and with the filters left out it is a full walk of
+-- idx_occ_item_starts. Each statement below is the one whose WHERE clause lets
+-- a specific index do a range seek - idx_occ_starts, idx_occ_item_starts and
+-- idx_occ_status_starts respectively - and store.ListCalendar picks between
+-- them by which filters the caller supplied.
+--
+-- Unlike ListOccurrencesInRange these do NOT exclude archived items. Past days
+-- show history, and an archived item's rows are history whose titles are kept
+-- for exactly this. Bounds are [from, to) instants.
+--
+-- name: ListCalendarAll :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.starts_at >= ?
+  AND o.starts_at < ?
+ORDER BY o.starts_at, o.id;
+
+-- name: ListCalendarByItem :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.item_id = ?
+  AND o.starts_at >= ?
+  AND o.starts_at < ?
+  AND (? = '' OR o.status = ?)
+ORDER BY o.starts_at, o.id;
+
+-- name: ListCalendarByStatus :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.status = ?
+  AND o.starts_at >= ?
+  AND o.starts_at < ?
+ORDER BY o.starts_at, o.id;

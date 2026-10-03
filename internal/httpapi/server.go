@@ -44,6 +44,12 @@ type Store interface {
 	// context block reads too: one "what is due today".
 	TodaysOccurrences(ctx context.Context, loc *time.Location) ([]store.TodayOccurrence, error)
 
+	// ListCalendar and LastMaterializedThrough back GET /api/occurrences: the
+	// range read, and the horizon that tells an empty month from an unmaterialized
+	// one.
+	ListCalendar(ctx context.Context, from, to time.Time, f store.CalendarFilter) ([]store.CalendarOccurrence, error)
+	LastMaterializedThrough(ctx context.Context) (time.Time, bool, error)
+
 	// CurrentTZ is read once per snooze, before the transaction opens, so the
 	// delta resolves against the zone the device is actually in (C6).
 	CurrentTZ(ctx context.Context) (string, bool, error)
@@ -129,6 +135,7 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	mux.HandleFunc("POST /api/occurrences/{id}/resolve", s.handleResolveOccurrence)
 	mux.HandleFunc("POST /api/occurrences/{id}/snooze", s.handleSnoozeOccurrence)
 	mux.HandleFunc("GET /api/today", s.handleToday)
+	mux.HandleFunc("GET /api/occurrences", s.handleListOccurrences)
 
 	// The browser surface, behind the same Access policy as /api. Its routes are
 	// all reads; the day view writes by POSTing to the two routes above, so the

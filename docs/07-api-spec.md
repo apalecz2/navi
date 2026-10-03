@@ -99,8 +99,31 @@ Everything due today, in local time, with current status. Backs the day view.
 
 ### `GET /api/occurrences?from=&to=&status=&item_id=`
 
-Date-range query backing the calendar view. `from` and `to` are ISO dates,
-inclusive. Capped at 400 days.
+Date-range query backing the calendar view. `from` and `to` are required ISO
+dates, inclusive, read in the device zone (`schedule.Zones.Local()`, the clock
+`/api/today` uses). Capped at 400 days, counting both ends. `status` is any of the
+eight statuses and `item_id` an item id; both optional. Every rejection is a 400
+`validation_failed` naming the rule and the values.
+
+```json
+{
+  "from": "2026-10-01", "to": "2026-10-31", "timezone": "Europe/Lisbon",
+  "materialized_through": "2026-11-02T14:00:00Z",
+  "occurrences": [
+    { "id": "...", "item_id": "...", "title": "vitamins",
+      "starts_at": "2026-10-05T08:10:00Z", "starts_at_local": "09:10",
+      "date_local": "2026-10-05", "status": "pending",
+      "is_override": false, "parent_occurrence_id": null,
+      "item_archived": false, "snooze_depth": 0 }
+  ]
+}
+```
+
+It is a row listing: snoozed parents are included, archived items' rows are
+included (history keeps its titles), and `materialized_through` is
+`kv.last_materialized_through` so a client can tell "not generated yet" from
+"nothing scheduled". `null` means nothing has ever been materialized. The
+calendar *view* draws a chain once; this endpoint does not.
 
 ### `POST /api/occurrences/{id}/resolve`
 

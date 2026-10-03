@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/store"
 )
@@ -35,6 +36,15 @@ var staticFS embed.FS
 type Store interface {
 	TodaysOccurrences(ctx context.Context, loc *time.Location) ([]store.TodayOccurrence, error)
 	CurrentTZ(ctx context.Context) (string, bool, error)
+
+	// The calendar's reads. ListCalendar is the one month query (V4);
+	// LastMaterializedThrough is where the horizon is read from, the slot /healthz
+	// reports horizon_days from; the other three open one occurrence's detail.
+	ListCalendar(ctx context.Context, from, to time.Time, f store.CalendarFilter) ([]store.CalendarOccurrence, error)
+	LastMaterializedThrough(ctx context.Context) (time.Time, bool, error)
+	GetOccurrence(ctx context.Context, id string) (domain.Occurrence, error)
+	GetItem(ctx context.Context, id string) (domain.Item, error)
+	ChainFor(ctx context.Context, occurrenceID string) (store.Chain, error)
 }
 
 // App mounts the /app routes. Its fields never change after New.
@@ -99,6 +109,8 @@ func (a *App) Mount(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /app/{$}", a.handleDay)
 	mux.HandleFunc("GET /app/today", a.handleTodayFragment)
+	mux.HandleFunc("GET /app/calendar", a.handleCalendar)
+	mux.HandleFunc("GET /app/calendar/body", a.handleCalendarBody)
 	mux.HandleFunc("GET /app/offline", a.handleOffline)
 	mux.HandleFunc("GET /app/sw.js", a.handleWorker)
 	mux.HandleFunc("GET /app/manifest.webmanifest", a.handleManifest)
@@ -151,6 +163,69 @@ func (a *App) handleTodayFragment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := DayBody(day).Render(r.Context(), w); err != nil {
 		a.log.Error("web: render fragment", "err", err)
+	}
+}
+
+// calendarView resolves m= and o= and builds the month. A malformed month or
+// occurrence id is the caller's mistake and is reported as one; anything else is
+// ours.
+func (a *App) calendarView(r *http.Request) (Calendar, int, error) {
+	zones, err := schedule.LoadZones(r.Context(), a.store, a.defaultTZ)
+	if err != nil {
+		return Calendar{}, http.StatusInternalServerError, fmt.Errorf("web: calendar: %w", err)
+	}
+	loc := zones.Local()
+	month, err := parseMonth(r.URL.Query().Get("m"), loc)
+	if err != nil {
+		return Calendar{}, http.StatusBadRequest, err
+	}
+	open := r.URL.Query().Get("o")
+	if open != "" && !domain.ValidID(open) {
+		return Calendar{}, http.StatusBadRequest, fmt.Errorf("occurrence %q is not an occurrence id", open)
+	}
+	cal, err := a.buildCalendar(r.Context(), month, loc, open)
+	if err != nil {
+		return Calendar{}, http.StatusInternalServerError, err
+	}
+	return cal, http.StatusOK, nil
+}
+
+func (a *App) calendarFail(w http.ResponseWriter, status int, err error) {
+	noStore(w)
+	if status == http.StatusBadRequest {
+		http.Error(w, err.Error(), status)
+		return
+	}
+	a.log.Error("web: calendar", "err", err)
+	http.Error(w, "the calendar could not be loaded", status)
+}
+
+func (a *App) handleCalendar(w http.ResponseWriter, r *http.Request) {
+	cal, status, err := a.calendarView(r)
+	if err != nil {
+		a.calendarFail(w, status, err)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := CalendarPage(cal, a.version).Render(r.Context(), w); err != nil {
+		a.log.Error("web: render calendar", "err", err)
+	}
+}
+
+// handleCalendarBody is what month navigation, opening a chip and every
+// resolution settle swap in: the header, the grid and the open panel together,
+// so a snooze that moves a chip to another cell is never half-shown.
+func (a *App) handleCalendarBody(w http.ResponseWriter, r *http.Request) {
+	cal, status, err := a.calendarView(r)
+	if err != nil {
+		a.calendarFail(w, status, err)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := CalendarBody(cal).Render(r.Context(), w); err != nil {
+		a.log.Error("web: render calendar body", "err", err)
 	}
 }
 

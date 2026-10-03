@@ -310,6 +310,238 @@ func (q *Queries) ListAwaitingReconciliation(ctx context.Context) ([]ListAwaitin
 	return items, nil
 }
 
+const listCalendarAll = `-- name: ListCalendarAll :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.starts_at >= ?
+  AND o.starts_at < ?
+ORDER BY o.starts_at, o.id
+`
+
+type ListCalendarAllParams struct {
+	StartsAt   string
+	StartsAt_2 string
+}
+
+type ListCalendarAllRow struct {
+	ID                 string
+	ItemID             string
+	StartsAt           string
+	Status             string
+	ResolvedAt         *string
+	ResolutionSource   *string
+	SnoozeDepth        int64
+	IsOverride         int64
+	ParentOccurrenceID *string
+	Title              string
+	NotifyPolicy       string
+	Priority           int64
+	ArchivedAt         *string
+}
+
+// The calendar's date-range read (V4): three statements for one question,
+// because SQLite will not use an index through an optional-filter predicate.
+// Measured: with (? = ” OR o.status = ?) written into a single statement the
+// plan is a full table scan, and with the filters left out it is a full walk of
+// idx_occ_item_starts. Each statement below is the one whose WHERE clause lets
+// a specific index do a range seek - idx_occ_starts, idx_occ_item_starts and
+// idx_occ_status_starts respectively - and store.ListCalendar picks between
+// them by which filters the caller supplied.
+//
+// Unlike ListOccurrencesInRange these do NOT exclude archived items. Past days
+// show history, and an archived item's rows are history whose titles are kept
+// for exactly this. Bounds are [from, to) instants.
+func (q *Queries) ListCalendarAll(ctx context.Context, arg ListCalendarAllParams) ([]ListCalendarAllRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCalendarAll, arg.StartsAt, arg.StartsAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCalendarAllRow{}
+	for rows.Next() {
+		var i ListCalendarAllRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.Status,
+			&i.ResolvedAt,
+			&i.ResolutionSource,
+			&i.SnoozeDepth,
+			&i.IsOverride,
+			&i.ParentOccurrenceID,
+			&i.Title,
+			&i.NotifyPolicy,
+			&i.Priority,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCalendarByItem = `-- name: ListCalendarByItem :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.item_id = ?
+  AND o.starts_at >= ?
+  AND o.starts_at < ?
+  AND (? = '' OR o.status = ?)
+ORDER BY o.starts_at, o.id
+`
+
+type ListCalendarByItemParams struct {
+	ItemID     string
+	StartsAt   string
+	StartsAt_2 string
+	Column4    interface{}
+	Status     string
+}
+
+type ListCalendarByItemRow struct {
+	ID                 string
+	ItemID             string
+	StartsAt           string
+	Status             string
+	ResolvedAt         *string
+	ResolutionSource   *string
+	SnoozeDepth        int64
+	IsOverride         int64
+	ParentOccurrenceID *string
+	Title              string
+	NotifyPolicy       string
+	Priority           int64
+	ArchivedAt         *string
+}
+
+func (q *Queries) ListCalendarByItem(ctx context.Context, arg ListCalendarByItemParams) ([]ListCalendarByItemRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCalendarByItem,
+		arg.ItemID,
+		arg.StartsAt,
+		arg.StartsAt_2,
+		arg.Column4,
+		arg.Status,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCalendarByItemRow{}
+	for rows.Next() {
+		var i ListCalendarByItemRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.Status,
+			&i.ResolvedAt,
+			&i.ResolutionSource,
+			&i.SnoozeDepth,
+			&i.IsOverride,
+			&i.ParentOccurrenceID,
+			&i.Title,
+			&i.NotifyPolicy,
+			&i.Priority,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCalendarByStatus = `-- name: ListCalendarByStatus :many
+SELECT o.id, o.item_id, o.starts_at, o.status, o.resolved_at, o.resolution_source,
+       o.snooze_depth, o.is_override, o.parent_occurrence_id,
+       i.title, i.notify_policy, i.priority, i.archived_at
+FROM occurrences o
+JOIN items i ON i.id = o.item_id
+WHERE o.status = ?
+  AND o.starts_at >= ?
+  AND o.starts_at < ?
+ORDER BY o.starts_at, o.id
+`
+
+type ListCalendarByStatusParams struct {
+	Status     string
+	StartsAt   string
+	StartsAt_2 string
+}
+
+type ListCalendarByStatusRow struct {
+	ID                 string
+	ItemID             string
+	StartsAt           string
+	Status             string
+	ResolvedAt         *string
+	ResolutionSource   *string
+	SnoozeDepth        int64
+	IsOverride         int64
+	ParentOccurrenceID *string
+	Title              string
+	NotifyPolicy       string
+	Priority           int64
+	ArchivedAt         *string
+}
+
+func (q *Queries) ListCalendarByStatus(ctx context.Context, arg ListCalendarByStatusParams) ([]ListCalendarByStatusRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCalendarByStatus, arg.Status, arg.StartsAt, arg.StartsAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCalendarByStatusRow{}
+	for rows.Next() {
+		var i ListCalendarByStatusRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ItemID,
+			&i.StartsAt,
+			&i.Status,
+			&i.ResolvedAt,
+			&i.ResolutionSource,
+			&i.SnoozeDepth,
+			&i.IsOverride,
+			&i.ParentOccurrenceID,
+			&i.Title,
+			&i.NotifyPolicy,
+			&i.Priority,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueOccurrences = `-- name: ListDueOccurrences :many
 SELECT o.id, o.item_id, o.starts_at, o.message_text,
        i.title, i.kind, i.priority

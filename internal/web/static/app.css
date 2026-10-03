@@ -51,3 +51,113 @@ button.done { background: var(--done); border-color: var(--done); color: #fff; }
 .st-missed .badge { color: var(--miss); }
 .st-notified .badge { color: var(--accent); font-weight: 600; }
 a { color: var(--accent); }
+
+/* ---- tabs ---- */
+.tabs { display: flex; gap: 4px; margin: 0 0 8px; }
+.tabs a {
+  padding: 6px 12px; border-radius: 999px; text-decoration: none; color: var(--muted);
+  border: 1px solid transparent; font-weight: 600; font-size: .9rem;
+}
+.tabs a[aria-current] { color: var(--accent); border-color: var(--line); background: var(--card); }
+
+/* ---- calendar ---- */
+#calendar { max-width: 1000px; padding-bottom: 40vh; }
+.calhead { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.caltitle { flex: 1; text-align: center; }
+.caltitle h1 { font-size: 1.4rem; margin: 0; }
+.caltitle .sub { margin: 0; }
+.step {
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  text-decoration: none; font-size: 1.4rem;
+}
+.horizon {
+  margin: 0 0 10px; padding: 8px 12px; border-radius: 10px; font-size: .85rem;
+  border: 1px dashed var(--line); color: var(--muted); background: var(--card);
+}
+.hz-none, .hz-unset { color: var(--fg); border-color: var(--accent); }
+
+/* One markup, two layouts. Wide: a seven-column month grid. Narrow: an agenda -
+   the weekday header and every empty day are hidden and each remaining day
+   becomes a dated section, because seven columns at 360px leave a cell about
+   45px wide, too narrow for a time and a title. */
+.month, .dow, .chips, .legend { list-style: none; margin: 0; padding: 0; }
+.dow, .month { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.dow { margin-bottom: 4px; color: var(--muted); font-size: .8rem; text-align: center; }
+.day {
+  min-height: 92px; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 6px; display: grid; align-content: start; gap: 4px; min-width: 0;
+}
+.day.past { background: transparent; }
+.day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.dhead { display: flex; gap: 6px; align-items: baseline; font-size: .8rem; color: var(--muted); }
+.dnum { font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; }
+.dwk { display: none; }
+.dtag { font-size: .7rem; color: var(--accent); }
+.chips { display: grid; gap: 3px; }
+
+/* Not generated yet: hatched, so it cannot be mistaken for an empty day. */
+.day.beyond, .day.edge {
+  background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--line) 6px 7px);
+}
+.day.beyond { border-style: dashed; }
+.horizon-line { display: none; }
+
+.chip {
+  --bar: hsl(var(--h) 55% var(--bar-l));
+  --tint: hsl(var(--h) 60% var(--tint-l));
+  display: flex; align-items: baseline; gap: 4px; min-width: 0; text-decoration: none;
+  color: var(--fg); font-size: .78rem; line-height: 1.25; padding: 3px 5px;
+  border-radius: 6px; border-left: 4px solid var(--bar); background: var(--tint);
+}
+.chip .glyph { width: 1em; text-align: center; flex: none; }
+.chip .ctime { font-variant-numeric: tabular-nums; flex: none; }
+.chip .ctitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.chip .cmark { flex: none; color: var(--snz); font-weight: 700; }
+.chip.open { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Status is drawn by glyph and treatment, never by hue: hue belongs to the item. */
+.chip.st-notified { font-weight: 700; }
+.chip.st-completed { opacity: .78; }
+.chip.st-completed .ctitle { text-decoration: line-through; }
+.chip.st-skipped { opacity: .6; font-style: italic; }
+.chip.st-missed { box-shadow: inset 0 0 0 1px var(--miss); }
+.chip.st-missed .glyph { color: var(--miss); font-weight: 800; }
+.chip.st-pending .glyph { color: var(--muted); }
+
+:root { --bar-l: 38%; --tint-l: 92%; }
+@media (prefers-color-scheme: dark) { :root { --bar-l: 62%; --tint-l: 20%; } }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 14px 0 6px; font-size: .85rem; }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; background: hsl(var(--h) 55% var(--bar-l)); flex: none; }
+.key { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; color: var(--muted); font-size: .8rem; }
+
+.detail {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; max-height: 70vh; overflow: auto;
+  max-width: 640px; margin: 0 auto; background: var(--bg); border: 1px solid var(--line);
+  border-bottom: 0; border-radius: 16px 16px 0 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, .18);
+}
+.detail .dhd { display: flex; align-items: center; gap: 8px; }
+.detail .dhd strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.detail .close {
+  display: grid; place-items: center; width: 44px; height: 44px; margin: -8px -10px -8px 0;
+  color: var(--fg); text-decoration: none; font-size: 1.5rem;
+}
+.detail .when, .detail .chain { margin: 2px 0 8px; color: var(--muted); font-size: .9rem; }
+
+@media (max-width: 639px) {
+  .dow { display: none; }
+  .month { display: block; }
+  .day { display: none; min-height: 0; margin-bottom: 8px; grid-column-start: auto !important; }
+  .day.has, .day.today { display: grid; }
+  .dhead { font-size: .9rem; }
+  .dnum { font-size: 1.1rem; }
+  .dwk { display: inline; }
+  .chip { font-size: .95rem; padding: 8px 8px; }
+  .horizon-line {
+    display: block; margin: 4px 0 8px; padding: 6px 10px; color: var(--muted); font-size: .8rem;
+    border: 1px dashed var(--line); border-radius: 8px;
+    background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--line) 6px 7px);
+  }
+}

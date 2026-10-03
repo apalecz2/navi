@@ -78,24 +78,31 @@ func NewDay(now time.Time, loc *time.Location, occs []store.TodayOccurrence) Day
 		Rows:     make([]Row, 0, len(occs)),
 	}
 	for _, o := range occs {
-		r := Row{
-			ID:          o.ID,
-			Title:       o.ItemTitle,
-			Time:        o.StartsAt.In(loc).Format("15:04"),
-			Status:      string(o.Status),
-			Label:       labelFor(string(o.Status)),
-			Resolvable:  o.Status == domain.StatusPending || o.Status == domain.StatusNotified,
-			Snoozable:   o.Status == domain.StatusNotified,
-			SnoozeDepth: o.SnoozeDepth,
-			Silent:      o.NotifyPolicy == domain.NotifySilent,
-		}
-		if o.ResolvedAt != nil && o.Status != domain.StatusSnoozed {
-			r.Meta = o.ResolvedAt.In(loc).Format("15:04")
-			if o.ResolutionSource != nil {
-				r.Meta += " · " + string(*o.ResolutionSource)
-			}
-		}
-		d.Rows = append(d.Rows, r)
+		d.Rows = append(d.Rows, rowFor(o, loc))
 	}
 	return d
+}
+
+// rowFor is the one place a stored occurrence becomes a Row. The day view and the
+// calendar's detail panel both call it, so which status offers which button is
+// decided here and the two surfaces cannot disagree.
+func rowFor(o store.TodayOccurrence, loc *time.Location) Row {
+	r := Row{
+		ID:          o.ID,
+		Title:       o.ItemTitle,
+		Time:        o.StartsAt.In(loc).Format("15:04"),
+		Status:      string(o.Status),
+		Label:       labelFor(string(o.Status)),
+		Resolvable:  o.Status == domain.StatusPending || o.Status == domain.StatusNotified,
+		Snoozable:   o.Status == domain.StatusNotified,
+		SnoozeDepth: o.SnoozeDepth,
+		Silent:      o.NotifyPolicy == domain.NotifySilent,
+	}
+	if o.ResolvedAt != nil && o.Status != domain.StatusSnoozed {
+		r.Meta = o.ResolvedAt.In(loc).Format("15:04")
+		if o.ResolutionSource != nil {
+			r.Meta += " · " + string(*o.ResolutionSource)
+		}
+	}
+	return r
 }

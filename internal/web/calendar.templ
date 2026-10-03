@@ -1,0 +1,210 @@
+package web
+
+import "strconv"
+
+// tabs is the two-screen switcher both pages carry.
+templ tabs(current string) {
+	<nav class="tabs" aria-label="Views">
+		if current == "today" {
+			<a href="/app/" aria-current="page">Today</a>
+		} else {
+			<a href="/app/">Today</a>
+		}
+		if current == "calendar" {
+			<a href="/app/calendar" aria-current="page">Calendar</a>
+		} else {
+			<a href="/app/calendar">Calendar</a>
+		}
+	</nav>
+}
+
+// CalendarPage is the month view at /app/calendar.
+templ CalendarPage(cal Calendar, version string) {
+	@shell("Calendar · Navi", version) {
+		<main id="calendar">
+			@tabs("calendar")
+			<div id="cal-body">
+				@CalendarBody(cal)
+			</div>
+		</main>
+	}
+}
+
+// CalendarBody is everything that changes when the month, the open chip or an
+// occurrence's state changes. It is one fragment on purpose: see
+// handleCalendarBody.
+//
+// Month navigation is a plain link with hx-get layered on, so it works without
+// the script (a full page load of the same URL) and moves without a reload with
+// it, and hx-push-url keeps the address bar, back button and shareable URL
+// truthful. There is no client-side router.
+templ CalendarBody(cal Calendar) {
+	<header class="calhead">
+		<a
+			class="step"
+			href={ templ.SafeURL("/app/calendar?m=" + cal.Prev) }
+			hx-get={ "/app/calendar/body?m=" + cal.Prev }
+			hx-target="#cal-body"
+			hx-push-url={ "/app/calendar?m=" + cal.Prev }
+			aria-label="Previous month"
+		>‹</a>
+		<div class="caltitle">
+			<h1>{ cal.Heading }</h1>
+			<p class="sub">
+				{ cal.Timezone }
+				if !cal.Current {
+					·
+					<a
+						href="/app/calendar"
+						hx-get="/app/calendar/body"
+						hx-target="#cal-body"
+						hx-push-url="/app/calendar"
+					>this month</a>
+				}
+			</p>
+		</div>
+		<a
+			class="step"
+			href={ templ.SafeURL("/app/calendar?m=" + cal.Next) }
+			hx-get={ "/app/calendar/body?m=" + cal.Next }
+			hx-target="#cal-body"
+			hx-push-url={ "/app/calendar?m=" + cal.Next }
+			aria-label="Next month"
+		>›</a>
+	</header>
+	if cal.Note.Kind != "" {
+		<p class={ "horizon", "hz-" + cal.Note.Kind } role="note">{ cal.Note.Text }</p>
+	}
+	<ol class="dow" aria-hidden="true">
+		<li>Mon</li>
+		<li>Tue</li>
+		<li>Wed</li>
+		<li>Thu</li>
+		<li>Fri</li>
+		<li>Sat</li>
+		<li>Sun</li>
+	</ol>
+	<ol class="month">
+		for i, d := range cal.Days {
+			@dayCell(d, i == 0, cal.Offset)
+		}
+	</ol>
+	if len(cal.Legend) > 0 {
+		<ul class="legend" aria-label="Items this month">
+			for _, l := range cal.Legend {
+				<li style={ templ.SafeCSS("--h:" + strconv.Itoa(l.Hue)) }>
+					<span class="swatch" aria-hidden="true"></span>
+					{ l.Title }
+					if l.Archived {
+						<span class="tag">archived</span>
+					}
+				</li>
+			}
+		</ul>
+		<p class="key">
+			<span>○ scheduled</span><span>● due</span><span>✓ done</span><span>– skipped</span><span>! missed</span><span>↷ snoozed</span>
+		</p>
+	} else if cal.Note.Kind == "" {
+		<p class="empty">Nothing scheduled this month.</p>
+	}
+	if cal.Open != nil {
+		@detailPanel(*cal.Open)
+	}
+}
+
+templ dayCell(d CalDay, first bool, offset int) {
+	if d.FirstBeyond {
+		<li class="horizon-line" aria-hidden="true">Not generated yet from here</li>
+	}
+	<li
+		class={ "day", templ.KV("has", len(d.Chips) > 0), templ.KV("today", d.Today), templ.KV("past", d.Past), templ.KV("beyond", d.Beyond), templ.KV("edge", d.Edge) }
+		id={ "d-" + d.Date }
+		if first {
+			style={ templ.SafeCSS("grid-column-start:" + strconv.Itoa(offset+1)) }
+		}
+	>
+		<span class="dhead">
+			<span class="dnum">{ strconv.Itoa(d.Num) }</span>
+			<span class="dwk">{ d.Weekday }</span>
+			if d.Today {
+				<span class="dtag">today</span>
+			}
+			if d.Edge {
+				<span class="dtag">to { d.EdgeAt }</span>
+			}
+		</span>
+		if len(d.Chips) > 0 {
+			<ul class="chips">
+				for _, c := range d.Chips {
+					<li>
+						@chipView(c)
+					</li>
+				}
+			</ul>
+		}
+	</li>
+}
+
+templ chipView(c Chip) {
+	<a
+		class={ "chip", "st-" + c.Status, templ.KV("open", c.Open) }
+		style={ templ.SafeCSS("--h:" + strconv.Itoa(c.Hue)) }
+		href={ templ.SafeURL(c.Href) }
+		hx-get={ c.BodyHref }
+		hx-target="#cal-body"
+		hx-push-url={ c.Href }
+		title={ c.Tip }
+		aria-label={ c.Tip }
+	>
+		<span class="glyph" aria-hidden="true">{ c.Glyph }</span>
+		<span class="ctime">{ c.Time }</span>
+		<span class="ctitle">{ c.Title }</span>
+		if c.Snoozes > 0 {
+			<span class="cmark" aria-hidden="true">↷{ strconv.Itoa(c.Snoozes) }</span>
+		}
+	</a>
+}
+
+// detailPanel reuses rowView, the day view's row, inside a day() component of
+// its own. The component's settle URL is this month with this panel open, so a
+// tap here goes through the same act() and the same /api POST as a tap on the
+// day view, and then re-renders the grid and the panel from the server.
+templ detailPanel(d Detail) {
+	<section
+		class="detail"
+		x-data="day()"
+		data-labels={ labelsJSON() }
+		data-settle={ d.SettleURL }
+		data-target="#cal-body"
+		aria-label="Occurrence detail"
+		style={ templ.SafeCSS("--h:" + strconv.Itoa(d.Hue)) }
+	>
+		<div class="dhd">
+			<span class="swatch" aria-hidden="true"></span>
+			<strong>{ d.Title }</strong>
+			if d.Archived {
+				<span class="tag">archived</span>
+			}
+			<a
+				class="close"
+				href={ templ.SafeURL(d.CloseHref) }
+				hx-get={ d.CloseBody }
+				hx-target="#cal-body"
+				hx-push-url={ d.CloseHref }
+				aria-label="Close"
+			>×</a>
+		</div>
+		<p class="when">{ d.When }</p>
+		if d.Chain != "" {
+			<p class="chain">
+				{ d.Chain }
+				if d.ChildHref != "" {
+					<a href={ templ.SafeURL(d.ChildHref) }>See the later one</a>
+				}
+			</p>
+		}
+		<ul class="rows">
+			@rowView(d.Row)
+		</ul>
+	</section>
+}

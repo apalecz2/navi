@@ -357,8 +357,13 @@ CREATE INDEX idx_occ_ungenerated ON occurrences(starts_at)
 -- reconciler and day view: everything for a date
 CREATE INDEX idx_occ_status_starts ON occurrences(status, starts_at);
 
--- calendar range query and per-item history
+-- per-item history, and the calendar range query when it names an item
 CREATE INDEX idx_occ_item_starts ON occurrences(item_id, starts_at);
+
+-- the calendar's unfiltered range query (migration 0006). Neither index above
+-- leads with starts_at, so a bare date range used to walk one of them end to
+-- end; measured with EXPLAIN QUERY PLAN, this one is the range seek.
+CREATE INDEX idx_occ_starts ON occurrences(starts_at);
 
 -- chain walking
 CREATE INDEX idx_occ_parent ON occurrences(parent_occurrence_id)

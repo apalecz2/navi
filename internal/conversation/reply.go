@@ -27,6 +27,8 @@ func buildConfirmation(toolName string, res agent.Result) string {
 		return renderPauseConfirmation(res.Item, res.PausedUntil)
 	case "create_goal", "update_goal":
 		return renderGoalConfirmation(toolName, res.Goal, res.GoalProgress)
+	case "get_stats":
+		return renderStats(res.Stats)
 	case "list_goals":
 		return renderGoalList(res.Goals)
 	case "log_goal_progress":

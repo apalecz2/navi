@@ -41,6 +41,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/reconciler"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/scheduler"
+	"github.com/aidenpaleczny/navi/internal/stats"
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/supervisor"
 	"github.com/aidenpaleczny/navi/internal/sweeper"
@@ -279,6 +280,7 @@ func run() error {
 	// suppresses, and a second materializer would mean two random generators
 	// drawing for the same items.
 	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook,
+		stats.New(st, cfg.Schedule.DefaultTZ),
 		web.New(log.With("component", "web"), st, cfg.Schedule.DefaultTZ))
 	serveErr := make(chan error, 1)
 	go func() {

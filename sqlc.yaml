@@ -30,6 +30,9 @@ sql:
     # CHECK constraint, which sqlc does not model at all — the column list it
     # generates from 0001 is still exactly right.
     #
+    # 0007_chains_terminal.sql is omitted for the same reason: it only recreates the
+    # view (with three new columns and a per-root walk).
+    #
     # A new migration that adds a table or a column must be added to this list.
     # One that only widens a constraint must not, and one that recreates the
     # chains view cannot.

@@ -227,6 +227,12 @@ func run() error {
 		return err
 	}
 
+	// The statistics: after every section that writes occurrences, because it
+	// builds its own chains and reads the whole database. Last of the P4 numbers.
+	if err := reportStats(ctx, st, table, cfg.Data.DBPath(), cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
 	// After fire, since it exercises the other direction — inbound rather
 	// than outbound — and needs nothing fire left behind.
 	if err := reportConversations(ctx, st, log); err != nil {
@@ -1522,7 +1528,7 @@ func reportResolve(ctx context.Context, st *store.Store, tz string, log *slog.Lo
 	}
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, loc),
-		time.Time{}, loc, nil, nil)
+		time.Time{}, loc, nil, nil, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/resolve",
@@ -1711,7 +1717,7 @@ func reportSnooze(ctx context.Context, st *store.Store, tz string, fallback *tim
 	m := metrics.New()
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, materializer.New(log.With("component", "mat-http"), st, fallback),
-		time.Time{}, fallback, nil, nil)
+		time.Time{}, fallback, nil, nil, nil)
 
 	post := func(id, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/occurrences/"+id+"/snooze",
@@ -4084,7 +4090,7 @@ func reportPauseEndpoints(ctx context.Context, st *store.Store, tz string, fallb
 	m := metrics.New()
 	mat := materializer.New(log.With("component", "mat-pause"), st, fallback)
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
-		health.New(), m, st, mat, time.Time{}, fallback, nil, nil)
+		health.New(), m, st, mat, time.Time{}, fallback, nil, nil, nil)
 
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

@@ -368,7 +368,9 @@ full design.
   charted with uPlot
 - Goal progress and velocity charts, same view, reading the same aggregation
   as `get_stats` (O4, O10)
-- `get_stats` tool reading the same `chains` view
+- `get_stats` tool reading the same `chains` view (**numbers built session 22**:
+  `internal/stats`, the three `/api/stats/*` routes and `get_stats`; the charts and
+  the stats view are still to come)
 - Cloudflare Access on `/app` and `/api`
 
 **Exit criteria**

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/schedule"
+	"github.com/aidenpaleczny/navi/internal/stats"
 	"github.com/aidenpaleczny/navi/internal/store"
 )
 
@@ -71,6 +72,10 @@ type Result struct {
 	Goals        []store.GoalProgress `json:"goals,omitempty"`
 	GoalUpdate   *domain.GoalUpdate   `json:"goal_update,omitempty"`
 	GoalProgress *store.GoalProgress  `json:"goal_progress,omitempty"`
+
+	// Stats is get_stats' answer: the same typed summary GET /api/stats/summary
+	// serialises, so a number stated in chat is the dashboard's number (V6).
+	Stats *stats.Summary `json:"stats,omitempty"`
 
 	// Inferred is the vocabulary-default fields resolveSchedule filled in
 	// that the caller did not supply - A5's "state every inferred

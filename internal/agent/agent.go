@@ -21,6 +21,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/materializer"
+	"github.com/aidenpaleczny/navi/internal/stats"
 	"github.com/aidenpaleczny/navi/internal/store"
 )
 
@@ -46,6 +47,10 @@ type Tools struct {
 	defaults  *defaults.Table
 	defaultTZ *time.Location
 
+	// stats is the same type the /api/stats routes hold, built from the same
+	// store and zone default. get_stats calls it and nothing else.
+	stats *stats.Service
+
 	// metrics may be nil, which every counting site checks. A caller
 	// exercising the catalog without a registry - a one-off, a hand-driven
 	// check - should not have to build one to call a tool.
@@ -54,5 +59,5 @@ type Tools struct {
 
 // New builds a Tools. m may be nil.
 func New(st *store.Store, mat *materializer.Materializer, table *defaults.Table, defaultTZ *time.Location, m Metrics) *Tools {
-	return &Tools{store: st, mat: mat, defaults: table, defaultTZ: defaultTZ, metrics: m}
+	return &Tools{store: st, mat: mat, defaults: table, defaultTZ: defaultTZ, stats: stats.New(st, defaultTZ), metrics: m}
 }

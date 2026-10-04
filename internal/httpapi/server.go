@@ -95,6 +95,9 @@ type Server struct {
 	// scheduler would claim.
 	claimFloor time.Time
 
+	// stats backs the three /api/stats routes. nil leaves them unregistered.
+	stats Stats
+
 	// defaultTZ is cfg.Schedule.DefaultTZ, the bottom rung of schedule.Zones —
 	// where a floating item's wall clock resolves when kv.current_tz has never
 	// been set and the item carries no zone of its own. A plain value for the
@@ -114,10 +117,10 @@ type Server struct {
 // names nothing (still the default outside P1 testing), in which case the
 // route is never registered and a POST to it 404s from the mux itself rather
 // than reaching a handler with nothing configured to verify against.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler, app Mounter) *http.Server {
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler, stats Stats, app Mounter) *http.Server {
 	s := &Server{
 		log: log, health: h, metrics: m, store: st, mat: mat,
-		claimFloor: claimFloor, defaultTZ: defaultTZ,
+		claimFloor: claimFloor, defaultTZ: defaultTZ, stats: stats,
 	}
 
 	mux := http.NewServeMux()
@@ -136,6 +139,14 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	mux.HandleFunc("POST /api/occurrences/{id}/snooze", s.handleSnoozeOccurrence)
 	mux.HandleFunc("GET /api/today", s.handleToday)
 	mux.HandleFunc("GET /api/occurrences", s.handleListOccurrences)
+
+	// Statistics: three reads over one aggregation path (internal/stats). They
+	// serialise what Stats returns and compute nothing.
+	if stats != nil {
+		mux.HandleFunc("GET /api/stats/summary", serveStats(s, "summary", stats.Summary))
+		mux.HandleFunc("GET /api/stats/timeseries", serveStats(s, "timeseries", stats.Timeseries))
+		mux.HandleFunc("GET /api/stats/heatmap", serveStats(s, "heatmap", stats.Heatmap))
+	}
 
 	// The browser surface, behind the same Access policy as /api. Its routes are
 	// all reads; the day view writes by POSTing to the two routes above, so the

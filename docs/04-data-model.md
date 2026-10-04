@@ -317,32 +317,103 @@ This is why snoozing is implemented as a child row rather than by mutating
 notification instead of snoozing, which produces no data at all. The chain rule
 makes honest snoozing free.
 
-A convenience view keeps the aggregation queries readable:
+A convenience view keeps the aggregation queries readable. This is the definition
+as of migration `0007`, which changed two things over the original: it gained the
+three columns statistics need to say how a chain *ended*, and it walks per root
+instead of from every root, so a `WHERE` on it prunes before anything is walked.
+(SQLite cannot push a predicate into a recursive CTE, so the original — one CTE
+seeded with every parentless row, then grouped — filtered a finished result: a
+one-week range cost what `all` cost, 170 ms at 20k occurrences and 1.9 s at 200k.
+The per-root form answers a week in about half a millisecond at either size, and
+`all` in 66 ms at 20k.)
 
 ```sql
 CREATE VIEW chains AS
-WITH RECURSIVE walk(root_id, id) AS (
-  SELECT id, id FROM occurrences WHERE parent_occurrence_id IS NULL
-  UNION ALL
-  SELECT w.root_id, o.id
-    FROM occurrences o JOIN walk w ON o.parent_occurrence_id = w.id
-)
 SELECT
-  w.root_id,
+  r.id                                   AS root_id,
   r.item_id,
-  r.starts_at                                        AS scheduled_at,
-  MAX(o.snooze_depth)                                AS snooze_count,
-  MAX(o.status = 'completed')                        AS was_completed,
-  MIN(CASE WHEN o.status = 'completed' THEN o.resolved_at END) AS completed_at,
-  r.notified_at
-FROM walk w
-JOIN occurrences o ON o.id = w.id
-JOIN occurrences r ON r.id = w.root_id
-GROUP BY w.root_id;
+  r.starts_at                            AS scheduled_at,
+  (<walk> SELECT MAX(o.snooze_depth) ...)                          AS snooze_count,
+  (<walk> SELECT MAX(o.status = 'completed') ...)                  AS was_completed,
+  (<walk> SELECT MIN(CASE WHEN o.status = 'completed'
+                          THEN o.resolved_at END) ...)             AS completed_at,
+  r.notified_at,
+  (<walk> SELECT MAX(o.reconciled_at IS NOT NULL) ...)             AS was_reconciled,
+  (<walk> SELECT o.status ... ORDER BY o.snooze_depth DESC LIMIT 1) AS terminal_status,
+  (<walk> SELECT o.resolution_note ... ORDER BY o.snooze_depth DESC LIMIT 1)
+                                                                   AS terminal_note
+FROM occurrences r
+WHERE r.parent_occurrence_id IS NULL;
+
+-- <walk> is, per column and correlated on r:
+--   WITH RECURSIVE walk(id) AS (
+--     SELECT r.id
+--     UNION ALL
+--     SELECT o.id FROM occurrences o JOIN walk w ON o.parent_occurrence_id = w.id)
+--   ... FROM walk w JOIN occurrences o ON o.id = w.id
 ```
 
-Both the dashboard and the agent's `get_stats` tool query this view, satisfying
-V6 by construction rather than by discipline.
+The full text is in `internal/store/migrations/0007_chains_terminal.sql`. The walk is
+spelled out once per column because SQLite has no lateral join to share it with;
+change one and change all. Chains are one to four links.
+
+`terminal_status` is the status of the last link (the one with the greatest
+`snooze_depth`; a chain is linear because snooze is legal only from `notified` and
+writes exactly one child). `was_reconciled` is "a check-in named some link". Neither
+is read by anything except statistics.
+
+Both the dashboard and the agent's `get_stats` tool query this view, through one
+aggregation package (`internal/stats`), satisfying V6 by construction rather than by
+discipline.
+
+### Statistics definitions
+
+These are the rest of what the rules above leave open. `internal/stats`'s package
+doc carries the same text beside the code.
+
+**Classes.** A chain is exactly one of: `completed` (any link completed — D-011),
+`skipped` (not completed, last link skipped), `missed` (not completed, last link
+missed), `awaiting` (not resolved, but `was_reconciled`: a check-in asked and
+nothing has answered yet), or `open` (not resolved, nobody has asked: pending, or
+notified and so far ignored).
+
+**Completion rate** = `completed / (completed + missed)`. Skipped is out of both
+sides: R2 makes it distinct from a miss, and counting it in the denominator would
+punish the honest "I was away" it exists to record, while counting it as a success
+would reward saying skip over doing the thing. Awaiting and open are out because
+they are neither yet. No settled chains means no rate: `null`, never `0`.
+
+**Streaks** are per item, over its chains in scheduled order up to now, and are
+lifetime figures — they do not move with the requested range. A completed chain
+adds one to the current run; a missed chain ends it; nothing else touches it. A
+skip neither breaks nor extends the run, which waits across it. An awaiting chain,
+including the most recent one still inside its grace window, and an open chain do
+the same: only asked-and-got-nothing is a miss (K6), so only that ends a run. This
+is also why V7 needs no code — a chain exists only for a day the schedule produced.
+
+**Median lag** is minutes from a chain's first notification (the root's
+`notified_at`) to its completion, over chains that were completed, were notified,
+and completed no earlier than notified. A silent item has no `notified_at`; a row
+resolved before it was ever sent was never claimed (R3). A snooze chain measures
+from the first ask, so one pushed three times reads as slow — D-011's stated cost.
+`null` with no samples.
+
+**Windows.** `week`, `month`, `quarter` are trailing 7, 30 and 90 local calendar
+days ending today, from local midnight to now, in the device zone
+(`schedule.Zones.Local()`). A chain belongs to a window by its root's
+`scheduled_at`; chains not yet due are not in it. `all` is everything up to now.
+This is deliberately not the Monday calendar week goals use: a goal is a commitment
+about a named period, while a statistic is a trailing measurement, and a calendar
+week would be one data point on Monday morning and reset to empty every Monday.
+Timeseries buckets are local dates or local Mondays, filed under the root's
+`scheduled_at` ("how did what was due that day go" — not the calendar's rule, which
+files a chain under its live link). The heatmap is the one exception: it buckets by
+the local weekday and hour of the *completion*.
+
+**Archived items** stay in aggregates, in `all`, and in per-item results, flagged
+`archived`: history is immutable, and a rate that shrank when an old item was
+retired would depend on housekeeping. Active items are always listed in a summary;
+an archived item only when it has chains in the window.
 
 ## Indexes
 

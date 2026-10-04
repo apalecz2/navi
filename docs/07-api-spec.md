@@ -444,23 +444,64 @@ chart component does not need to know which kind of goal it is rendering.
 
 ## Statistics
 
-### `GET /api/stats/summary?range=week|month|quarter|all`
+All three routes take `range=week|month|quarter|all` (default `month`) and an
+optional `item_id`. Ranges are trailing windows in the device zone, and the
+definition of every figure is in
+[04-data-model.md](04-data-model.md#statistics-definitions). A bad parameter is a
+`400 validation_failed` naming the field. An `item_id` that does not exist is also a
+`400`; an archived item is accepted.
 
-Completion rate, current and longest streak per item, median lag from notification
-to resolution, totals by status. Once P3.5 lands, includes goal rows: progress
-toward target and velocity for item-linked goals, latest `progress_pct` for
-freestanding ones.
+### `GET /api/stats/summary?range=week|month|quarter|all&item_id=`
 
-### `GET /api/stats/timeseries?range=&bucket=day|week`
+```json
+{
+  "range": "month", "timezone": "America/Toronto",
+  "from": "2026-09-04", "to": "2026-10-03", "item_id": null,
+  "totals": {"chains": 12, "completed": 8, "skipped": 1, "missed": 2,
+             "awaiting": 1, "open": 0, "settled": 10},
+  "completion_rate": 0.8, "median_lag_minutes": 40, "lag_samples": 7,
+  "items": [{
+    "item_id": "01…", "title": "evening walk", "archived": false,
+    "totals": {"…": "same shape"}, "completion_rate": 0.8,
+    "current_streak": 2, "longest_streak": 4,
+    "median_lag_minutes": 40, "lag_samples": 7,
+    "recent_skip_notes": ["on vacation"]
+  }],
+  "goals": [{
+    "goal_id": "01…", "title": "gym", "status": "active",
+    "period_kind": "week", "period_start": "2026-09-28", "period_end": "2026-10-04",
+    "item_id": "01…", "completed": 2, "target": 3, "velocity_per_week": 2, "met": false,
+    "progress_pct": null, "note": null
+  }]
+}
+```
 
-### `GET /api/stats/heatmap?range=`
+`completion_rate` and `median_lag_minutes` are `null` when there is nothing to
+compute them from, never `0`. Streaks are lifetime and do not change with `range`.
+`goals` lists goals that are active or whose period overlaps the window (with
+`item_id`, only goals linked to it); an item-linked goal carries `completed`,
+`target` and `velocity_per_week`, a freestanding one `progress_pct` and `note`, and
+the other kind's fields are `null`. They come from the same reads the agent's
+context block uses.
 
-Completions bucketed by day of week and hour of day.
+### `GET /api/stats/timeseries?range=&bucket=day|week&item_id=`
 
-All three read the `chains` view (and, once P3.5 lands, `goals`/`goal_updates`
-alongside it), so a snooze chain counts once, a goal's numbers are computed the
-same way regardless of caller, and the agent's `get_stats` tool returns numbers
-identical to the dashboard.
+`buckets` is a zero-filled list of `{start, totals, completion_rate}` from the start
+of the window to today. `start` is the local date, or the local Monday for
+`bucket=week`; the first bucket of a trailing window can be partial. For
+`range=all` the first bucket is the earliest chain's.
+
+### `GET /api/stats/heatmap?range=&item_id=`
+
+`cells` is a 7×24 grid of completed-chain counts, `cells[d][h]` for local weekday `d`
+(0 = Monday) and hour `h`, with `total`, `max` and `weekdays` labels. It buckets by
+when the chain was *completed*, which for a completion reported at a 21:00 check-in
+is the report, not the deed.
+
+All three read the `chains` view through `internal/stats`, the same service the
+agent's `get_stats` tool calls, so a snooze chain counts once and the tool's numbers
+are byte-identical to the dashboard's. The handlers serialise the service's typed
+result and compute nothing.
 
 ---
 

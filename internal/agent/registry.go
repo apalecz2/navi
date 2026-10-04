@@ -40,6 +40,7 @@ var registrations = []registration{
 	{"update_goal", "Change a goal's title, period_end, or target_count, or set status to abandoned to drop it. Rejected on a goal that has already ended (met, missed, or abandoned).", handleUpdateGoal, UpdateGoalArgs{}},
 	{"list_goals", "List goals, active by default or all.", handleListGoals, ListGoalsArgs{}},
 	{"log_goal_progress", "Record progress on a freestanding goal from the conversation - a percent, a note, or both. Not for occurrences: a goal is not resolved and does not go through the status machine. Rejected on a goal that has already ended.", handleLogGoalProgress, LogGoalProgressArgs{}},
+	{"get_stats", "Read statistics: completion rate, current and longest streak per item, median lag from notification to completion, and goal progress. range is week, month (default), quarter or all; item_id narrows it to one item. Use this to answer any question about how things are going; never estimate a number from memory.", handleGetStats, GetStatsArgs{}},
 	{"request_escalation", "Terminate this turn and retry at the next tier. Call when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable. Writes nothing.", handleRequestEscalation, RequestEscalationArgs{}},
 }
 

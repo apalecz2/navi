@@ -348,10 +348,11 @@ full design.
       19. Same deterministic-window shape as the `missed` grace pass, but the
       conclusion is a counter and a log line, not a status transition (there is
       no occurrence)
-- [ ] Goal progress and velocity numbers from the agent match the dashboard's
-      numbers exactly — **agent half verified** against a hand count over
-      `chains` (`reportGoals`, session 18); the dashboard half is **blocked on
-      P4**, which is where `GET /api/stats/summary` and the charts land
+- [x] Goal progress and velocity numbers from the agent match the dashboard's
+      numbers exactly — agent half against a hand count over `chains`
+      (`reportGoals`, session 18); dashboard half session 23: the linked series'
+      last point = the summary's `completed` = the hand count, and the page's
+      goal headline is `stats.GoalPhrase`, the same function the chat uses
 
 ---
 
@@ -368,9 +369,9 @@ full design.
   charted with uPlot
 - Goal progress and velocity charts, same view, reading the same aggregation
   as `get_stats` (O4, O10)
-- `get_stats` tool reading the same `chains` view (**numbers built session 22**:
-  `internal/stats`, the three `/api/stats/*` routes and `get_stats`; the charts and
-  the stats view are still to come)
+- `get_stats` tool reading the same `chains` view (**built sessions 22-23**:
+  `internal/stats`, the three `/api/stats/*` routes, `GET /api/goals/{id}/progress`,
+  `get_stats`, and `/app/stats` drawing them)
 - Cloudflare Access on `/app` and `/api`
 
 **Exit criteria**
@@ -379,7 +380,14 @@ full design.
 - [ ] Checking an item off feels instant on mobile data — the row flips before the
       request lands, and reconciles or reverts when it does
 - [ ] The calendar shows resolved random times, not ranges
-- [ ] The agent's numbers match the dashboard's numbers exactly
+- [x] The agent's numbers match the dashboard's numbers exactly — session 23.
+      `reportStatsView` renders `/app/stats` and asserts every figure on it against
+      `get_stats` (the tool result and its chat text), the chart data byte-for-byte
+      against the `/api` bodies, and the grid against a hand count
+- [x] Stats view: rate, streaks, median lag, heatmap; goal progress and velocity
+      (item-linked) and the progress trail (freestanding); a thin dataset shows a
+      stated "not enough data yet" instead of a chart — session 23. Checked in
+      headless Chrome at 500px and by rendered-HTML assertions; **not** on a phone
 
 ---
 

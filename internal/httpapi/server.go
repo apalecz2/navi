@@ -146,6 +146,7 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 		mux.HandleFunc("GET /api/stats/summary", serveStats(s, "summary", stats.Summary))
 		mux.HandleFunc("GET /api/stats/timeseries", serveStats(s, "timeseries", stats.Timeseries))
 		mux.HandleFunc("GET /api/stats/heatmap", serveStats(s, "heatmap", stats.Heatmap))
+		mux.HandleFunc("GET /api/goals/{id}/progress", s.handleGoalProgress(stats))
 	}
 
 	// The browser surface, behind the same Access policy as /api. Its routes are

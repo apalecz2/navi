@@ -7,6 +7,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/stats"
+	"github.com/aidenpaleczny/navi/internal/store"
 )
 
 // Stats is what the three statistics routes call. *stats.Service is the one
@@ -19,6 +20,7 @@ type Stats interface {
 	Summary(ctx context.Context, q stats.Query) (stats.Summary, error)
 	Timeseries(ctx context.Context, q stats.Query) (stats.Timeseries, error)
 	Heatmap(ctx context.Context, q stats.Query) (stats.Heatmap, error)
+	GoalProgress(ctx context.Context, id string) (stats.GoalSeries, error)
 }
 
 // serveStats is the whole of each route: validate the three query parameters
@@ -48,5 +50,28 @@ func serveStats[T any](s *Server, name string, call func(context.Context, stats.
 			return
 		}
 		writeJSON(w, s.log, http.StatusOK, out)
+	}
+}
+
+// handleGoalProgress is GET /api/goals/{id}/progress: one GoalSeries shape for
+// both goal kinds. Like the statistics routes it serialises what the service
+// returns; which kind of goal it is, is the service's business.
+func (s *Server) handleGoalProgress(svc Stats) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		out, err := svc.GoalProgress(r.Context(), r.PathValue("id"))
+		var ve *domain.ValidationError
+		switch {
+		case errors.As(err, &ve):
+			writeValidationError(w, s.log, ve)
+		case errors.Is(err, store.ErrNotFound):
+			writeJSON(w, s.log, http.StatusNotFound, errorBody{Error: "not_found", Message: "no such goal"})
+		case err != nil:
+			s.log.Error("stats: goal progress", "err", err)
+			writeJSON(w, s.log, http.StatusInternalServerError, errorBody{
+				Error: "internal", Message: "goal progress could not be loaded",
+			})
+		default:
+			writeJSON(w, s.log, http.StatusOK, out)
+		}
 	}
 }

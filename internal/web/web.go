@@ -51,6 +51,7 @@ type Store interface {
 type App struct {
 	log       *slog.Logger
 	store     Store
+	stats     Stats // nil leaves /app/stats unmounted
 	defaultTZ *time.Location
 
 	// version is a hash of every embedded static file. It is the cache key in
@@ -64,8 +65,8 @@ type App struct {
 // New builds the app. defaultTZ is cfg.Schedule.DefaultTZ, the bottom rung of
 // schedule.Zones, the same value the check-in and the snooze handler resolve
 // against.
-func New(log *slog.Logger, st Store, defaultTZ *time.Location) *App {
-	a := &App{log: log, store: st, defaultTZ: defaultTZ}
+func New(log *slog.Logger, st Store, svc Stats, defaultTZ *time.Location) *App {
+	a := &App{log: log, store: st, stats: svc, defaultTZ: defaultTZ}
 	a.version, a.assets = fingerprint()
 	return a
 }
@@ -111,6 +112,10 @@ func (a *App) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /app/today", a.handleTodayFragment)
 	mux.HandleFunc("GET /app/calendar", a.handleCalendar)
 	mux.HandleFunc("GET /app/calendar/body", a.handleCalendarBody)
+	if a.stats != nil {
+		mux.HandleFunc("GET /app/stats", a.handleStats)
+		mux.HandleFunc("GET /app/stats/body", a.handleStatsBody)
+	}
 	mux.HandleFunc("GET /app/offline", a.handleOffline)
 	mux.HandleFunc("GET /app/sw.js", a.handleWorker)
 	mux.HandleFunc("GET /app/manifest.webmanifest", a.handleManifest)
@@ -287,4 +292,60 @@ func (a *App) handleWorker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(out))
+}
+
+// statsView builds the page for the request's range and item. A bad parameter
+// is the caller's mistake and is reported as one; the validation is the API's.
+func (a *App) statsView(r *http.Request) (StatsPage, int, error) {
+	q, err := statsQuery(r.URL.Query())
+	if err != nil {
+		return StatsPage{}, http.StatusBadRequest, err
+	}
+	p, err := NewStatsPage(r.Context(), a.stats, q)
+	switch {
+	case isValidation(err):
+		return StatsPage{}, http.StatusBadRequest, err
+	case err != nil:
+		return StatsPage{}, http.StatusInternalServerError, fmt.Errorf("web: stats: %w", err)
+	}
+	return p, http.StatusOK, nil
+}
+
+func (a *App) statsFail(w http.ResponseWriter, status int, err error) {
+	noStore(w)
+	if status == http.StatusBadRequest {
+		http.Error(w, err.Error(), status)
+		return
+	}
+	a.log.Error("web: stats", "err", err)
+	http.Error(w, "the statistics could not be loaded", status)
+}
+
+// handleStats and handleStatsBody are never cacheable: noStore on the response
+// and no rule for them in the worker. A figure is only ever as old as the
+// request.
+func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
+	p, status, err := a.statsView(r)
+	if err != nil {
+		a.statsFail(w, status, err)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := StatsPageView(p, a.version).Render(r.Context(), w); err != nil {
+		a.log.Error("web: render stats", "err", err)
+	}
+}
+
+func (a *App) handleStatsBody(w http.ResponseWriter, r *http.Request) {
+	p, status, err := a.statsView(r)
+	if err != nil {
+		a.statsFail(w, status, err)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := StatsBody(p).Render(r.Context(), w); err != nil {
+		a.log.Error("web: render stats body", "err", err)
+	}
 }

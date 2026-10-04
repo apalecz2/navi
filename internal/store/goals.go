@@ -232,6 +232,24 @@ func (s *Store) LatestGoalUpdate(ctx context.Context, goalID string) (domain.Goa
 	return toDomainGoalUpdate(row)
 }
 
+// ListGoalUpdates returns a freestanding goal's whole trail, oldest first. An
+// item-linked goal has none: its progress has no write path.
+func (s *Store) ListGoalUpdates(ctx context.Context, goalID string) ([]domain.GoalUpdate, error) {
+	rows, err := s.read.ListGoalUpdates(ctx, goalID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list goal updates for %s: %w", goalID, err)
+	}
+	out := make([]domain.GoalUpdate, 0, len(rows))
+	for _, r := range rows {
+		u, err := toDomainGoalUpdate(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, nil
+}
+
 // countCompletedChainsQuery counts snooze chains for one item whose root falls
 // in a half-open instant range and that completed (any link). It reads the
 // chains view directly, which sqlc cannot see (sqlc.yaml), so it is

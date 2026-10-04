@@ -15,6 +15,10 @@ import (
 // agent.Result - NextOccurrences is already domain.FormatTime'd and Inferred
 // is resolveSchedule's own return value, so neither costs a second model
 // call. toolName picks the shape.
+// Confirmation is the text a tool result becomes. It exists so cmd/naviseed can
+// hold the page's wording against the agent's; the ladder calls buildConfirmation.
+func Confirmation(toolName string, res agent.Result) string { return buildConfirmation(toolName, res) }
+
 func buildConfirmation(toolName string, res agent.Result) string {
 	switch toolName {
 	case "list_items":

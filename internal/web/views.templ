@@ -8,7 +8,7 @@ import "fmt"
 // crossorigin="use-credentials" because behind Access a credential-less
 // manifest fetch is redirected to the login page and the install prompt never
 // appears.
-templ shell(title, version string) {
+templ shell(title, version string, charts bool) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -23,6 +23,11 @@ templ shell(title, version string) {
 			<link rel="icon" type="image/png" href={ "/app/static/icon-192.png?v=" + version }/>
 			<link rel="stylesheet" href={ "/app/static/app.css?v=" + version }/>
 			<script defer src={ "/app/static/app.js?v=" + version }></script>
+			if charts {
+				<link rel="stylesheet" href={ "/app/static/uPlot.min.css?v=" + version }/>
+				<script defer src={ "/app/static/uPlot.iife.min.js?v=" + version }></script>
+				<script defer src={ "/app/static/stats.js?v=" + version }></script>
+			}
 			<script defer src={ "/app/static/htmx.min.js?v=" + version }></script>
 			<script defer src={ "/app/static/alpine.min.js?v=" + version }></script>
 		</head>
@@ -34,7 +39,7 @@ templ shell(title, version string) {
 
 // Page is the day view at /app/.
 templ Page(day Day, version string) {
-	@shell("Today · Navi", version) {
+	@shell("Today · Navi", version, false) {
 		<main id="day" x-data="day()" data-labels={ labelsJSON() }>
 			@tabs("today")
 			<header class="top">
@@ -115,7 +120,7 @@ templ rowView(r Row) {
 // Offline is what a navigation falls back to when the network is unreachable.
 // Deliberately static: a cached day view that looks live is worse than none.
 templ Offline(version string) {
-	@shell("Offline · Navi", version) {
+	@shell("Offline · Navi", version, false) {
 		<main>
 			<header class="top">
 				<h1>You're offline</h1>

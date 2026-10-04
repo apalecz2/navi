@@ -23,6 +23,13 @@ type Reader interface {
 	GetItem(ctx context.Context, id string) (domain.Item, error)
 	ListGoalProgress(ctx context.Context, filter store.GoalFilter, loc *time.Location) ([]store.GoalProgress, error)
 	CurrentTZ(ctx context.Context) (string, bool, error)
+
+	// The goal series (GET /api/goals/{id}/progress): the goal, the same progress
+	// read the summary uses, the one count of completed chains, and the trail.
+	GetGoal(ctx context.Context, id string) (domain.Goal, error)
+	GoalProgressFor(ctx context.Context, g domain.Goal, loc *time.Location) (store.GoalProgress, error)
+	CountCompletedChains(ctx context.Context, itemID string, from, toExclusive time.Time) (int, error)
+	ListGoalUpdates(ctx context.Context, goalID string) ([]domain.GoalUpdate, error)
 }
 
 // Service computes statistics. The HTTP handlers and the get_stats tool each hold

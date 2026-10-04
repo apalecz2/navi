@@ -249,6 +249,45 @@ func (q *Queries) ListAllGoals(ctx context.Context) ([]Goal, error) {
 	return items, nil
 }
 
+const listGoalUpdates = `-- name: ListGoalUpdates :many
+SELECT id, goal_id, note, progress_pct, source, created_at
+FROM goal_updates
+WHERE goal_id = ?
+ORDER BY created_at ASC, id ASC
+`
+
+// ListGoalUpdates is a freestanding goal's whole trail, oldest first: the series
+// GET /api/goals/{id}/progress draws. LatestGoalUpdate is the last row of this.
+func (q *Queries) ListGoalUpdates(ctx context.Context, goalID string) ([]GoalUpdate, error) {
+	rows, err := q.db.QueryContext(ctx, listGoalUpdates, goalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GoalUpdate{}
+	for rows.Next() {
+		var i GoalUpdate
+		if err := rows.Scan(
+			&i.ID,
+			&i.GoalID,
+			&i.Note,
+			&i.ProgressPct,
+			&i.Source,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listGoalsPastPeriod = `-- name: ListGoalsPastPeriod :many
 SELECT id, title, period_kind, period_start, period_end,
     item_id, target_count, status, created_at, updated_at

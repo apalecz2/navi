@@ -2,7 +2,7 @@ package web
 
 import "strconv"
 
-// tabs is the two-screen switcher both pages carry.
+// tabs is the three-screen switcher every page carries.
 templ tabs(current string) {
 	<nav class="tabs" aria-label="Views">
 		if current == "today" {
@@ -15,12 +15,17 @@ templ tabs(current string) {
 		} else {
 			<a href="/app/calendar">Calendar</a>
 		}
+		if current == "stats" {
+			<a href="/app/stats" aria-current="page">Stats</a>
+		} else {
+			<a href="/app/stats">Stats</a>
+		}
 	</nav>
 }
 
 // CalendarPage is the month view at /app/calendar.
 templ CalendarPage(cal Calendar, version string) {
-	@shell("Calendar · Navi", version) {
+	@shell("Calendar · Navi", version, false) {
 		<main id="calendar">
 			@tabs("calendar")
 			<div id="cal-body">

@@ -113,7 +113,7 @@ func reportCalendar(ctx context.Context, st *store.Store, tz string, fallback *t
 	mat := materializer.New(log.With("component", "mat-cal"), st, fallback)
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, mat, time.Time{}, fallback, nil, nil,
-		web.New(log.With("component", "web"), st, fallback))
+		web.New(log.With("component", "web"), st, nil, fallback))
 
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		var req *http.Request

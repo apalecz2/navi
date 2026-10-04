@@ -1,0 +1,174 @@
+package web
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// StatsPageView is the statistics screen at /app/stats.
+templ StatsPageView(p StatsPage, version string) {
+	@shell("Stats · Navi", version, true) {
+		<main id="stats">
+			@tabs("stats")
+			<div id="stats-body">
+				@StatsBody(p)
+			</div>
+		</main>
+	}
+}
+
+// StatsBody is everything that changes with the range or the item filter, one
+// fragment for the same reason the calendar's is: a half-swapped screen would
+// pair one window's headline with another's chart.
+//
+// Nothing here computes a figure. Every number is a field of the service's
+// result or a phrase from internal/stats, and the data handed to a chart is that
+// result marshalled as it is.
+templ StatsBody(p StatsPage) {
+	<header class="top">
+		<h1>
+			Stats
+			if p.ItemTitle != "" {
+				<span class="filter">· { p.ItemTitle }</span>
+			}
+		</h1>
+		<p class="sub">
+			{ p.RangeHeader }, { p.Summary.Timezone }
+			if p.ItemID != "" {
+				·
+				<a href={ templ.SafeURL(p.AllHref) } hx-get={ statsBodyOf(p.AllHref) } hx-target="#stats-body" hx-push-url={ p.AllHref }>all items</a>
+			}
+		</p>
+	</header>
+	<nav class="ranges" aria-label="Range">
+		for _, r := range p.Ranges {
+			<a
+				href={ templ.SafeURL(r.Href) }
+				hx-get={ r.BodyHref }
+				hx-target="#stats-body"
+				hx-push-url={ r.Href }
+				if r.Current {
+					aria-current="true"
+				}
+			>{ r.Label }</a>
+		}
+	</nav>
+	<section class="tiles" aria-label="Summary">
+		<div class="tile">
+			<span class="tk">Completion rate</span>
+			<span class="tv">{ p.Rated }</span>
+			<span class="ts">{ p.RatedSub }</span>
+		</div>
+		<div class="tile">
+			<span class="tk">Median time to done</span>
+			<span class="tv">{ p.Lag }</span>
+			<span class="ts">{ p.LagSub }</span>
+		</div>
+	</section>
+
+	<section aria-labelledby="h-rate">
+		<h2 id="h-rate">Completion rate over time</h2>
+		if p.Rate.Ready {
+			<div class="plot" x-data="chart()" data-plot="rate" data-series={ p.Rate.JSON } role="img" aria-label={ p.Rate.Label }></div>
+		} else {
+			<p class="thin">{ p.Rate.Why }</p>
+		}
+	</section>
+
+	<section aria-labelledby="h-items">
+		<h2 id="h-items">Streaks</h2>
+		if len(p.Items) == 0 {
+			<p class="empty">No reminders yet.</p>
+		} else {
+			<ul class="items">
+				for _, it := range p.Items {
+					<li>
+						<span class="iname">
+							<a href={ templ.SafeURL(it.Href) } hx-get={ statsBodyOf(it.Href) } hx-target="#stats-body" hx-push-url={ it.Href }>{ it.Title }</a>
+							if it.Archived {
+								<span class="tag">archived</span>
+							}
+						</span>
+						<span class="istreak">{ it.Streak }</span>
+						<span class="imeta">{ it.Meta }</span>
+					</li>
+				}
+			</ul>
+		}
+	</section>
+
+	<section aria-labelledby="h-heat">
+		<h2 id="h-heat">When things get done</h2>
+		if p.Heat.Ready {
+			@heatTable(p.Heat)
+		} else {
+			<p class="thin">{ p.Heat.Why }</p>
+		}
+	</section>
+
+	if len(p.Goals) > 0 {
+		<section aria-labelledby="h-goals">
+			<h2 id="h-goals">Goals</h2>
+			for _, g := range p.Goals {
+				@goalFigure(g)
+			}
+		</section>
+	}
+}
+
+// heatTable is the weekday-by-hour grid. --n is a cell's count and --max the
+// busiest cell's, both straight from stats.Heatmap; the shade is CSS over them.
+// Hour labels (the four in Hours) sit above every sixth column and each cell carries its own text.
+templ heatTable(h HeatView) {
+	<div class="heatwrap">
+		<table class="heat" style={ templ.SafeCSS("--max:" + strconv.Itoa(h.Map.Max)) }>
+			<caption class="sr">Completions by weekday and hour, { h.Map.Timezone }</caption>
+			<thead>
+				<tr>
+					<td></td>
+					for _, hr := range h.Hours {
+						<th scope="col" colspan="6" class="hl">{ fmt.Sprintf("%02d", hr) }</th>
+					}
+				</tr>
+			</thead>
+			<tbody>
+				for d, wd := range h.Map.Weekdays {
+					<tr>
+						<th scope="row">{ wd }</th>
+						for hr, n := range h.Map.Cells[d] {
+							<td
+								class={ templ.KV("z", n == 0) }
+								style={ templ.SafeCSS("--n:" + strconv.Itoa(n)) }
+								title={ fmt.Sprintf("%s %02d:00, %d", wd, hr, n) }
+							><span class="sr">{ strconv.Itoa(n) }</span></td>
+						}
+					</tr>
+				}
+			</tbody>
+		</table>
+	</div>
+	<p class="key">Darker is more completions. By when it was marked done, in { h.Map.Timezone }.</p>
+}
+
+// goalFigure is one goal: a headline from the summary row, and its plots from
+// the series. The same markup serves both goal kinds; whether a velocity plot is
+// offered is the one thing that differs, and it follows from the series.
+templ goalFigure(g GoalView) {
+	<figure class="goal">
+		<figcaption>
+			<strong>{ g.Row.Title }</strong>
+			<span class="tag">{ g.Row.Status }</span>
+			<span class="gline">{ g.Headline }</span>
+			<span class="gper">{ g.Row.PeriodStart } to { g.Row.PeriodEnd }</span>
+		</figcaption>
+		if g.Ready {
+			<div class="plot" x-data="chart()" data-plot="progress" data-series={ g.JSON } role="img" aria-label={ "Progress for " + g.Row.Title }></div>
+			if g.Velocity {
+				<p class="ptitle">Velocity, per week</p>
+				<div class="plot short" x-data="chart()" data-plot="velocity" data-series={ g.JSON } role="img" aria-label={ "Velocity for " + g.Row.Title }></div>
+			}
+		} else {
+			<p class="thin">{ g.Why }</p>
+		}
+	</figure>
+}

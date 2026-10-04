@@ -279,9 +279,12 @@ func run() error {
 	// the pause routes re-plan the items whose occurrences a new window
 	// suppresses, and a second materializer would mean two random generators
 	// drawing for the same items.
+	// One statistics service for the API routes and the stats view, so a page
+	// and its endpoint read the same value.
+	statsSvc := stats.New(st, cfg.Schedule.DefaultTZ)
 	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook,
-		stats.New(st, cfg.Schedule.DefaultTZ),
-		web.New(log.With("component", "web"), st, cfg.Schedule.DefaultTZ))
+		statsSvc,
+		web.New(log.With("component", "web"), st, statsSvc, cfg.Schedule.DefaultTZ))
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)

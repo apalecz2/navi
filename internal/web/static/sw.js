@@ -7,7 +7,8 @@
 // construction the copy this build ships.
 //
 // REFUSES, by never calling respondWith for them: every non-GET request, every
-// /api/* request (resolutions included), /app/ itself and /app/today. Those go
+// /api/* request (resolutions and every statistic included), /app/ itself, /app/today
+// and the statistics view and its fragment (/app/stats, /app/stats/body). Those go
 // straight to the network, so the browser's own behaviour applies and a failure
 // is a visible failure. A navigation that cannot reach the network gets the
 // offline page, not yesterday's list: a stale day view that looks live is worse

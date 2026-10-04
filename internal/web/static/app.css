@@ -161,3 +161,61 @@ a { color: var(--accent); }
     background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--line) 6px 7px);
   }
 }
+
+/* ---- stats ---- */
+#stats { max-width: 760px; }
+#stats h2 { font-size: 1.05rem; margin: 22px 0 8px; }
+.filter { color: var(--muted); font-weight: 500; font-size: 1.1rem; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ranges { display: flex; gap: 4px; margin: 0 0 14px; flex-wrap: wrap; }
+.ranges a {
+  padding: 8px 14px; min-height: 40px; border-radius: 999px; text-decoration: none; color: var(--muted);
+  border: 1px solid var(--line); font-weight: 600; font-size: .9rem; display: inline-flex; align-items: center;
+}
+.ranges a[aria-current] { color: var(--accent); border-color: var(--accent); background: var(--card); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.tile {
+  display: grid; gap: 2px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px 14px;
+}
+.tk { color: var(--muted); font-size: .8rem; }
+.tv { font-size: 2rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ts { color: var(--muted); font-size: .8rem; }
+.thin {
+  margin: 0; padding: 14px; border: 1px dashed var(--line); border-radius: 12px;
+  color: var(--muted); background: var(--card); font-size: .9rem;
+}
+
+.plot { width: 100%; min-height: 120px; }
+.plot .u-legend { font-size: .8rem; color: var(--fg); text-align: left; }
+.plot .u-legend .u-marker { border-radius: 2px; }
+.ptitle { margin: 10px 0 2px; color: var(--muted); font-size: .85rem; }
+
+.items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.items li {
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: baseline;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+}
+.iname { font-weight: 600; overflow-wrap: anywhere; }
+.istreak { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
+.imeta { grid-column: 1 / -1; color: var(--muted); font-size: .8rem; }
+
+/* One hue, light to dark. The shade is the cell's count over the busiest cell's,
+   both emitted by the server as --n and --max; CSS only mixes colours. A cell
+   with any completions never fades below 18%, so one is still visible. */
+.heatwrap { overflow-x: auto; }
+.heat { border-collapse: separate; border-spacing: 2px; width: 100%; min-width: 360px; table-layout: fixed; }
+.heat th { color: var(--muted); font-weight: 500; font-size: .75rem; text-align: left; }
+.heat th.hl { padding: 0 0 2px; }
+.heat tbody th { width: 2.4em; text-transform: capitalize; }
+.heat td {
+  height: 18px; border-radius: 3px; padding: 0;
+  background: color-mix(in srgb, var(--accent) max(18%, calc(var(--n) / var(--max) * 100%)), var(--card));
+}
+.heat td.z { background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.heat td:hover { outline: 2px solid var(--fg); outline-offset: -1px; }
+
+.goal { margin: 0 0 18px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.goal figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 8px; }
+.goal .gline { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+.goal .gper { flex-basis: 100%; color: var(--muted); font-size: .8rem; }

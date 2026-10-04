@@ -174,8 +174,12 @@ already produces no Saturday or Sunday occurrence to break the chain on — the
 streak *is* a weekday streak by construction, because [chains](04-data-model.md#streaks-and-snooze-chains)
 walks `occurrences`, and `occurrences` only has rows for days the schedule
 said to fire on. Nothing here adds a "weekday mode" to streak computation;
-the only open item is display — whether the UI states "12" or "12 weekdays"
-— which is a P4 wording decision, not a schema or query change.
+the only open item was display — whether the UI states "12" or "12 weekdays".
+**Decided in session 23: neither.** It reads "12 in a row (best 20)" on the page and
+in the chat (`stats.StreakPhrase`). A streak counts chains, so its unit is the
+item's own cadence: "weekdays" is right for a Monday-to-Friday item and wrong for a
+Tuesday/Thursday one or a three-a-week fuzzy one, and "days" is wrong for all of
+them. "In a row" is true of every schedule and says the one thing a streak claims.
 
 ## Visualization
 

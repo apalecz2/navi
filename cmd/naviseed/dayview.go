@@ -83,7 +83,7 @@ func reportDayView(ctx context.Context, st *store.Store, tz string, fallback *ti
 	m := metrics.New()
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), m, st, materializer.New(log.With("component", "mat-day"), st, fallback),
-		time.Time{}, fallback, nil, nil, web.New(log.With("component", "web"), st, fallback))
+		time.Time{}, fallback, nil, nil, web.New(log.With("component", "web"), st, nil, fallback))
 
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		var req *http.Request

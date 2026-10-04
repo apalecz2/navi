@@ -96,3 +96,12 @@ FROM goal_updates
 WHERE goal_id = ?
 ORDER BY created_at DESC, id DESC
 LIMIT 1;
+
+-- ListGoalUpdates is a freestanding goal's whole trail, oldest first: the series
+-- GET /api/goals/{id}/progress draws. LatestGoalUpdate is the last row of this.
+--
+-- name: ListGoalUpdates :many
+SELECT id, goal_id, note, progress_pct, source, created_at
+FROM goal_updates
+WHERE goal_id = ?
+ORDER BY created_at ASC, id ASC;

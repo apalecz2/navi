@@ -397,7 +397,7 @@ whole of what I6 buys.
 
 ## Goals
 
-**Status: specified, not built** — P3.5, see [11-goals-spec.md](11-goals-spec.md).
+**Status:** only `GET /api/goals/{id}/progress` is an HTTP route (session 23); the rest of this section is reached through the agent's four goal tools, see [11-goals-spec.md](11-goals-spec.md).
 
 ### `GET /api/goals?filter=active|all`
 
@@ -438,7 +438,30 @@ required.
 
 The full `goal_updates` history for a freestanding goal, or the `chains`-derived
 progress series for an item-linked one — same response shape either way, so a
-chart component does not need to know which kind of goal it is rendering.
+chart component does not need to know which kind of goal it is rendering. Built
+session 23 as `stats.Service.GoalProgress`. `400` for a malformed id, `404` for
+an unknown goal, `Cache-Control: no-store`.
+
+```json
+{
+  "goal_id": "01…", "title": "gym", "status": "active",
+  "kind": "item_linked", "unit": "completions",
+  "period_kind": "week", "period_start": "2026-09-28", "period_end": "2026-10-04",
+  "timezone": "America/Toronto", "item_id": "01…",
+  "target": 3, "current": 4, "velocity_per_week": 4, "met": true,
+  "points": [{"date": "2026-09-28", "at": "2026-09-29T03:59:59Z", "value": 1,
+              "velocity_per_week": 1, "note": null}]
+}
+```
+
+`kind` is `item_linked` or `freestanding`; `unit` is `completions` or `percent`.
+Item-linked: one point per local day from `period_start` to today (or `period_end`),
+`value` = `CountCompletedChains` at the end of that day, the closing point being the
+goal's own progress as of now, so the last point equals `current` and the summary's
+`completed`. `velocity_per_week` on a point is `GoalProgress.Velocity` at that
+instant. Freestanding: one point per `goal_updates` row as written; `target` is 100,
+`value` is null on a note-only update, and every velocity is null — no rate is
+invented for it (11-goals-spec, Velocity).
 
 ---
 

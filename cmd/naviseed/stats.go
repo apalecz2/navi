@@ -84,9 +84,10 @@ func reportStats(ctx context.Context, st *store.Store, table *defaults.Table, db
 
 	mat := materializer.New(log.With("component", "mat-stats"), st, fallback)
 	tools := agent.New(st, mat, table, fallback, nil)
+	svc := stats.New(st, fallback)
 	srv := httpapi.New(config.HTTP{Addr: ":0"}, log.With("component", "httpapi"),
 		health.New(), metrics.New(), st, mat, time.Time{}, fallback, nil,
-		stats.New(st, fallback), nil)
+		svc, nil)
 
 	get := func(path string) (int, string) {
 		rec := httptest.NewRecorder()
@@ -733,7 +734,27 @@ func reportStats(ctx context.Context, st *store.Store, table *defaults.Table, db
 		}
 	}
 	fmt.Printf("  get_stats is in the catalog with its range enum  %s\n", verdict(inCatalog))
-	return nil
+
+	// ---- 8. the view -------------------------------------------------------
+	//
+	// E is the one fixture built for the view: thirty-five consecutive days of a
+	// completion each, so a rate line, a populated grid and five-plus weekly
+	// buckets exist on any day the file is run. It is created last so nothing
+	// above counts it.
+	itemE, err := newItem("E")
+	if err != nil {
+		return err
+	}
+	for d := 35; d >= 1; d-- {
+		add(completed(itemE, d, 10))
+	}
+	if fail != nil {
+		return fail
+	}
+	return reportStatsView(ctx, st, tools, svc, fallback, log, statsViewFixture{
+		itemA: itemA, itemB: itemB, itemE: itemE, chainsA: chainsA,
+		linked: linked.Goal.ID, free: free.Goal.ID, runID: runID, sinceMonday: sinceMonday,
+	})
 }
 
 func intp(n int) *int { return &n }

@@ -10,12 +10,18 @@ that calendar events can be added later without restructuring.
 
 ## Status
 
-Pre-development. No code written. These documents are the agreed specification.
+Built through P4. The core (schema, schedules, materializer, scheduler, Telegram
+transport), the conversational agent, resolution surfaces, reconciliation, goals,
+the morning briefing, and the web app (day view, calendar, statistics) are
+implemented. Next is P5 (personality), then P6 (`.ics` export) and P7 (events);
+see [09-roadmap.md](09-roadmap.md) for exit criteria and what still needs the
+real host. These documents remain the agreed specification.
 
 ## Stack
 
-Go, SQLite in WAL mode, and server-rendered HTML. One static binary running an
-HTTP API and five supervised background loops, behind a Cloudflare Tunnel, with
+Go, SQLite in WAL mode, and server-rendered HTML (templ, HTMX and Alpine, with
+uPlot for the statistics charts). One static binary running an
+HTTP API and six supervised background loops, behind a Cloudflare Tunnel, with
 Litestream replicating to R2 and Prometheus and Grafana alongside.
 
 No web framework, no ORM, no LLM SDK, no SPA. Each of those omissions is a
@@ -37,7 +43,7 @@ and [D-023](08-decisions.md#d-023-metrics-and-dashboards-are-part-of-the-system-
 | [08-decisions.md](08-decisions.md) | Decision records with rationale and consequences |
 | [09-roadmap.md](09-roadmap.md) | Phased build plan with exit criteria |
 | [10-open-questions.md](10-open-questions.md) | Deferred decisions and known unknowns |
-| [11-goals-spec.md](11-goals-spec.md) | Goals, progress tracking, velocity, and the morning briefing (P3.5, not yet built) |
+| [11-goals-spec.md](11-goals-spec.md) | Goals, progress tracking, velocity, and the morning briefing (P3.5, built) |
 
 ## Glossary
 

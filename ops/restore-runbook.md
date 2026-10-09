@@ -36,7 +36,7 @@ section first if you are here because the disk is gone.
    Litestream picks the restored file up as `/data/navi.db` and starts a new
    replication generation against it — this is expected (see the caveat
    below) and not itself a sign anything went wrong.
-6. **Confirm:** `curl localhost:8000/healthz` should read `"status":"ok"`
+6. **Confirm:** `curl localhost:8010/healthz` should read `"status":"ok"`
    within a few seconds, with `pending_overdue` matching what you'd expect
    from the restored data.
 

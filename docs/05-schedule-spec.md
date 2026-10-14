@@ -91,7 +91,9 @@ Three reasons, in order of weight.
 
 The cost is that `fuzzy` sits outside it. That is accepted: fuzzy schedules are
 reminder-only and export to calendars as individual events rather than as a
-recurrence rule.
+recurrence rule. `windowed` joins it at export (X2, session 24): its rule names
+the days but every day's time is drawn, so a recurring event would carry one
+time that is wrong for all but one of them.
 
 A second cost is newer. `rrule-go` is a good library and it is not
 `python-dateutil`, which has two decades of edge cases beaten out of it. The

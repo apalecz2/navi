@@ -207,7 +207,7 @@ the asking did would be measuring silence nobody was invited to break.
 | ID | Pri | Requirement |
 |---|---|---|
 | X1 | S | An authenticated `.ics` feed endpoint exposing materialized occurrences over a date range, subscribable from Google Calendar and Apple Calendar. |
-| X2 | S | `fixed` and `windowed` items export as recurring VEVENTs. `fuzzy` items export as individual VEVENTs per occurrence, since the pattern has no iCalendar representation. |
+| X2 | S | `fixed` items export as recurring VEVENTs, with skips, edits, snoozes and pauses as exceptions. `windowed` and `fuzzy` items export as individual VEVENTs per occurrence: their times are drawn at materialization (D-005), and a recurring event has one start time. Amended in session 24; the original text listed `windowed` with `fixed`. |
 | X3 | L | Bidirectional sync with Google Calendar via its API, and with Apple Calendar via CalDAV. |
 | X4 | L | Events support duration, location, and attendees, and are managed through the same conversational tools as reminders. |
 

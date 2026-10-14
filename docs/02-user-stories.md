@@ -286,8 +286,8 @@ I message "how am I doing on stretching this month?"
 
 ### US-8.1 See reminders in my phone's calendar
 - [ ] An authenticated `.ics` URL is subscribable from Google Calendar and Apple Calendar [X1]
-- [ ] `fixed` and `windowed` items appear as recurring events [X2]
-- [ ] `fuzzy` items appear as individual events at their resolved times [X2]
+- [ ] `fixed` items appear as recurring events [X2]
+- [ ] `windowed` and `fuzzy` items appear as individual events at their resolved times [X2]
 
 ### US-8.2 Manage calendar events the same way as reminders (later)
 - [ ] Events are an item kind with duration [S4, X4]

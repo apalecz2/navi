@@ -84,7 +84,11 @@ so no date arithmetic gets hand-written.
 
 **Cost.** RRULE cannot express "three times a week, distributed", which forced the
 separate `fuzzy` kind. Fuzzy items export to calendars as individual events rather
-than as a recurrence rule, which is a cosmetic loss in the calendar app.
+than as a recurrence rule, which is a cosmetic loss in the calendar app. So do
+`windowed` items (corrected in session 24; the first draft exported them as
+recurring events): a recurring event has one DTSTART time and every windowed
+occurrence has its own drawn one (D-005), so the rule would put wrong times in the
+phone. Only `fixed` keeps its RRULE across the export.
 
 ---
 
@@ -379,6 +383,15 @@ a feature.
 
 **Cost.** Read-only, and refresh timing belongs to the calendar client. Google can
 lag by hours.
+
+**As built (session 24).** "Forty lines" was the estimate before the exceptions
+were counted; the encoder and feed are `internal/ical` and `internal/feed`. The
+decisions that cost something: `windowed` exports per occurrence (above, D-004);
+floating items export with a TZID resolved against the device zone, not as iCal
+floating times, because Google and Apple read floating differently and Navi fires
+at an absolute instant; and a `fixed` series carries its exceptions as EXDATE and
+RECURRENCE-ID overrides derived from the rows inside the horizon. See
+07-api-spec, Calendar.
 
 ---
 

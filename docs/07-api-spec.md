@@ -532,17 +532,65 @@ result and compute nothing.
 
 ### `GET /calendar/{token}.ics?from=&to=`
 
-iCalendar feed of materialized occurrences. Defaults to 30 days back and 90 days
-forward.
+iCalendar feed of materialized occurrences. `from` and `to` are inclusive ISO
+dates in the device zone, defaulting to 30 days back and 90 days forward, capped
+at 400 days. A wrong token is a plain 404, byte-identical to an unknown path, so
+the route does not confirm it exists; a bad range after a good token is a 400.
+The token is `calendar_token` in the data directory (D10); rotate it by deleting
+the file and restarting.
 
-- `fixed` and `windowed` items emit recurring `VEVENT`s with their `RRULE`
-- `fuzzy` items emit one standalone `VEVENT` per occurrence, since the pattern has
-  no iCalendar representation
-- Reminders emit as zero-duration events
-- `STATUS:CANCELLED` for skipped occurrences
+**What a kind exports as** (corrected in session 24: the first draft sent
+`windowed` as a recurring event, which has one start time where every windowed
+occurrence has its own drawn one):
 
-Includes `X-PUBLISHED-TTL:PT1H`, which Google and Apple treat as a hint rather
-than an instruction. Refresh timing is not under this service's control.
+- `fixed` — one recurring `VEVENT` with its `RRULE`. A rule with `COUNT` or
+  `UNTIL` is re-expressed as the `UNTIL` it implies, since `DTSTART` slides with
+  the requested range.
+- `windowed`, `fuzzy` — one standalone `VEVENT` per occurrence, at the drawn time.
+- `one_off` — one standalone `VEVENT`; if it has not materialized yet it is
+  written from its schedule, under the same UID it will keep.
+- Reminders are zero-duration events (no `DTEND`) and `TRANSPARENT`.
+
+**Exceptions to a `fixed` series.** Inside the materialization horizon the rows
+are the truth and the rule is checked against them; past it the rule speaks.
+
+| Case | Representation |
+|---|---|
+| Skipped instance | `RECURRENCE-ID` override on the series UID with `STATUS:CANCELLED` |
+| Snoozed parent | `EXDATE`; the chain is drawn once, as its live link, a standalone event |
+| Snooze child | standalone `VEVENT`, UID from the occurrence id |
+| Single edit (`is_override`) | `EXDATE` on the slot it left, standalone event for the moved row |
+| Pause window / deleted pending rows | `EXDATE` for every slot with no row inside the horizon, and for slots before a known pause end beyond it |
+| Slot in a DST gap or fold | `EXDATE` plus a standalone event at the instant `schedule.Instant` chose |
+
+An edit is not a `RECURRENCE-ID` override because the row keeps no record of the
+slot it moved from; pairing it would be a guess.
+
+**Past the horizon.** `fixed` and `one_off` items continue for the whole range.
+`windowed` and `fuzzy` stop at `kv.last_materialized_through` (about 30 days),
+because their times do not exist yet; the feed grows as the nightly run extends
+the horizon. The feed carries `X-NAVI-MATERIALIZED-THROUGH` so an empty stretch
+can be told from a quiet one.
+
+**Time zones.** Every item resolves through `schedule.Zones.For`, exactly as the
+materializer does. A series carries `TZID` and a generated `VTIMEZONE`; standalone
+events are UTC. iCal floating times are not used for `tz_mode = floating`: Google
+reads them in the account's zone and Apple in the device's, but Navi fires at an
+absolute instant resolved in the device zone, and the feed must show that
+instant. A device-zone change therefore rewrites the series' `TZID` at the next
+refresh.
+
+**Identity.** UIDs are `{item_id}@navi` for a series and a one-off, and
+`{occurrence_id}@navi` for a standalone row. `DTSTAMP` and `LAST-MODIFIED` are the
+last modification the feed can read (the item's `updated_at`, the occurrence's
+`resolved_at`), `SEQUENCE` is that instant in minutes since 2020-01-01, so an edit
+raises it with no stored counter. A device-zone change and a global pause alter a
+series without touching either timestamp; the UID still makes the client update
+in place.
+
+Includes `X-PUBLISHED-TTL:PT1H` and `REFRESH-INTERVAL`, which Google and Apple
+treat as a hint rather than an instruction. Refresh timing is not under this
+service's control.
 
 ---
 

@@ -33,6 +33,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/copywriter"
 	"github.com/aidenpaleczny/navi/internal/defaults"
 	"github.com/aidenpaleczny/navi/internal/domain"
+	"github.com/aidenpaleczny/navi/internal/feed"
 	"github.com/aidenpaleczny/navi/internal/health"
 	"github.com/aidenpaleczny/navi/internal/httpapi"
 	"github.com/aidenpaleczny/navi/internal/materializer"
@@ -41,6 +42,7 @@ import (
 	"github.com/aidenpaleczny/navi/internal/reconciler"
 	"github.com/aidenpaleczny/navi/internal/schedule"
 	"github.com/aidenpaleczny/navi/internal/scheduler"
+	"github.com/aidenpaleczny/navi/internal/secrets"
 	"github.com/aidenpaleczny/navi/internal/stats"
 	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/supervisor"
@@ -282,9 +284,22 @@ func run() error {
 	// One statistics service for the API routes and the stats view, so a page
 	// and its endpoint read the same value.
 	statsSvc := stats.New(st, cfg.Schedule.DefaultTZ)
+
+	// The calendar path token is the first secret this deployment owns (D10):
+	// generated into the data directory on first run, never given a default and
+	// never logged. Rotating it is deleting the file and restarting; the old URL
+	// then 404s like any other. The value stays inside this scope - the request
+	// logger redacts /calendar/ paths for the same reason.
+	calendarToken, err := secrets.Ensure(cfg.Data.Dir, secrets.CalendarTokenFile)
+	if err != nil {
+		return err
+	}
+	calFeed := feed.New(log.With("component", "feed"), st, calendarToken, cfg.Schedule.DefaultTZ)
+
 	srv := httpapi.New(cfg.HTTP, log, h, m, st, mat, claimFloor, cfg.Schedule.DefaultTZ, chatWebhook,
 		statsSvc,
-		web.New(log.With("component", "web"), st, statsSvc, cfg.Schedule.DefaultTZ))
+		web.New(log.With("component", "web"), st, statsSvc, cfg.Schedule.DefaultTZ),
+		calFeed)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http listening", "addr", srv.Addr)

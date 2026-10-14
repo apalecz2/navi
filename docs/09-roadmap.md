@@ -425,15 +425,23 @@ had nothing to work with. Live on P0 through P4 for two weeks first.
 **Goal.** Reminders appear in the phone's calendar app.
 
 - `.ics` feed endpoint with a path token
-- Recurring `VEVENT` export for `fixed` and `windowed`
-- Per-occurrence `VEVENT` export for `fuzzy`
+- Recurring `VEVENT` export for `fixed` (session 24 moved `windowed` out: see X2)
+- Per-occurrence `VEVENT` export for `windowed` and `fuzzy`
 - `STATUS:CANCELLED` for skipped occurrences
+
+Built in session 24 (`internal/ical`, `internal/feed`, naviseed's `reportICS`).
+Verified in code and against an in-process parse-back; the two subscription boxes
+below need a real device against the deployed host.
 
 **Exit criteria**
 
 - [ ] Google Calendar subscribes and renders correctly
 - [ ] Apple Calendar subscribes and renders correctly
-- [ ] Recurrence rules survive the round trip rather than exporting as flat events
+- [x] Recurrence rules survive the round trip rather than exporting as flat events (for `fixed`; `windowed` is flat by decision)
+- [x] Every windowed and fuzzy instance shows its drawn time
+- [x] A skipped instance appears cancelled and the rest of its series is intact
+- [x] Re-materializing does not duplicate events
+- [x] A wrong token gets a 404
 
 ---
 

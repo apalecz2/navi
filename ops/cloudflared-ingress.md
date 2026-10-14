@@ -69,6 +69,20 @@ Set up in the Cloudflare dashboard, not here. From
 | `/webhook/*` | Transport-specific shared secret |
 | `/healthz` | Open |
 
+**`/calendar` is live (session 24) and must stay outside Access.** The ingress
+regex already matches it, so no rule changes, but the Access applications created
+below cover `/app` and `/api` only: Google and Apple fetch the feed from their own
+servers and cannot do the PIN flow. Its only credential is the path token, which
+is `calendar_token` in the data directory (generated on first run, never logged;
+the request logger prints `/calendar/[redacted]`). The URL to subscribe to is
+`https://<host>/calendar/<contents of that file>.ics`. To rotate it: delete the
+file, restart, and re-subscribe on each device. Print it with
+`docker compose exec navi cat /data/calendar_token` - the image is `scratch`, so
+read it from the volume (`docker run --rm -v navi_data:/d alpine cat /d/calendar_token`)
+if exec has no `cat`. The token also sits in the cloudflared and proxy access logs
+as part of the path, which is why the route sends `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`; treat those logs as sensitive.
+
 Notification actions do not appear in this table. A button tap arrives as a
 callback query on `/webhook/telegram`, already authenticated by the shared secret
 and already filtered by the sender allowlist (D8, D-006). There is no

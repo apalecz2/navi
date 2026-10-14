@@ -8,10 +8,14 @@
 // survives being copied to a second machine, because a default signing key is
 // indistinguishable from no signing key at all (D10, D9).
 //
-// Nothing calls Ensure yet. The first caller is the calendar path token in P6,
-// and this exists now because a rule about how secrets come into existence,
-// adopted after the first secret has shipped, is a rule with an exception
-// written for the first secret.
+// The first caller is the calendar path token (P6, session 24), which is the
+// reason this existed before it had one: a rule about how secrets come into
+// existence, adopted after the first secret has shipped, is a rule with an
+// exception written for the first secret.
+//
+// Rotation is deletion. Remove the file from the data directory and restart; the
+// next Ensure generates a fresh value and the old one stops working. The value is
+// never logged here or by any caller.
 package secrets
 
 import (
@@ -24,6 +28,10 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// CalendarTokenFile is the file in the data directory holding the .ics feed's
+// path token.
+const CalendarTokenFile = "calendar_token"
 
 // Bytes of entropy per generated secret. 32 bytes is 256 bits, which is beyond
 // argument for a value that appears in a URL path and is never rotated on a

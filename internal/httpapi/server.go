@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aidenpaleczny/navi/internal/config"
@@ -117,7 +118,7 @@ type Server struct {
 // names nothing (still the default outside P1 testing), in which case the
 // route is never registered and a POST to it 404s from the mux itself rather
 // than reaching a handler with nothing configured to verify against.
-func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler, stats Stats, app Mounter) *http.Server {
+func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metrics, st Store, mat *materializer.Materializer, claimFloor time.Time, defaultTZ *time.Location, chatWebhook http.Handler, stats Stats, app Mounter, extra ...Mounter) *http.Server {
 	s := &Server{
 		log: log, health: h, metrics: m, store: st, mat: mat,
 		claimFloor: claimFloor, defaultTZ: defaultTZ, stats: stats,
@@ -154,6 +155,14 @@ func New(cfg config.HTTP, log *slog.Logger, h *health.Registry, m *metrics.Metri
 	// outcome mapping is not reimplemented there (D-014).
 	if app != nil {
 		app.Mount(mux)
+	}
+
+	// Routes that authenticate themselves rather than through Access: today the
+	// .ics feed, whose path token is its credential (docs/07-api-spec.md).
+	for _, m := range extra {
+		if m != nil {
+			m.Mount(mux)
+		}
 	}
 
 	// Two more, one mechanism at two scopes (I6). Neither is a resolution and
@@ -197,9 +206,15 @@ func logRequests(log *slog.Logger) func(http.Handler) http.Handler {
 			if rec.status >= http.StatusInternalServerError {
 				level = slog.LevelError
 			}
+			path := r.URL.Path
+			if strings.HasPrefix(path, "/calendar/") {
+				// The path is the calendar feed's credential (D10): it must never
+				// reach a log line.
+				path = "/calendar/[redacted]"
+			}
 			log.LogAttrs(r.Context(), level, "request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", path),
 				slog.Int("status", rec.status),
 				slog.Duration("took", time.Since(start)),
 			)
@@ -214,8 +229,12 @@ func recoverPanic(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
+					path := r.URL.Path
+					if strings.HasPrefix(path, "/calendar/") {
+						path = "/calendar/[redacted]"
+					}
 					log.Error("panic in handler",
-						"method", r.Method, "path", r.URL.Path, "err", rec)
+						"method", r.Method, "path", path, "err", rec)
 					w.WriteHeader(http.StatusInternalServerError)
 				}
 			}()

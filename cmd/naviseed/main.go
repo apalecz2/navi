@@ -83,6 +83,13 @@ func run() error {
 	}
 	fmt.Printf("database %s at schema version %d\n\n", cfg.Data.DBPath(), version)
 
+	// NAVISEED_ONLY=ics runs the feed section alone. The full run spends minutes
+	// in the conversation ladder against an unreachable provider, which is no
+	// reason to wait for it while working on something that does not touch it.
+	if os.Getenv("NAVISEED_ONLY") == "ics" {
+		return reportICS(ctx, st, cfg.Schedule.DefaultTZ, log)
+	}
+
 	item, err := seedItem(ctx, st, cfg.Schedule.DefaultTZ.String())
 	if err != nil {
 		return err
@@ -247,7 +254,15 @@ func run() error {
 
 	// Last of all: the escalation ladder built on top of it - the session
 	// this repository is on right now.
-	return reportConversationLadder(ctx, st, table, cfg.Schedule.DefaultTZ, log)
+	if err := reportConversationLadder(ctx, st, table, cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// After the ladder, which injects the active items into a prompt: this
+	// section adds a dozen of them, one with a title built to break a feed. The
+	// feed also reads the whole database, so it goes behind everything that
+	// writes.
+	return reportICS(ctx, st, cfg.Schedule.DefaultTZ, log)
 }
 
 // seedItem creates the item on first run and reuses it afterwards, so running

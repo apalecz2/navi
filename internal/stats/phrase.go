@@ -53,6 +53,45 @@ func GoalPhrase(g GoalStats) string {
 	}
 }
 
+// RateDetail is the sentence under the headline rate: what the percentage is
+// made of, or why there is none. The statistics page and the weekly digest both
+// say it, so it is here.
+func (s Summary) RateDetail() string {
+	t := s.Totals
+	switch {
+	case s.CompletionRate != nil:
+		out := fmt.Sprintf("%d of %d completed", t.Completed, t.Settled)
+		if rest := t.Others(); rest != "" {
+			out += "; " + rest
+		}
+		return out
+	case t.Chains == 0:
+		return "nothing was scheduled"
+	default:
+		return "nothing has settled yet (" + t.Unsettled() + ")"
+	}
+}
+
+// Meta is one item's line of figures over the window, parts omitted when absent:
+// "100% done · median 10 min · skipped: on vacation". The streak is not in it;
+// it is lifetime and has its own phrase.
+func (it ItemStats) Meta() string {
+	var parts []string
+	if it.CompletionRate != nil {
+		parts = append(parts, Percent(*it.CompletionRate)+" done")
+	}
+	if it.MedianLagMinutes != nil {
+		parts = append(parts, "median "+MinutesPhrase(*it.MedianLagMinutes))
+	}
+	if len(it.RecentSkipNotes) > 0 {
+		parts = append(parts, "skipped: "+strings.Join(it.RecentSkipNotes, "; "))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "nothing settled in this window")
+	}
+	return strings.Join(parts, " · ")
+}
+
 // Others names the chains outside the rate, so a skip or an unanswered
 // check-in is visible without being counted as either outcome.
 func (t Totals) Others() string {

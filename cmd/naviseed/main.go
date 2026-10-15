@@ -100,6 +100,14 @@ func run() error {
 		return reportProactive(ctx, st, pt, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log)
 	}
 
+	if os.Getenv("NAVISEED_ONLY") == "digest" {
+		dt, err := defaults.Load(cfg.Files.DefaultsPath())
+		if err != nil {
+			return err
+		}
+		return reportDigest(ctx, st, dt, cfg.Files.ModelRoutingPath(), cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log)
+	}
+
 	item, err := seedItem(ctx, st, cfg.Schedule.DefaultTZ.String())
 	if err != nil {
 		return err
@@ -280,6 +288,13 @@ func run() error {
 	// read the newest of, and after the copywriter, whose items it must not
 	// inherit (the loop is scoped to its own fixtures).
 	if err := reportProactive(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log); err != nil {
+		return err
+	}
+
+	// The weekly digest, after the proactive loop for the same reasons (a real
+	// Ladder, conversations rows) and because its reply check reads the newest
+	// history; it clears its own kv slots on the way out.
+	if err := reportDigest(ctx, st, table, cfg.Files.ModelRoutingPath(), cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
 		return err
 	}
 

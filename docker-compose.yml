@@ -25,6 +25,9 @@ services:
       # this zone and a wrong guess is invisible until a DST boundary.
       DEFAULT_TZ: ${DEFAULT_TZ:?DEFAULT_TZ must be set, e.g. America/Toronto}
       CONFIG_DIR: /config
+      # Empty means no weekly digest at all: config.Load treats a blank value as
+      # unset, so this line is a pass-through and not a default.
+      DIGEST_AT: ${DIGEST_AT:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Which adapter delivers reminders. Named explicitly rather than left to
       # the code's default, because that default is "logging" — a container that

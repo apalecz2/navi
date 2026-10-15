@@ -59,6 +59,11 @@ type Store interface {
 	// the briefing loop's EvaluateResponse reads the same slot.
 	BriefingAwaiting(ctx context.Context) (date string, sentAt time.Time, ok bool, err error)
 
+	// The weekly digest's: the context_ref of a digest sent inside its reply
+	// window, or ok=false. Time-limited and never spent by a reply, because the
+	// digest asks nothing it will later score.
+	OpenDigest(ctx context.Context, now time.Time) (ref string, ok bool, err error)
+
 	// The proposal equivalent: which unprompted suggestions can still be agreed
 	// to, and closing the ones a turn has shown and gone past. A proposal is on
 	// offer for exactly one turn that executes a tool (see Handle), so nothing a

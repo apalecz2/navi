@@ -46,6 +46,7 @@ const behaviouralRules = `Rules:
 - Record a skip, not a miss, whenever the user says why something did not happen, and put their own words in the note: "did everything except the walk, I was away" is a completed set plus one skipped walk with note "I was away". Never choose missed. A miss is not something a person reports - it is what the system concludes when nobody said anything at all.
 - A "Context ref" block below means the last thing you sent was an end-of-day check-in and those occurrences are still waiting on an answer. The user's message may be that answer. If it reports what was or was not done, call bulk_resolve for exactly the occurrences it names and say nothing about the ones it left out - an item the user did not mention is not a skip, and it is not your job to ask again. If the message is a new request instead, treat it as one: a check-in does not oblige the user to answer it before saying anything else. Ids for these may come from the Context ref block or from Today's occurrences; after midnight only the Context ref block still lists them.
 - A "Context ref: briefing:" line means the last thing you sent was this morning's briefing, which asked what today should include. The user's message may be adding to today, or may be an unrelated new request - treat it on its face and act on it with the right tool. A briefing obliges no answer, so do not prompt for one.
+- A "Context ref: digest:" line means the last thing you sent was the weekly digest: the week's figures and an observation. The user's message may react to it, such as "drop the walk, then" or "make that less often". Treat it as an ordinary request, resolve the item from Active items, and make the change with the ordinary tools. The digest itself proposed nothing and applied nothing, so a vague reaction ("interesting", "ok") changes nothing: call list_items.
 - A "Context ref: proposal:" block means the last message you sent was a suggestion to change one item, and it lists the exact tool call that would make the change. It is only a suggestion: nothing has changed yet. Make that call - once, with exactly those arguments - only when the user's message plainly agrees to it ("yes", "do it", "go ahead", "sounds good"). If the message declines, merely acknowledges ("ok", "thanks"), asks a question, or is about something else, do not apply it: treat the message on its face, and if there is nothing to do, call list_items, which changes nothing. If the user asks for a different change instead, make that one with the ordinary tools. A proposal is on offer for one reply. Never apply one on your own initiative.
 - To suggest a change nobody asked for, or when the user asks what you would suggest, call propose_change, never update_item. It writes nothing and the user's next message decides.
 - Prefer pause over a run of skips when the user says they are away or unavailable for a stretch of time. "I'm away until Monday" is one pause with scope=global, not a skip for every occurrence in between. Use scope=item when only one reminder is affected. Pausing with no until resumes normal operation.
@@ -103,6 +104,7 @@ func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	b.WriteString(l.renderLastTouched(ctx))
 	b.WriteString(l.renderContextRef(ctx, loc))
 	b.WriteString(l.renderBriefingContextRef(ctx))
+	b.WriteString(l.renderDigestContextRef(ctx))
 	b.WriteString(l.renderProposals(ctx))
 
 	return b.String()
@@ -137,6 +139,21 @@ func proposalCall(p domain.Proposal) string {
 		return fmt.Sprintf(`delete_item {"item_id":%q,"confirmed":true}`, p.ItemID)
 	}
 	return fmt.Sprintf(`update_item {"item_id":%q,"changes":%s}`, p.ItemID, p.Changes)
+}
+
+// renderDigestContextRef is the context block's digest line: present for a day
+// after Sunday's digest went out, absent otherwise (an empty one would tell the
+// model it is answering a question nobody asked). The digest is already in
+// cross-turn history in the shape every outbound message is, so this line is all
+// recognition needs. It lists nothing: the figures are in the digest text the
+// model can see above the user's message, and a change the user asks for is made
+// with the ordinary tools against Active items.
+func (l *Ladder) renderDigestContextRef(ctx context.Context) string {
+	ref, ok, err := l.store.OpenDigest(ctx, time.Now())
+	if err != nil || !ok {
+		return ""
+	}
+	return fmt.Sprintf("Context ref:  %s\n", ref)
 }
 
 // renderBriefingContextRef is the context block's briefing line: present only

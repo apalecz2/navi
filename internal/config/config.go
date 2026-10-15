@@ -138,6 +138,14 @@ type Schedule struct {
 	// their day summarised is a preference and not a design fact from the loop
 	// table.
 	BriefingAt string
+
+	// DigestAt is the Sunday-evening weekly digest time as a zero-padded local
+	// HH:MM, resolved against the device timezone. Unlike the two above it has
+	// no default and empty is a value: unset means there is no digest, and main
+	// registers no loop and no series for it (Q-9 calls it the easiest piece of
+	// P5 to remove, so removing it is one deleted line of .env). The weekday is
+	// not configurable; it is Sunday, a design fact from the proactive table.
+	DigestAt string
 }
 
 // LocalTimeLayout is how a wall-clock time of day is spelled in this
@@ -280,6 +288,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// DIGEST_AT is validated like the other two but is the one with no default:
+	// absent or blank disables the digest, anything else must be a real HH:MM.
+	if v, ok := lookup("DIGEST_AT"); ok && v != "" {
+		if cfg.Schedule.DigestAt, err = envLocalTime("DIGEST_AT", ""); err != nil {
+			return Config{}, err
+		}
+	}
+
 	// Required now: the scheduler resolves an adapter from this in the same
 	// commit that reads it.
 	if cfg.Transport.Notify, err = envRequiredString("NOTIFY_TRANSPORT", LoggingTransport); err != nil {
@@ -370,6 +386,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("default_tz", c.Schedule.DefaultTZ.String()),
 		slog.String("reconcile_at", c.Schedule.ReconcileAt),
 		slog.String("briefing_at", c.Schedule.BriefingAt),
+		slog.String("digest_at", c.Schedule.DigestAt), // "" = no digest
 
 		// Which adapter is delivering reminders is the one setting whose wrong
 		// value looks exactly like a working system, so it goes in the line that

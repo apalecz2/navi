@@ -234,6 +234,11 @@ A Sunday evening summary with statistics and an observation is in the proactive
 trigger table. Whether it gets read, or muted along with everything else, is
 unknown. It is the easiest thing in P5 to remove.
 
+Built in session 27 as an optional loop: leave `DIGEST_AT` unset and it does not
+exist, with no loop, series or model call. What to watch is whether Sunday's
+message is answered; `navi_digest_sent_total` against the conversations that
+follow it is the only evidence there will be. If it is muted, unset the variable.
+
 ---
 
 ## Needs an answer after P4 has run for a month

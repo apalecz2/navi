@@ -28,6 +28,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/briefing"
+	"github.com/aidenpaleczny/navi/internal/digest"
 	"github.com/aidenpaleczny/navi/internal/proactive"
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/conversation"
@@ -307,6 +308,21 @@ func run() error {
 	}
 	if chatIntake != nil {
 		loops = append(loops, chatIntake.Loop())
+	}
+
+	// The weekly digest exists only when DIGEST_AT is set. Unset, nothing below
+	// runs: no loop in /healthz, no series on /metrics, no model call (Q-9 - it
+	// is the easiest piece of P5 to remove, so removing it is one line of .env).
+	// Its composer is the same nil-able shape on the same shared model stack, and
+	// it reads the same statsSvc the page and get_stats hold.
+	if cfg.Schedule.DigestAt != "" {
+		var digestComposer digest.Composer
+		if modelClient != nil {
+			digestComposer = digest.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
+		}
+		m.RegisterDigest()
+		loops = append(loops, digest.New(log.With("loop", digest.Name), st, statsSvc, notifier, m,
+			digestComposer, cfg.Schedule.DigestAt, cfg.Schedule.DefaultTZ).Loop())
 	}
 	sup.Register(loops...)
 	sup.Start(loopCtx)

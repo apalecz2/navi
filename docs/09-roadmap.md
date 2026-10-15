@@ -402,7 +402,7 @@ full design.
 - Anti-repetition via recent messages *(session 25)*
 - Proactive triggers: consecutive misses, repeated snoozes, dormancy *(session 26)*
 - `propose_change` tool *(session 26)*
-- Weekly digest
+- Weekly digest *(session 27, optional: `DIGEST_AT`)*
 - Daily cap on unprompted messages *(session 26)*
 
 **Exit criteria**
@@ -419,6 +419,13 @@ full design.
       *(a 401 provider, a 500 provider and no model at all, in `reportCopywriter`)*
 - [x] Editing `persona.md` changes the voice without a rebuild
       *(next generation, no restart; `reportCopywriter` edits the file mid-run)*
+
+**Built in session 27** (`internal/digest`; naviseed's `reportDigest`, which
+`NAVISEED_ONLY=digest` runs alone in seconds): the weekly digest as its own optional loop,
+composed ahead, template-first, with every number in the model's observation checked against
+the figures it was given. See 06-agent-spec.md, "Built in session 27". Q-9 stays open: whether
+it gets read is a month of Sundays away. P5's code is done; only the fourteen-day box needs
+the real host.
 
 **Deliberately last.** The copywriter needs completion history to have anything to
 say. Running it against an empty dataset produces generic filler, and the

@@ -108,9 +108,14 @@ tasks:
         timeout_seconds: 130
 
   # Weekly, and it actually reasons over statistics, so cost is negligible at
-  # that frequency and both tiers get more time than the others.
+  # that frequency and both tiers get more time than the others. Thinking is on
+  # (docs/06-agent-spec.md routing table): the model writes one observation, and
+  # picking the one worth making is the reasoning. What it writes is checked in
+  # code - every number in it must be one of the figures it was given - so a
+  # tier that reasons its way to a rounded figure costs a template, not a
+  # wrong digest. Only exists as a call when DIGEST_AT is set.
   digest:
-    thinking: false
+    thinking: true
     tiers:
       - model: "gemini-3.6-flash"
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"

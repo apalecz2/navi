@@ -26,23 +26,15 @@ type Stats interface {
 }
 
 // The empty-state thresholds. A chart under them is replaced by a sentence that
-// says what it is waiting for and how far along it is; a week of history drawn
-// as a three-point line or a nearly blank grid reads as broken rather than
-// sparse. These are presentation policy, not statistics, so they live here and
-// not in internal/stats; they compare counts the service returned and compute
-// nothing. Each is evaluated once, server-side, in NewStatsPage.
+// says what it is waiting for and how far along it is. The values are
+// internal/stats' since the weekly digest began reading MinSettled too; they are
+// re-exported so this page keeps one spelling. Each is evaluated once,
+// server-side, in NewStatsPage, against counts the service returned.
 const (
-	// MinSettled is how many settled chains (completed or missed) the window needs
-	// before a completion-rate line is drawn. Below it one chain moves the rate by
-	// ten points or more.
-	MinSettled = 10
-	// MinRateBuckets is how many buckets must have a rate (null buckets are gaps)
-	// for the line to be a line.
-	MinRateBuckets = 3
-	// MinCompletions is how many completions the time-of-day grid needs.
-	MinCompletions = 10
-	// MinGoalPoints is how many points a goal's trail needs.
-	MinGoalPoints = 2
+	MinSettled     = stats.MinSettled
+	MinRateBuckets = stats.MinRateBuckets
+	MinCompletions = stats.MinCompletions
+	MinGoalPoints  = stats.MinGoalPoints
 )
 
 // StatsPage is everything /app/stats renders.
@@ -149,18 +141,10 @@ func NewStatsPage(ctx context.Context, svc Stats, q stats.Query) (StatsPage, err
 	}
 
 	p.Rated = "-"
-	switch {
-	case sum.CompletionRate != nil:
+	if sum.CompletionRate != nil {
 		p.Rated = stats.Percent(*sum.CompletionRate)
-		p.RatedSub = fmt.Sprintf("%d of %d completed", sum.Totals.Completed, sum.Totals.Settled)
-		if rest := sum.Totals.Others(); rest != "" {
-			p.RatedSub += "; " + rest
-		}
-	case sum.Totals.Chains == 0:
-		p.RatedSub = "nothing was scheduled"
-	default:
-		p.RatedSub = "nothing has settled yet (" + sum.Totals.Unsettled() + ")"
 	}
+	p.RatedSub = sum.RateDetail()
 	p.Lag, p.LagSub = "-", "no completed reminder was sent first"
 	if sum.MedianLagMinutes != nil {
 		p.Lag = stats.MinutesPhrase(*sum.MedianLagMinutes)
@@ -172,20 +156,7 @@ func NewStatsPage(ctx context.Context, svc Stats, q stats.Query) (StatsPage, err
 
 	for _, it := range sum.Items {
 		row := ItemRow{ItemStats: it, Streak: stats.StreakPhrase(it.CurrentStreak, it.LongestStreak)}
-		var parts []string
-		if it.CompletionRate != nil {
-			parts = append(parts, stats.Percent(*it.CompletionRate)+" done")
-		}
-		if it.MedianLagMinutes != nil {
-			parts = append(parts, "median "+stats.MinutesPhrase(*it.MedianLagMinutes))
-		}
-		if len(it.RecentSkipNotes) > 0 {
-			parts = append(parts, "skipped: "+strings.Join(it.RecentSkipNotes, "; "))
-		}
-		if len(parts) == 0 {
-			parts = append(parts, "nothing settled in this window")
-		}
-		row.Meta = strings.Join(parts, " · ")
+		row.Meta = it.Meta()
 		row.Href = statsHref("/app/stats", q.Range, it.ItemID)
 		p.Items = append(p.Items, row)
 	}

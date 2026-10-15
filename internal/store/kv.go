@@ -72,6 +72,18 @@ const (
 	// there is - deleting it ends the evaluation, so there is no separate
 	// "evaluated" flag.
 	KeyBriefingAwaiting = "briefing_awaiting_response"
+
+	// KeyDigestPending holds the weekly digest composed ahead of send time,
+	// "{date}\n{text}" like KeyBriefingPending. Absent means nothing is staged,
+	// and the send phase renders the template with no model call.
+	KeyDigestPending = "digest_pending"
+
+	// KeyLastDigest is the digest's send latch and its reply window in one slot:
+	// "{date}\t{sent_at}". sent_at is empty when the week was too thin to send
+	// anything (the date is still latched, so the pass does not repeat all
+	// evening), and a reply is recognised while now is inside DigestReplyWindow
+	// of a non-empty sent_at. Never deleted, only overwritten.
+	KeyLastDigest = "last_digest"
 )
 
 // getKV returns a raw value and whether it was present. Absence is not an

@@ -51,6 +51,14 @@ type Metrics struct {
 	proposalsCapped   prometheus.Counter
 	proposalsAccepted *prometheus.CounterVec
 
+	// The digest's three are built here but registered only by RegisterDigest,
+	// which main calls when DIGEST_AT is set. A deployment with no digest
+	// exports no digest series at all: a zero there would say "ran and found
+	// nothing" about a feature that does not exist.
+	digestsSent     *prometheus.CounterVec
+	digestFallbacks prometheus.Counter
+	digestRejected  prometheus.Counter
+
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
 
@@ -166,6 +174,18 @@ func New() *Metrics {
 			Name: "navi_proposals_accepted_total",
 			Help: "Proposals followed by an update_item or delete_item on their item while open, by trigger kind or agent. A write followed; it need not be the written alternative.",
 		}, []string{"trigger"}),
+		digestsSent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_digest_sent_total",
+			Help: "Weekly digests delivered, by form: full (rate and an observation slot) or short (a thin week, counts only).",
+		}, []string{"form"}),
+		digestFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_digest_fallback_total",
+			Help: "Full digests sent as the plain template because no usable observation was produced: no model, a failed call, an unusable completion, a number check failure, or a missed compose window.",
+		}),
+		digestRejected: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_digest_number_rejected_total",
+			Help: "Digest observations refused because they contained a number that was not in the figures passed to the model (V6 applied to prose). Each is also a fallback.",
+		}),
 		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "navi_inbound_messages_accepted_total",
 			Help: "Inbound messages recorded to conversations, by transport.",
@@ -340,6 +360,26 @@ func (m *Metrics) IncBriefingFallback() { m.briefingFallbacks.Inc() }
 // signal "the briefing went unanswered" produces, read later by the day's tone
 // strategy.
 func (m *Metrics) IncBriefingUnanswered() { m.briefingsUnanswered.Inc() }
+
+// RegisterDigest exports the digest's series, each at zero. Called from main
+// only when the digest is enabled; until then the counters exist and are
+// unexported, so the loop's Inc calls are harmless and the series are absent.
+func (m *Metrics) RegisterDigest() {
+	m.registry.MustRegister(m.digestsSent, m.digestFallbacks, m.digestRejected)
+	for _, form := range []string{"full", "short"} {
+		m.digestsSent.WithLabelValues(form)
+	}
+}
+
+// IncDigestSent counts one digest delivered, after the send returns, by form.
+func (m *Metrics) IncDigestSent(form string) { m.digestsSent.WithLabelValues(form).Inc() }
+
+// IncDigestFallback counts one full digest that went out without an observation
+// from the model.
+func (m *Metrics) IncDigestFallback() { m.digestFallbacks.Inc() }
+
+// IncDigestRejected counts one observation refused by the number check.
+func (m *Metrics) IncDigestRejected() { m.digestRejected.Inc() }
 
 // IncTrigger counts one proactive episode first detected. It is counted when the
 // latch is created and not when the message goes out, so a trigger the cap holds

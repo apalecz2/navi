@@ -690,3 +690,94 @@ the decisions it makes.
   declined or acknowledged and there is nothing to do, because every reply must be
   a tool call and there is no no-op tool. "No thanks" therefore answers with the
   item list. A harmless acknowledgement tool is the follow-up.
+
+### Built in session 27 (`internal/digest`)
+
+The Sunday row of the table above: one message, the week's figures and one
+observation about them. Optional, and removable by deleting one line of `.env`.
+
+- **Its own loop, and only when `DIGEST_AT` is set.** `internal/digest`, the
+  eighth loop when enabled and no loop when not: `main` builds it, registers its
+  series (`Metrics.RegisterDigest`) and adds it to the supervisor inside one
+  `if cfg.Schedule.DigestAt != ""`. Unset, `/healthz` lists seven loops,
+  `/metrics` has no `navi_digest_*`, the model is never called. It has the
+  briefing's gate (compose ahead, send, latch in `kv`) and little else in common:
+  daily against weekly, the day's occurrences against `internal/stats`, a reply the
+  briefing scores and the digest has nothing to score. Folding it into the briefing
+  would have given that mandatory loop a stats dependency, a Sunday branch in every
+  phase and a metric set that exists whether or not the digest does, which is
+  exactly what cannot be switched off cleanly. `DIGEST_AT` is a zero-padded local
+  `HH:MM` checked at boot like the other two, with no default; the weekday is
+  Sunday, a design fact, and the clock is the person's zone (`Zones.Local()`).
+- **Composed ahead, never at send.** Thirty minutes before `DIGEST_AT` on a
+  Sunday the loop reads the week, words it, asks the model, checks the answer and
+  stages `{form}\n{text}` in `kv.digest_pending`. The send phase sends the staged
+  text; if the compose window was missed (a restart across it, a first boot after
+  `DIGEST_AT` that Sunday) it renders the template with no model call. A Monday
+  boot sends nothing: the date is Sunday's or it is not sent. `kv.last_digest`
+  (`{date}\t{sent_at}`) is the latch and the reply window in one slot.
+- **Every figure is `internal/stats`'.** One `Summary` for `range=week`, through
+  the same `stats.Service` the page and `get_stats` call, worded by the phrase
+  helpers. Two of those lived in the page's template code (the line under the
+  headline rate, and an item's line of figures) and moved to
+  `stats.Summary.RateDetail` and `stats.ItemStats.Meta` so the page and the digest
+  say them with one function. The figures text (`digest.Figures.Facts`) is the one
+  value the template sends, the model is shown, and the number check compares
+  against. "Trailing week" is the stats window: seven local days ending now, taken
+  when the digest is composed. A `get_stats` asked later on Sunday night sees
+  chains that settled after that, so the two agree for the same moment, not for
+  the same week forever.
+- **Only the observation is the model's.** The message is the figures, then the
+  observation if there is one, then "Anything you want to change for next week?".
+  The template is the same message without the observation. The model gets the
+  figures and hard rules held in code after the persona (G8 survives an edited
+  persona): two or three sentences, one thing worth saying, no guilt, no advice,
+  no question, only numbers from the figures. Task `digest`, thinking on (the
+  committed `config/model.yaml` said off until this session; the routing table
+  said on), two tiers with 145 and 160 second timeouts and a four minute budget
+  for the walk, which is why its compose phase has half an hour.
+- **The number check (`digest.CheckNumbers`).** A completion is accepted only if
+  every quantity in it is a quantity in the figures. *Found* as digits (`5`,
+  `83%`, `2.0`, `1,200`; `83 percent` and `83 per cent` are the same as `83%`; a
+  time is its digit groups; `3rd` is 3) and as words (`five`, `twenty-one`,
+  `twenty one`, `two hundred`, `twice`, `thrice`, `double(d)`, `triple(d)`,
+  `dozen`, and `half` as 50%). `one` is a number only before a count noun (days,
+  weeks, misses, ...) or in "one in a row", because "no one" and "one thing" are
+  not claims. *Matched* by value, not spelling: `5` is `five`, `2` is `2.0`. Not
+  by closeness: `83%` against `83.3%` or `about 80%` is a different figure, and a
+  rounded figure is the thing being kept out. A percentage must match a
+  percentage; a bare number may match any quantity with that value. A failure
+  logs the offending numbers, falls back to the template, increments
+  `navi_digest_number_rejected_total` and `navi_digest_fallback_total`, and is
+  not retried on the second tier. What it does not check is attribution: a `9`
+  that is in the figures as someone else's streak passes. The prompt forbids
+  computing anything, and a computed number is almost always one the figures do
+  not contain, which is what the check does catch.
+- **A thin week is stated, or skipped.** `stats.MinSettled` (10 settled chains,
+  the statistics page's threshold for drawing a completion-rate line, moved from
+  `internal/web` to `internal/stats` and re-exported there) decides the form. Ten
+  or more: the full digest. One chain up to nine settled: the short form, which is
+  the counts in the page's words with no percentage, a sentence saying it is too
+  little to call a pattern, and no model call. No chains in the window at all (a
+  new install, everything paused): nothing is sent, the date is latched so it is
+  not retried all evening, and no conversations row claims anything was said. The
+  page's other thresholds (rate buckets, completions for the grid, goal points)
+  are about charts and are not reused.
+- **Not against the daily cap, and not inside the window.** Session 26's rule for
+  scheduled messages: the person chose `DIGEST_AT`, so it is not unprompted (A13
+  caps unprompted messages), and counting it would take a third of a busy
+  Sunday's budget for something they asked for. The digest reads and writes no
+  `kv.proactive_count`, and the 09:00 to 20:00 window does not hold it; an
+  operator who sets `DIGEST_AT=22:00` has said what they want. The cost is that a
+  Sunday can carry the briefing, the check-in, the digest and three proposals.
+- **A reply is recognised the way the others are.** The digest is an ordinary
+  outbound `conversations` row with `context_ref = digest:{date}`, so it is in
+  cross-turn history, and the context block carries `Context ref:  digest:{date}`
+  for 24 hours after the send (`store.OpenDigest`). A reply does not spend it,
+  because there is nothing the digest asked that it will later score. The rule in
+  `behaviouralRules` says to treat "drop the walk, then" as an ordinary request
+  against Active items and a vague reaction as `list_items`. The digest proposes
+  and applies nothing.
+- **Metrics, only when enabled:** `navi_digest_sent_total{form}` (`full`,
+  `short`), `navi_digest_fallback_total` (a full digest that went without an
+  observation, for any reason) and `navi_digest_number_rejected_total`.

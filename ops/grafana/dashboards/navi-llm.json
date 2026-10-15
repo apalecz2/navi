@@ -102,6 +102,62 @@
           "instant": true
         }
       ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Copywriter generations by pass and outcome",
+      "description": "Generation attempts that ran to an outcome, per hour. generated is text stored ahead of the reminder; failed is the model erroring or its text being refused (empty, over 120 characters, a repeat of a recent message); late is text that arrived after the scheduler had already claimed the row and was discarded by the guarded write. Pass 2 only runs when the context changed since pass 1, so it should sit well under pass 1. Items below the history threshold (G9) make no attempt and are not here - they are plain titles by design.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum by (pass, outcome) (increase(navi_copywriter_generations_total[1h]))",
+          "legendFormat": "pass {{pass}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Plain titles after a failed generation (6h)",
+      "description": "Reminders that went out as the bare title because the copywriter had tried and failed (navi_copywriter_fallback_total). Zero is the healthy value; a rising number is the model provider failing while reminders still arrive. Items below G9's history threshold and deployments with no model are plain by design and are not counted - the fire-path dashboard has the share of all deliveries.",
+      "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
+          "expr": "sum(increase(navi_copywriter_fallback_total[6h]))"
+        }
+      ]
     }
   ]
 }

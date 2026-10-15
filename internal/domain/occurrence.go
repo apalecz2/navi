@@ -77,6 +77,11 @@ type Occurrence struct {
 	GenerationAttempts int
 	GenerationPass     int
 
+	// MessageBasis fingerprints the context MessageText was generated from, so
+	// the copywriter's second pass can tell whether anything it would write from
+	// has changed since the first. Nil when there is no generated text.
+	MessageBasis *string
+
 	CreatedAt time.Time
 }
 

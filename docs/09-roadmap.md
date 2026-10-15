@@ -395,11 +395,11 @@ full design.
 
 **Goal.** The reminders read like something, and the agent notices things.
 
-- Copywriter loop, two-pass timing
-- Context blob assembly from the `chains` view
-- `persona.md` mounted and hot-readable
-- Tone ladder branching
-- Anti-repetition via recent messages
+- Copywriter loop, two-pass timing *(session 25)*
+- Context blob assembly from the `chains` view *(session 25, via `internal/stats`)*
+- `persona.md` mounted and hot-readable *(session 25)*
+- Tone ladder branching *(session 25)*
+- Anti-repetition via recent messages *(session 25)*
 - Proactive triggers: consecutive misses, repeated snoozes, dormancy
 - `propose_change` tool
 - Weekly digest
@@ -409,9 +409,14 @@ full design.
 
 - [ ] Fourteen consecutive days of the same reminder produce fourteen distinct
       messages
+      *Wall-clock; needs a real model on the real host. The plumbing (recent
+      messages in the prompt, a verbatim repeat refused) is checked in
+      `reportCopywriter`; the box stays open.*
 - [ ] A five-miss streak produces a proposal, not another nudge
-- [ ] Deleting the model API key still delivers every reminder, as plain titles
-- [ ] Editing `persona.md` changes the voice without a rebuild
+- [x] Deleting the model API key still delivers every reminder, as plain titles
+      *(a 401 provider, a 500 provider and no model at all, in `reportCopywriter`)*
+- [x] Editing `persona.md` changes the voice without a rebuild
+      *(next generation, no restart; `reportCopywriter` edits the file mid-run)*
 
 **Deliberately last.** The copywriter needs completion history to have anything to
 say. Running it against an empty dataset produces generic filler, and the

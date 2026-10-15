@@ -170,6 +170,22 @@ func run() error {
 	if modelClient != nil {
 		briefingComposer = briefing.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
 	}
+
+	// The copywriter's generator, the same nil-able shape and the same shared
+	// stack. Nil means every reminder fires as its title, which is the right
+	// answer for a deployment with no model and is the state "delete the API key"
+	// degrades to. The persona path is the same one the ladder and both composers
+	// were handed: all four call defaults.GetPersona, so they read the same file
+	// on every call and an edit reaches all of them without a restart.
+	var copyGenerator copywriter.Generator
+	if modelClient != nil {
+		copyGenerator = copywriter.NewModelGenerator(modelClient, routing, cfg.Files.PersonaPath())
+	}
+
+	// One statistics service for the API routes, the stats view and the
+	// copywriter's context blob, so a streak in a reminder and a streak on the
+	// page are one computation (V6).
+	statsSvc := stats.New(st, cfg.Schedule.DefaultTZ)
 	if chatWebhook != nil {
 		// Zero-value on start (RegisterLoop's argument): a webhook that has
 		// never seen a message should read as "no data yet" and not be
@@ -251,7 +267,8 @@ func run() error {
 	loops := []supervisor.Loop{
 		mat.Loop(),
 		sched.Loop(),
-		copywriter.New(log.With("loop", copywriter.Name)).Loop(),
+		copywriter.New(log.With("loop", copywriter.Name), st, statsSvc, copyGenerator, m,
+			cfg.Schedule.DefaultTZ).Loop(),
 
 		// The reconciler sends through the same notifier the scheduler does. A
 		// check-in and a reminder go to the same person by the same route, and
@@ -281,10 +298,6 @@ func run() error {
 	// the pause routes re-plan the items whose occurrences a new window
 	// suppresses, and a second materializer would mean two random generators
 	// drawing for the same items.
-	// One statistics service for the API routes and the stats view, so a page
-	// and its endpoint read the same value.
-	statsSvc := stats.New(st, cfg.Schedule.DefaultTZ)
-
 	// The calendar path token is the first secret this deployment owns (D10):
 	// generated into the data directory on first run, never given a default and
 	// never logged. Rotating it is deleting the file and restarting; the old URL

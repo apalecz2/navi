@@ -320,6 +320,11 @@ type Due struct {
 	MessageText *string
 	Title       string
 
+	// GenerationAttempts is how many times the copywriter tried and has not yet
+	// succeeded for this row. Nonzero with no MessageText is the one case that
+	// is a real fallback rather than a plain title by design (G9, no model).
+	GenerationAttempts int
+
 	Kind     domain.Kind
 	Priority int
 }
@@ -395,8 +400,11 @@ func (s *Store) ClaimDue(ctx context.Context, upper, floor time.Time, limit int)
 				StartsAt:    startsAt,
 				MessageText: row.MessageText,
 				Title:       row.Title,
-				Kind:        kind,
-				Priority:    int(row.Priority),
+
+				GenerationAttempts: int(row.GenerationAttempts),
+
+				Kind:     kind,
+				Priority: int(row.Priority),
 			})
 		}
 		return nil

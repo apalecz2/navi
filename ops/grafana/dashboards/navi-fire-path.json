@@ -86,7 +86,7 @@
       "id": 3,
       "type": "stat",
       "title": "Plain-title rate",
-      "description": "Share of notifications that went out as the bare item title because no generated text existed (N3). At P0 this reads 1: no copywriter has ever run, so the fallback is the only path there is. Once the copywriter lands, a rising line here is the model provider failing — and the reminders still arrive, which is the whole point of generating text in advance.",
+      "description": "Share of notifications that went out as the bare item title after the copywriter had tried and failed to generate text (N3, G4). Items below the history threshold (G9) and deployments with no model send the title by design and are not counted, so this reads 0 on a fresh install. A rising line is the model provider failing — and the reminders still arrive, which is the whole point of generating text in advance.",
       "datasource": { "type": "prometheus", "uid": "navi-prometheus" },
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
       "fieldConfig": {

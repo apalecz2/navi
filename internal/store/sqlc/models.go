@@ -104,4 +104,5 @@ type Occurrence struct {
 	GenerationAttempts int64
 	GenerationPass     int64
 	CreatedAt          string
+	MessageBasis       *string
 }

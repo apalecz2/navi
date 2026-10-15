@@ -51,7 +51,7 @@ WHERE id = ?
 RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
     snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
     resolution_source, message_text, message_model, message_generated_at,
-    generation_attempts, generation_pass, created_at;
+    generation_attempts, generation_pass, created_at, message_basis;
 
 -- name: CountPendingOverdue :one
 SELECT count(*) FROM occurrences o
@@ -66,7 +66,7 @@ WHERE o.status = 'pending'
   AND ifnull(i.paused_until, '0000-01-01T00:00:00Z') <= ?;
 
 -- name: ListDueOccurrences :many
-SELECT o.id, o.item_id, o.starts_at, o.message_text,
+SELECT o.id, o.item_id, o.starts_at, o.message_text, o.generation_attempts,
        i.title, i.kind, i.priority
 FROM occurrences o
 JOIN items i ON i.id = o.item_id
@@ -129,7 +129,7 @@ WHERE id = ?
 SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
     snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
     resolution_source, message_text, message_model, message_generated_at,
-    generation_attempts, generation_pass, created_at
+    generation_attempts, generation_pass, created_at, message_basis
 FROM occurrences
 WHERE parent_occurrence_id = ?;
 

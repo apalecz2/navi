@@ -89,6 +89,9 @@ func run() error {
 	if os.Getenv("NAVISEED_ONLY") == "ics" {
 		return reportICS(ctx, st, cfg.Schedule.DefaultTZ, log)
 	}
+	if os.Getenv("NAVISEED_ONLY") == "copywriter" {
+		return reportCopywriter(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log)
+	}
 
 	item, err := seedItem(ctx, st, cfg.Schedule.DefaultTZ.String())
 	if err != nil {
@@ -237,6 +240,13 @@ func run() error {
 	// The statistics: after every section that writes occurrences, because it
 	// builds its own chains and reads the whole database. Last of the P4 numbers.
 	if err := reportStats(ctx, st, table, cfg.Data.DBPath(), cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// The copywriter: after the statistics, whose chains it reads, and after every
+	// section that leaves pending rows behind, so its own scheduler pass finds
+	// only what it put there.
+	if err := reportCopywriter(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log); err != nil {
 		return err
 	}
 

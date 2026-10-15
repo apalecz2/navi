@@ -454,6 +454,70 @@ Contents:
 The last one is not decoration. A model told to "be tough on me" overshoots, and
 punitive copy at 07:00 is unpleasant in a way that gets the whole feature muted.
 
+### Built in session 25 (`internal/copywriter`)
+
+Eight notes from the implementation, each a place the spec left a choice open.
+
+- **Nothing here is in the firing path.** The scheduler is unchanged: it reads
+  `message_text` or the title. Every copywriter write is
+  `store.WriteGeneratedMessage`, whose statement carries `AND status =
+  'pending'` and `AND generation_pass = <previous pass>`, so a generation that
+  finishes after the scheduler's claim is a zero-row update. It is counted as
+  `late` and the text is discarded; nothing is rewritten.
+- **G9 is a gate before any cost.** An item with fewer than ten resolved chains
+  (Q-7) gets no model call, no counted attempt and no `llm_calls` row, and fires
+  as its title. It is re-evaluated every tick, so there is no flag to flip when an
+  item graduates.
+- **Windows are "has started", not slots.** Pass 1 takes any text-less pending
+  `at_time` row starting within 30 minutes (and more than 90 seconds out); pass 2
+  takes a row with safety-net text starting within 4 minutes. A **snooze child**
+  is therefore generated on the next tick after the snooze: its own T-30 passed
+  before it existed, but it is already inside the window, and it gets the
+  snooze-child strategy because it is one. A row with under 90 seconds left is
+  not worth a call and fires as its title.
+- **Pass 2 compares a fingerprint, not a timestamp.** `occurrences.message_basis`
+  (migration 0008) stores a hash of what the text was written from: the tone
+  strategy, title and notes, snooze-child flag, streak numbers, last seven
+  outcomes, miss run, snoozes today, skip notes and scheduled time. Pass 2
+  rebuilds the context and calls the model only when the hash differs. Not in it:
+  `recent_messages`, which a rewrite itself changes, and the clock-derived
+  `days_since_last_completion`. "Pause moved" needs no term: a pause deletes the
+  pending rows in its window, a lifted one re-materializes them with no text, and
+  the candidate read drops a paused item. "Is a snooze child" is in the
+  fingerprint but cannot differ between passes, since pass 1 already knew. The
+  spec's "a sibling *item* was missed" is read as the item's own other
+  occurrences, which is what the context blob can see.
+- **Attempts are per pass.** `generation_attempts` is incremented *before* the
+  call (so a crash mid-call still costs one) and reset to zero by a successful
+  write, so pass 2 has its own two. `llm_calls.occurrence_id` is the record of how
+  many it really took. A pass-1 row that exhausted its attempts stays text-less
+  and fires as its title; pass 2 only refreshes, it does not rescue.
+- **The numbers are `stats`'.** `stats.Service.ItemSignals` computes the blob's
+  figures with the same `streaks`, `Classify` and `medianLag` the stats page uses,
+  so "12 in a row" in a reminder and on the page are one computation. The
+  consecutive-miss run, which the tone ladder needs and the page does not, walks
+  past skipped, awaiting and open chains exactly as the streak does.
+- **The tone ladder is `copywriter.Choose`, in code**, in precedence order:
+  snooze child, dormancy, shrink the ask, protect the streak, light
+  acknowledgement, neutral. Dormancy is five consecutive misses, or fourteen days
+  without a completion *and* at least two misses *and* no recent skip note - the
+  spec's "14 days dormant" would otherwise call a monthly reminder dormant half
+  of every month, or a person on a stated break gone quiet. The miss count is not
+  sent to the model; the strategy is. G8 is a hard rule in the system prompt
+  after `persona.md`, not only a line in it, and a message over 120 characters,
+  empty, or identical to a recent one is refused rather than repaired.
+- **The dormancy question has no recorded context.** The message goes out as an
+  ordinary reminder, with Done / Snooze / Skip, and the reply is an ordinary
+  turn. Nothing yet tells the agent that this particular notification asked
+  "reschedule, shrink or drop?", so a bare "drop it" depends on the item being
+  last touched or named. A `context_ref` for it is the obvious follow-up and
+  belongs with the proactive triggers.
+
+`persona.md` is read by `defaults.GetPersona` on every call - from the agent's
+system prompt, the check-in composer, the briefing composer and now the
+copywriter. There is one function and no cache, so an edit reaches all four on
+their next call.
+
 ## Reconciler composer
 
 Runs at the configured local time. Gathers everything unresolved for the day,

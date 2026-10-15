@@ -121,6 +121,7 @@ func toDomainOccurrence(row sqlc.Occurrence) (domain.Occurrence, error) {
 		MessageGeneratedAt: generatedAt,
 		GenerationAttempts: int(row.GenerationAttempts),
 		GenerationPass:     int(row.GenerationPass),
+		MessageBasis:       row.MessageBasis,
 		CreatedAt:          createdAt,
 	}, nil
 }

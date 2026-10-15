@@ -208,6 +208,16 @@ history far more slowly than a daily one.
 **Leaning:** per-item, roughly 10 resolved occurrences, falling back to the plain
 title before that.
 
+**Settled in session 25, as the leaning.** `copywriter.MinResolvedChains = 10`,
+counted per item in *chains* that reached an outcome (completed, skipped or
+missed; `stats.ItemSignals.Resolved`), so a snoozed-three-times reminder is one
+and a weekly one needs ten weeks. Evaluated by the copywriter on every tick,
+per candidate, against the item's own history - not at materialization, where
+there is none yet, and never in the scheduler. Below it: no model call, no
+attempt counted, no `llm_calls` row, and the row fires as its title. Because the
+count is read live, an item crosses the threshold on the tick after its tenth
+chain resolves and needs nothing else done.
+
 ### Q-8: Whether generated messages should be reviewable
 
 The two-pass copywriter means text exists on the row before it is sent, so the day

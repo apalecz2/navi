@@ -166,9 +166,15 @@ type Result struct {
 	Failed   int
 	Released int
 
-	// Fallbacks counts sends that went out as the plain item title (N3). At P0
-	// no copywriter exists, so this equals Sent.
+	// Fallbacks counts sends that went out as the plain item title (N3), for any
+	// reason: an item below G9's history threshold and a deployment with no model
+	// are plain by design and are in here. It is not the metric; the metric counts
+	// only the subset where generation was tried and failed (see Fire).
 	Fallbacks int
+
+	// FailedGenerations is that subset: plain-title sends whose row the
+	// copywriter had attempted and never succeeded on.
+	FailedGenerations int
 
 	// MaxLatency is the largest scheduled-time-to-sent gap in this pass.
 	MaxLatency time.Duration
@@ -185,6 +191,7 @@ func (r Result) LogValue() slog.Value {
 		slog.Int("failed", r.Failed),
 		slog.Int("released", r.Released),
 		slog.Int("fallbacks", r.Fallbacks),
+		slog.Int("failed_generations", r.FailedGenerations),
 		slog.Duration("max_latency", r.MaxLatency),
 	)
 }
@@ -278,7 +285,15 @@ func (s *Scheduler) Fire(ctx context.Context) (res Result, err error) {
 		res.Sent++
 		if fellBack {
 			res.Fallbacks++
-			s.metrics.IncCopywriterFallback()
+			// Only a row the copywriter tried and failed on is a fallback in the
+			// sense the metric and its dashboard mean: the provider failing while
+			// reminders still arrive. A row it never tried - under G9's threshold,
+			// or a deployment with no model - is the title by design, and counting
+			// it would pin this series high on every fresh install.
+			if d.GenerationAttempts > 0 {
+				res.FailedGenerations++
+				s.metrics.IncCopywriterFallback()
+			}
 		}
 		if latency > res.MaxLatency {
 			res.MaxLatency = latency

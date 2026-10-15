@@ -35,6 +35,7 @@ type Metrics struct {
 	transitions         *prometheus.CounterVec
 	claimsReleased      prometheus.Counter
 	copywriterFallbacks prometheus.Counter
+	copywriterGenerated *prometheus.CounterVec
 
 	checkIns              prometheus.Counter
 	reconciledOccurrences prometheus.Counter
@@ -109,8 +110,12 @@ func New() *Metrics {
 		}),
 		copywriterFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "navi_copywriter_fallback_total",
-			Help: "Notifications sent as the plain item title because no generated text existed.",
+			Help: "Notifications sent as the plain item title after the copywriter tried and failed to generate text (generation_attempts > 0). Items below the history threshold (G9) and deployments with no model are plain by design and are not counted.",
 		}),
+		copywriterGenerated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_copywriter_generations_total",
+			Help: "Copywriter generation attempts that ran to an outcome, by pass (1 safety net, 2 refresh) and outcome (generated, failed, late).",
+		}, []string{"pass", "outcome"}),
 		checkIns: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "navi_reconcile_checkins_total",
 			Help: "Daily check-in messages sent (K4). One per pass, never one per item.",
@@ -160,6 +165,7 @@ func New() *Metrics {
 		m.transitions,
 		m.claimsReleased,
 		m.copywriterFallbacks,
+		m.copywriterGenerated,
 		m.checkIns,
 		m.reconciledOccurrences,
 		m.checkInFallbacks,
@@ -171,6 +177,14 @@ func New() *Metrics {
 		m.llmCalls,
 		m.llmLatency,
 	)
+
+	// Every (pass, outcome) exports a zero before it first happens, on the
+	// RegisterLoop argument: "no data" and "nothing failed" must not look alike.
+	for _, pass := range []string{"1", "2"} {
+		for _, outcome := range []string{"generated", "failed", "late"} {
+			m.copywriterGenerated.WithLabelValues(pass, outcome)
+		}
+	}
 	return m
 }
 
@@ -236,6 +250,16 @@ func (m *Metrics) IncClaimReleased() { m.claimsReleased.Inc() }
 // observe it: it knows what it failed to generate, not what was actually sent,
 // and the number worth having is how often a reminder reached the user plain.
 func (m *Metrics) IncCopywriterFallback() { m.copywriterFallbacks.Inc() }
+
+// IncCopywriterGeneration counts one generation attempt that reached an outcome:
+// "generated" (text written), "failed" (the model errored or its text was
+// unusable) or "late" (text produced, but the row had left pending first, so
+// the guarded write changed nothing). A pass that decided not to call the model
+// - under G9's threshold, nothing changed since pass 1 - is not an attempt and is
+// not counted here.
+func (m *Metrics) IncCopywriterGeneration(pass, outcome string) {
+	m.copywriterGenerated.WithLabelValues(pass, outcome).Inc()
+}
 
 // IncCheckIn counts one daily check-in sent. Counted after the send returns,
 // not when the pass decides to run: a check-in that never reached the user

@@ -106,7 +106,11 @@ CREATE TABLE occurrences (
   generation_attempts   INTEGER NOT NULL DEFAULT 0,
   generation_pass       INTEGER NOT NULL DEFAULT 0, -- 0 none, 1 safety net, 2 refreshed
 
-  created_at            TEXT NOT NULL
+  created_at            TEXT NOT NULL,
+
+  -- added by migration 0008 (ALTER TABLE, so last): fingerprint of the context
+  -- message_text was generated from; the copywriter's pass 2 compares against it
+  message_basis         TEXT
 );
 ```
 

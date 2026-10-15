@@ -13,7 +13,7 @@ const childOccurrence = `-- name: ChildOccurrence :one
 SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
     snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
     resolution_source, message_text, message_model, message_generated_at,
-    generation_attempts, generation_pass, created_at
+    generation_attempts, generation_pass, created_at, message_basis
 FROM occurrences
 WHERE parent_occurrence_id = ?
 `
@@ -53,6 +53,7 @@ func (q *Queries) ChildOccurrence(ctx context.Context, parentOccurrenceID *strin
 		&i.GenerationAttempts,
 		&i.GenerationPass,
 		&i.CreatedAt,
+		&i.MessageBasis,
 	)
 	return i, err
 }
@@ -110,7 +111,7 @@ INSERT INTO occurrences (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
-RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at
+RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at, message_basis
 `
 
 type CreateOccurrenceParams struct {
@@ -160,6 +161,7 @@ func (q *Queries) CreateOccurrence(ctx context.Context, arg CreateOccurrencePara
 		&i.GenerationAttempts,
 		&i.GenerationPass,
 		&i.CreatedAt,
+		&i.MessageBasis,
 	)
 	return i, err
 }
@@ -188,7 +190,7 @@ func (q *Queries) DeleteFuturePendingOccurrence(ctx context.Context, arg DeleteF
 }
 
 const getOccurrence = `-- name: GetOccurrence :one
-SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at, message_basis FROM occurrences
 WHERE id = ?
 `
 
@@ -215,6 +217,7 @@ func (q *Queries) GetOccurrence(ctx context.Context, id string) (Occurrence, err
 		&i.GenerationAttempts,
 		&i.GenerationPass,
 		&i.CreatedAt,
+		&i.MessageBasis,
 	)
 	return i, err
 }
@@ -543,7 +546,7 @@ func (q *Queries) ListCalendarByStatus(ctx context.Context, arg ListCalendarBySt
 }
 
 const listDueOccurrences = `-- name: ListDueOccurrences :many
-SELECT o.id, o.item_id, o.starts_at, o.message_text,
+SELECT o.id, o.item_id, o.starts_at, o.message_text, o.generation_attempts,
        i.title, i.kind, i.priority
 FROM occurrences o
 JOIN items i ON i.id = o.item_id
@@ -567,13 +570,14 @@ type ListDueOccurrencesParams struct {
 }
 
 type ListDueOccurrencesRow struct {
-	ID          string
-	ItemID      string
-	StartsAt    string
-	MessageText *string
-	Title       string
-	Kind        string
-	Priority    int64
+	ID                 string
+	ItemID             string
+	StartsAt           string
+	MessageText        *string
+	GenerationAttempts int64
+	Title              string
+	Kind               string
+	Priority           int64
 }
 
 func (q *Queries) ListDueOccurrences(ctx context.Context, arg ListDueOccurrencesParams) ([]ListDueOccurrencesRow, error) {
@@ -595,6 +599,7 @@ func (q *Queries) ListDueOccurrences(ctx context.Context, arg ListDueOccurrences
 			&i.ItemID,
 			&i.StartsAt,
 			&i.MessageText,
+			&i.GenerationAttempts,
 			&i.Title,
 			&i.Kind,
 			&i.Priority,
@@ -613,7 +618,7 @@ func (q *Queries) ListDueOccurrences(ctx context.Context, arg ListDueOccurrences
 }
 
 const listFutureOccurrencesForItem = `-- name: ListFutureOccurrencesForItem :many
-SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at, message_basis FROM occurrences
 WHERE item_id = ?
   AND starts_at > ?
 ORDER BY starts_at, id
@@ -653,6 +658,7 @@ func (q *Queries) ListFutureOccurrencesForItem(ctx context.Context, arg ListFutu
 			&i.GenerationAttempts,
 			&i.GenerationPass,
 			&i.CreatedAt,
+			&i.MessageBasis,
 		); err != nil {
 			return nil, err
 		}
@@ -668,7 +674,7 @@ func (q *Queries) ListFutureOccurrencesForItem(ctx context.Context, arg ListFutu
 }
 
 const listOccurrencesForItem = `-- name: ListOccurrencesForItem :many
-SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at FROM occurrences
+SELECT id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id, snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note, resolution_source, message_text, message_model, message_generated_at, generation_attempts, generation_pass, created_at, message_basis FROM occurrences
 WHERE item_id = ?
 ORDER BY starts_at, id
 `
@@ -702,6 +708,7 @@ func (q *Queries) ListOccurrencesForItem(ctx context.Context, itemID string) ([]
 			&i.GenerationAttempts,
 			&i.GenerationPass,
 			&i.CreatedAt,
+			&i.MessageBasis,
 		); err != nil {
 			return nil, err
 		}
@@ -913,7 +920,7 @@ WHERE id = ?
 RETURNING id, item_id, starts_at, ends_at, status, is_override, parent_occurrence_id,
     snooze_depth, notified_at, reconciled_at, resolved_at, resolution_note,
     resolution_source, message_text, message_model, message_generated_at,
-    generation_attempts, generation_pass, created_at
+    generation_attempts, generation_pass, created_at, message_basis
 `
 
 type OverrideFuturePendingOccurrenceParams struct {
@@ -960,6 +967,7 @@ func (q *Queries) OverrideFuturePendingOccurrence(ctx context.Context, arg Overr
 		&i.GenerationAttempts,
 		&i.GenerationPass,
 		&i.CreatedAt,
+		&i.MessageBasis,
 	)
 	return i, err
 }

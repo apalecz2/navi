@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/domain"
 	"github.com/aidenpaleczny/navi/internal/model"
+	"github.com/aidenpaleczny/navi/internal/store"
 	"github.com/aidenpaleczny/navi/internal/transport"
 )
 
@@ -39,6 +41,18 @@ func (l *Ladder) Handle(ctx context.Context, in transport.IncomingMessage) error
 	if err != nil {
 		return err
 	}
+
+	// The proposals this turn will be shown, taken before the prompt is built so
+	// the ids passed at the end are a subset of what the model saw: a proposal the
+	// proactive loop adds mid-turn was never offered to this reply and stays open
+	// for the next. A read error shows nothing and passes nothing.
+	var shown []string
+	if open, err := l.store.OpenProposals(ctx, time.Now()); err == nil {
+		for _, p := range open {
+			shown = append(shown, p.ID)
+		}
+	}
+
 	messages := make([]model.Message, 0, len(history)+2)
 	messages = append(messages, model.Message{Role: model.RoleSystem, Content: l.buildSystemPrompt(ctx)})
 	messages = append(messages, history...)
@@ -136,7 +150,17 @@ tierLoop:
 			if perr := l.persistToolRung(ctx, tc, summarizeResult(toolResult)); perr != nil {
 				return perr
 			}
-			return l.finish(ctx, buildConfirmation(tc.Name, toolResult))
+			// A proposal is on offer for one reply that did something. An
+			// update_item or delete_item on its item has already closed it as
+			// accepted (agent.acceptProposals); whatever the model did instead,
+			// the offer is spent, so a "yes" two messages later - to something else
+			// - finds nothing to apply. A turn that ended in an apology or a
+			// rephrase request never reaches here, and leaves the offer open: a
+			// failure to understand is not an answer.
+			if perr := l.store.PassProposals(ctx, shown, time.Now()); perr != nil {
+				return fmt.Errorf("conversation: pass proposals: %w", perr)
+			}
+			return l.finishRef(ctx, buildConfirmation(tc.Name, toolResult), proposalRef(toolResult))
 		}
 	}
 
@@ -152,7 +176,14 @@ tierLoop:
 // which is what makes "one turn produces user, assistant, and tool rows"
 // true regardless of which branch the ladder took.
 func (l *Ladder) finish(ctx context.Context, reply string) error {
-	if err := l.persistAssistantProse(ctx, reply); err != nil {
+	return l.finishRef(ctx, reply, nil)
+}
+
+// finishRef is finish for a reply that asks something the next message answers:
+// the terminal row carries the context_ref, the same field the check-in, the
+// briefing and the proactive proposals carry.
+func (l *Ladder) finishRef(ctx context.Context, reply string, ref *string) error {
+	if err := l.persistAssistantProseRef(ctx, reply, ref); err != nil {
 		return err
 	}
 	if _, err := l.sender.Send(ctx, transport.Outbound{Body: reply}); err != nil {
@@ -161,12 +192,26 @@ func (l *Ladder) finish(ctx context.Context, reply string) error {
 	return nil
 }
 
+// proposalRef is the context_ref of a propose_change reply, and nil for every
+// other tool.
+func proposalRef(res agent.Result) *string {
+	if res.Proposal == nil {
+		return nil
+	}
+	ref := store.ProposalRef(res.Proposal.ID)
+	return &ref
+}
+
 // persistAssistantProse writes one assistant row carrying real prose and no
 // tool call - used for a no-tool-call rung's actual reply and for the
 // terminal reply of every outcome.
 func (l *Ladder) persistAssistantProse(ctx context.Context, content string) error {
+	return l.persistAssistantProseRef(ctx, content, nil)
+}
+
+func (l *Ladder) persistAssistantProseRef(ctx context.Context, content string, ref *string) error {
 	if _, _, err := l.store.CreateConversation(ctx, domain.NewConversation{
-		Role: domain.RoleAssistant, Content: content,
+		Role: domain.RoleAssistant, Content: content, ContextRef: ref,
 	}); err != nil {
 		return fmt.Errorf("conversation: persist assistant row: %w", err)
 	}

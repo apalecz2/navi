@@ -21,7 +21,7 @@ real host. These documents remain the agreed specification.
 
 Go, SQLite in WAL mode, and server-rendered HTML (templ, HTMX and Alpine, with
 uPlot for the statistics charts). One static binary running an
-HTTP API and six supervised background loops, behind a Cloudflare Tunnel, with
+HTTP API and seven supervised background loops, behind a Cloudflare Tunnel, with
 Litestream replicating to R2 and Prometheus and Grafana alongside.
 
 No web framework, no ORM, no LLM SDK, no SPA. Each of those omissions is a

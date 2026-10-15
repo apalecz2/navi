@@ -78,6 +78,15 @@ type ItemChanges struct {
 	Attrs              json.RawMessage    `json:"attrs,omitempty"`
 }
 
+// ProposeChangeArgs is propose_change's arguments (docs/06-agent-spec.md). It
+// writes nothing to items or occurrences: it records a suggestion so a "yes" in
+// the next turn has something to mean (D-012).
+type ProposeChangeArgs struct {
+	ItemID    string      `json:"item_id" jsonschema:"required"`
+	Proposal  ItemChanges `json:"proposal" jsonschema:"required"`
+	Rationale string      `json:"rationale" jsonschema:"required"`
+}
+
 // DeleteItemArgs is delete_item's arguments.
 type DeleteItemArgs struct {
 	ItemID    string `json:"item_id" jsonschema:"required"`

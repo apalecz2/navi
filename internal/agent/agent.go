@@ -34,8 +34,13 @@ import (
 // agent on that list. Without it navi_occurrence_transitions_total{source="agent"}
 // stays a registered zero while the writes happen, which is worse than a
 // missing series: it reads as "the agent never resolves anything".
+//
+// IncProposalAccepted is the second: update_item and delete_item are where a
+// proposal is accepted, because a proposal changes nothing itself and "accepted"
+// can only mean that one of those two writes followed it.
 type Metrics interface {
 	IncTransition(from, to, source string)
+	IncProposalAccepted(trigger string)
 }
 
 // Tools holds what every handler needs, built once by a caller (main, or

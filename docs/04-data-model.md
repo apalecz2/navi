@@ -238,7 +238,9 @@ Keys in use:
 | `current_tz` | Device timezone, drives `tz_mode = 'floating'` items |
 | `last_materialized_through` | Horizon date, so the sweeper can detect a missed run |
 | `last_reconcile_date` | Prevents a duplicate check-in after a restart |
-| `proactive_count:{date}` | Daily cap on unprompted agent messages |
+| `proactive_count:{date}` | Daily cap on unprompted proposals (A13), `{date}` the person's local date; the write that spends today's deletes yesterday's key |
+| `proposals` | JSON array of proposals the agent has made, every status, pruned after 7 days; the open ones are what the agent's `Context ref: proposal:` block lists (session 26) |
+| `proactive_latches` | JSON object of episodes the proactive loop is tracking (`item:{id}`, `snooze:{root id}`), each `detected` or `asked`; what makes a trigger fire once per episode (session 26) |
 | `global_pause_until` | Vacation mode |
 | `awaiting_response:{date}` | Set when the morning briefing sends, cleared on reply; read by the grace-window pass (P3.5, 11-goals-spec.md) |
 | `last_briefing_date` | Prevents a duplicate briefing after a restart, same role as `last_reconcile_date` (P3.5) |

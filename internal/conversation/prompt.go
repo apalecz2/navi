@@ -20,11 +20,11 @@ const roleAndScope = `You are the conversational agent for Navi, a single-user r
 
 // behaviouralRules is system-prompt part 4. It names only the tools the
 // catalog actually has - list_items, create_item, update_item, delete_item,
-// bulk_resolve, pause, request_escalation - and deliberately omits the doc's
-// rule about propose_change, which does not exist yet: an instruction naming a
-// tool that is not offered would mislead the model rather than help it. pause
-// joined the catalog and this list in the same commit, which is the discipline
-// that keeps the two honest.
+// propose_change, bulk_resolve, pause, request_escalation - and a rule about a
+// tool joins this list in the same commit the tool joins the catalog, which is
+// the discipline that keeps the two honest: an instruction naming a tool that is
+// not offered would mislead the model rather than help it. propose_change was
+// the last one held back, until the proactive loop gave it something to mean.
 //
 // pause's rule is 06-agent-spec's "prefer pause over multiple skips when the
 // user indicates absence". It is worth stating rather than leaving to the tool
@@ -46,6 +46,8 @@ const behaviouralRules = `Rules:
 - Record a skip, not a miss, whenever the user says why something did not happen, and put their own words in the note: "did everything except the walk, I was away" is a completed set plus one skipped walk with note "I was away". Never choose missed. A miss is not something a person reports - it is what the system concludes when nobody said anything at all.
 - A "Context ref" block below means the last thing you sent was an end-of-day check-in and those occurrences are still waiting on an answer. The user's message may be that answer. If it reports what was or was not done, call bulk_resolve for exactly the occurrences it names and say nothing about the ones it left out - an item the user did not mention is not a skip, and it is not your job to ask again. If the message is a new request instead, treat it as one: a check-in does not oblige the user to answer it before saying anything else. Ids for these may come from the Context ref block or from Today's occurrences; after midnight only the Context ref block still lists them.
 - A "Context ref: briefing:" line means the last thing you sent was this morning's briefing, which asked what today should include. The user's message may be adding to today, or may be an unrelated new request - treat it on its face and act on it with the right tool. A briefing obliges no answer, so do not prompt for one.
+- A "Context ref: proposal:" block means the last message you sent was a suggestion to change one item, and it lists the exact tool call that would make the change. It is only a suggestion: nothing has changed yet. Make that call - once, with exactly those arguments - only when the user's message plainly agrees to it ("yes", "do it", "go ahead", "sounds good"). If the message declines, merely acknowledges ("ok", "thanks"), asks a question, or is about something else, do not apply it: treat the message on its face, and if there is nothing to do, call list_items, which changes nothing. If the user asks for a different change instead, make that one with the ordinary tools. A proposal is on offer for one reply. Never apply one on your own initiative.
+- To suggest a change nobody asked for, or when the user asks what you would suggest, call propose_change, never update_item. It writes nothing and the user's next message decides.
 - Prefer pause over a run of skips when the user says they are away or unavailable for a stretch of time. "I'm away until Monday" is one pause with scope=global, not a skip for every occurrence in between. Use scope=item when only one reminder is affected. Pausing with no until resumes normal operation.
 - Call request_escalation when the request is ambiguous, spans multiple items in a way that is hard to disentangle, or references something unresolvable.
 - Always respond by calling exactly one tool. A plain-text reply with no tool call is treated as a failure, not an answer.`
@@ -101,8 +103,40 @@ func (l *Ladder) buildSystemPrompt(ctx context.Context) string {
 	b.WriteString(l.renderLastTouched(ctx))
 	b.WriteString(l.renderContextRef(ctx, loc))
 	b.WriteString(l.renderBriefingContextRef(ctx))
+	b.WriteString(l.renderProposals(ctx))
 
 	return b.String()
+}
+
+// renderProposals is the context block's proposal lines: one per suggestion a
+// reply could still agree to, each with the exact call "yes" would make.
+//
+// Like the other Context ref blocks it is omitted entirely when nothing is open,
+// because an empty one would tell the model it is answering a question nobody
+// asked. It is a recognition mechanism and nothing more - there is no classifier
+// deciding that a message is a "yes", and no code path that applies a proposal.
+// The call is spelled out so that a model that does hear a yes has nothing to
+// invent, and a model that did not has nothing to apply.
+func (l *Ladder) renderProposals(ctx context.Context) string {
+	open, err := l.store.OpenProposals(ctx, time.Now())
+	if err != nil || len(open) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range open {
+		fmt.Fprintf(&b, "Context ref:  %s\n", store.ProposalRef(p.ID))
+		fmt.Fprintf(&b, "  proposed:   %s (%q) - %s\n", p.ItemID, p.ItemTitle, p.Summary)
+		fmt.Fprintf(&b, "  on yes:     %s\n", proposalCall(p))
+	}
+	return b.String()
+}
+
+// proposalCall is the tool call a proposal's acceptance would be.
+func proposalCall(p domain.Proposal) string {
+	if p.Tool == domain.ProposalDeleteItem {
+		return fmt.Sprintf(`delete_item {"item_id":%q,"confirmed":true}`, p.ItemID)
+	}
+	return fmt.Sprintf(`update_item {"item_id":%q,"changes":%s}`, p.ItemID, p.Changes)
 }
 
 // renderBriefingContextRef is the context block's briefing line: present only

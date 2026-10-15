@@ -400,10 +400,10 @@ full design.
 - `persona.md` mounted and hot-readable *(session 25)*
 - Tone ladder branching *(session 25)*
 - Anti-repetition via recent messages *(session 25)*
-- Proactive triggers: consecutive misses, repeated snoozes, dormancy
-- `propose_change` tool
+- Proactive triggers: consecutive misses, repeated snoozes, dormancy *(session 26)*
+- `propose_change` tool *(session 26)*
 - Weekly digest
-- Daily cap on unprompted messages
+- Daily cap on unprompted messages *(session 26)*
 
 **Exit criteria**
 
@@ -412,7 +412,9 @@ full design.
       *Wall-clock; needs a real model on the real host. The plumbing (recent
       messages in the prompt, a verbatim repeat refused) is checked in
       `reportCopywriter`; the box stays open.*
-- [ ] A five-miss streak produces a proposal, not another nudge
+- [x] A five-miss streak produces a proposal, not another nudge
+      *(`reportProactive`: the proposal goes out once with a `context_ref`; the
+      copywriter's dormancy reminder asks nothing)*
 - [x] Deleting the model API key still delivers every reminder, as plain titles
       *(a 401 provider, a 500 provider and no model at all, in `reportCopywriter`)*
 - [x] Editing `persona.md` changes the voice without a rebuild

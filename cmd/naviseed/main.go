@@ -92,6 +92,13 @@ func run() error {
 	if os.Getenv("NAVISEED_ONLY") == "copywriter" {
 		return reportCopywriter(ctx, st, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log)
 	}
+	if os.Getenv("NAVISEED_ONLY") == "proactive" {
+		pt, err := defaults.Load(cfg.Files.DefaultsPath())
+		if err != nil {
+			return err
+		}
+		return reportProactive(ctx, st, pt, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log)
+	}
 
 	item, err := seedItem(ctx, st, cfg.Schedule.DefaultTZ.String())
 	if err != nil {
@@ -265,6 +272,14 @@ func run() error {
 	// Last of all: the escalation ladder built on top of it - the session
 	// this repository is on right now.
 	if err := reportConversationLadder(ctx, st, table, cfg.Schedule.DefaultTZ, log); err != nil {
+		return err
+	}
+
+	// The proactive loop: after the ladder, because it drives replies through a
+	// real Ladder and writes conversations rows that the ladder scenarios above
+	// read the newest of, and after the copywriter, whose items it must not
+	// inherit (the loop is scoped to its own fixtures).
+	if err := reportProactive(ctx, st, table, cfg.Schedule.DefaultTZ.String(), cfg.Schedule.DefaultTZ, cfg.Data.DBPath(), log); err != nil {
 		return err
 	}
 
@@ -4553,7 +4568,7 @@ func reportModelClient(ctx context.Context, st *store.Store, log *slog.Logger, r
 		taskCount = len(real.Tasks)
 	}
 	fmt.Printf("  %s                     tasks=%d  %s\n",
-		routingPath, taskCount, verdict(loadErr == nil && taskCount == 6))
+		routingPath, taskCount, verdict(loadErr == nil && taskCount == 7))
 
 	// Checked against whichever MODEL_PROVIDER this run is actually
 	// configured with — the same check main runs before wiring a Client —

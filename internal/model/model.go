@@ -41,6 +41,7 @@ const (
 	TaskCopywriter  Task = "copywriter"
 	TaskReconcile   Task = "reconcile"
 	TaskBriefing    Task = "briefing"
+	TaskProposal    Task = "proposal"
 	TaskDigest      Task = "digest"
 )
 

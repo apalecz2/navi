@@ -45,6 +45,12 @@ type Metrics struct {
 	briefingFallbacks   prometheus.Counter
 	briefingsUnanswered prometheus.Counter
 
+	proactiveTriggers *prometheus.CounterVec
+	proposalsSent     *prometheus.CounterVec
+	proposalFallbacks prometheus.Counter
+	proposalsCapped   prometheus.Counter
+	proposalsAccepted *prometheus.CounterVec
+
 	inboundAccepted *prometheus.CounterVec
 	inboundDropped  *prometheus.CounterVec
 
@@ -140,6 +146,26 @@ func New() *Metrics {
 			Name: "navi_briefing_unanswered_total",
 			Help: "Morning briefings that got no reply before their grace window closed (O8).",
 		}),
+		proactiveTriggers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_proactive_triggers_total",
+			Help: "Proactive trigger episodes first detected, by kind (consecutive_misses, snooze_repeat, dormancy). Once per episode, whether or not the cap lets the message out the same day.",
+		}, []string{"kind"}),
+		proposalsSent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_proposals_sent_total",
+			Help: "Unprompted proposals delivered, by trigger kind. These are what the daily cap (A13) counts.",
+		}, []string{"kind"}),
+		proposalFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_proposals_fallback_total",
+			Help: "Proposals sent as the plain template because no composed text was produced or the composed text did not state the alternative.",
+		}),
+		proposalsCapped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "navi_proposals_capped_total",
+			Help: "Triggers held to another day because the daily cap of unprompted messages was spent. Counted once per trigger per day; a held trigger is sent later, not dropped.",
+		}),
+		proposalsAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "navi_proposals_accepted_total",
+			Help: "Proposals followed by an update_item or delete_item on their item while open, by trigger kind or agent. A write followed; it need not be the written alternative.",
+		}, []string{"trigger"}),
 		inboundAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "navi_inbound_messages_accepted_total",
 			Help: "Inbound messages recorded to conversations, by transport.",
@@ -172,6 +198,11 @@ func New() *Metrics {
 		m.briefingsSent,
 		m.briefingFallbacks,
 		m.briefingsUnanswered,
+		m.proactiveTriggers,
+		m.proposalsSent,
+		m.proposalFallbacks,
+		m.proposalsCapped,
+		m.proposalsAccepted,
 		m.inboundAccepted,
 		m.inboundDropped,
 		m.llmCalls,
@@ -185,6 +216,16 @@ func New() *Metrics {
 			m.copywriterGenerated.WithLabelValues(pass, outcome)
 		}
 	}
+
+	// The proactive series export zeros for the same reason: a quiet week is a
+	// fact, and a series that appears with the first trigger is indistinguishable
+	// from one that does not exist.
+	for _, kind := range []string{"consecutive_misses", "snooze_repeat", "dormancy"} {
+		m.proactiveTriggers.WithLabelValues(kind)
+		m.proposalsSent.WithLabelValues(kind)
+		m.proposalsAccepted.WithLabelValues(kind)
+	}
+	m.proposalsAccepted.WithLabelValues("agent")
 	return m
 }
 
@@ -299,6 +340,26 @@ func (m *Metrics) IncBriefingFallback() { m.briefingFallbacks.Inc() }
 // signal "the briefing went unanswered" produces, read later by the day's tone
 // strategy.
 func (m *Metrics) IncBriefingUnanswered() { m.briefingsUnanswered.Inc() }
+
+// IncTrigger counts one proactive episode first detected. It is counted when the
+// latch is created and not when the message goes out, so a trigger the cap holds
+// back for a day is still exactly one.
+func (m *Metrics) IncTrigger(kind string) { m.proactiveTriggers.WithLabelValues(kind).Inc() }
+
+// IncProposalSent counts one unprompted proposal delivered, after the send returns.
+func (m *Metrics) IncProposalSent(kind string) { m.proposalsSent.WithLabelValues(kind).Inc() }
+
+// IncProposalFallback counts one proposal sent as the plain template.
+func (m *Metrics) IncProposalFallback() { m.proposalFallbacks.Inc() }
+
+// IncProposalCapped counts one trigger held to another day by the daily cap.
+func (m *Metrics) IncProposalCapped() { m.proposalsCapped.Inc() }
+
+// IncProposalAccepted counts one proposal followed by a write on its item. The
+// label is the proposal's trigger, or "agent" for one the model made itself.
+func (m *Metrics) IncProposalAccepted(trigger string) {
+	m.proposalsAccepted.WithLabelValues(trigger).Inc()
+}
 
 // AddReconciledOccurrences counts how many occurrences a check-in asked about.
 // Read against navi_reconcile_checkins_total it is the average size of an

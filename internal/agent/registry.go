@@ -33,6 +33,7 @@ var registrations = []registration{
 	{"list_items", "List items, optionally filtered by active, all, or paused.", handleListItems, ListItemsArgs{}},
 	{"create_item", "Create a new reminder or event with a schedule.", handleCreateItem, CreateItemArgs{}},
 	{"update_item", "Change an existing item's fields or schedule, at a chosen scope.", handleUpdateItem, UpdateItemArgs{}},
+	{"propose_change", "Suggest a change to one item without making it: give the fields you would change in proposal and a short rationale. Nothing is applied; the user's next message decides. Use this when you think a schedule is not working or the user asks what you would suggest - never update_item to impose a change nobody asked for.", handleProposeChange, ProposeChangeArgs{}},
 	{"delete_item", "Archive an item and remove its pending occurrences. Requires confirmed=true.", handleDeleteItem, DeleteItemArgs{}},
 	{"bulk_resolve", "Record outcomes for one or more occurrences in a single atomic write. Use this for any message reporting a completion, a skip, or several at once — including a single one, and including something already done earlier today.", handleBulkResolve, BulkResolveArgs{}},
 	{"pause", "Suspend everything, or one item, until a date. Use this whenever the user says they are away or unavailable, instead of skipping each occurrence. An empty until resumes.", handlePause, PauseArgs{}},

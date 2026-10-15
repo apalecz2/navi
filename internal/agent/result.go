@@ -73,6 +73,11 @@ type Result struct {
 	GoalUpdate   *domain.GoalUpdate   `json:"goal_update,omitempty"`
 	GoalProgress *store.GoalProgress  `json:"goal_progress,omitempty"`
 
+	// Proposal is propose_change's answer: the suggestion as recorded, which is
+	// all it did. The conversation layer words the confirmation from it and tags
+	// the reply with its context_ref.
+	Proposal *domain.Proposal `json:"proposal,omitempty"`
+
 	// Stats is get_stats' answer: the same typed summary GET /api/stats/summary
 	// serialises, so a number stated in chat is the dashboard's number (V6).
 	Stats *stats.Summary `json:"stats,omitempty"`

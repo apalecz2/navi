@@ -91,6 +91,22 @@ tasks:
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
         timeout_seconds: 130
 
+  # An unprompted proposal (docs/06-agent-spec.md, Proactive behaviour): one short
+  # message that states an alternative code has already computed. Same shape as
+  # reconcile and briefing, and the same failure story - the plain template goes
+  # out instead - so the second tier is a courtesy. A completion that does not
+  # state the alternative is refused in code, so a tier that misreads the task
+  # costs a template and never a wrong offer.
+  proposal:
+    thinking: false
+    tiers:
+      - model: "gemma-4-31b-it"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        timeout_seconds: 120
+      - model: "gemini-3.5-flash-lite"
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        timeout_seconds: 130
+
   # Weekly, and it actually reasons over statistics, so cost is negligible at
   # that frequency and both tiers get more time than the others.
   digest:

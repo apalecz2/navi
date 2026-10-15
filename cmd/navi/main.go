@@ -28,6 +28,7 @@ import (
 
 	"github.com/aidenpaleczny/navi/internal/agent"
 	"github.com/aidenpaleczny/navi/internal/briefing"
+	"github.com/aidenpaleczny/navi/internal/proactive"
 	"github.com/aidenpaleczny/navi/internal/config"
 	"github.com/aidenpaleczny/navi/internal/conversation"
 	"github.com/aidenpaleczny/navi/internal/copywriter"
@@ -182,6 +183,14 @@ func run() error {
 		copyGenerator = copywriter.NewModelGenerator(modelClient, routing, cfg.Files.PersonaPath())
 	}
 
+	// The proactive loop's composer: the same nil-able pattern and the same shared
+	// stack. Nil means every proposal is the template, which still states the
+	// alternative and still offers leaving things as they are.
+	var proposalComposer proactive.Composer
+	if modelClient != nil {
+		proposalComposer = proactive.NewModelComposer(modelClient, routing, cfg.Files.PersonaPath())
+	}
+
 	// One statistics service for the API routes, the stats view and the
 	// copywriter's context blob, so a streak in a reminder and a streak on the
 	// page are one computation (V6).
@@ -285,6 +294,14 @@ func run() error {
 		// morning briefing together.
 		briefing.New(log.With("loop", briefing.Name), st, notifier, m, briefingComposer,
 			cfg.Schedule.BriefingAt, cfg.Schedule.DefaultTZ).Loop(),
+
+		// The proactive loop is the seventh. It sends through the same notifier and
+		// reads the same statistics service as the page and the copywriter, so a
+		// "five misses" in a proposal is the number the stats view shows. It is the
+		// only loop whose messages are capped (A13) and the only one with a
+		// quiet-hours window (proactive.WindowStart..WindowEnd).
+		proactive.New(log.With("loop", proactive.Name), st, statsSvc, notifier, m, proposalComposer,
+			cfg.Schedule.DefaultTZ).Loop(),
 
 		sweeper.New(log.With("loop", sweeper.Name), st, mat, cfg.Schedule.DefaultTZ).Loop(),
 	}

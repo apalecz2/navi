@@ -31,6 +31,8 @@ func buildConfirmation(toolName string, res agent.Result) string {
 		return renderPauseConfirmation(res.Item, res.PausedUntil)
 	case "create_goal", "update_goal":
 		return renderGoalConfirmation(toolName, res.Goal, res.GoalProgress)
+	case "propose_change":
+		return renderProposal(res.Proposal)
 	case "get_stats":
 		return renderStats(res.Stats)
 	case "list_goals":
@@ -40,6 +42,18 @@ func buildConfirmation(toolName string, res agent.Result) string {
 	default: // create_item, update_item
 		return renderNextOccurrences(res.Item, res.NextOccurrences, res.Inferred)
 	}
+}
+
+// renderProposal words a propose_change result from the stored proposal, so what
+// the reply says is what a "yes" would do. It says in so many words that nothing
+// has changed, because the previous reply to a tool call in this app was always a
+// statement that something had.
+func renderProposal(p *domain.Proposal) string {
+	if p == nil {
+		return "I have a suggestion, but it was not recorded. Nothing has changed."
+	}
+	return fmt.Sprintf("I'd suggest we %s for %q: %s Nothing changes unless you say yes.",
+		p.Summary, p.ItemTitle, p.Rationale)
 }
 
 // renderResolutions confirms a batch in the shape US-4.2 asks for: counts and

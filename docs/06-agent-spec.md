@@ -334,6 +334,7 @@ when shown the error text, and it is far cheaper than a tier-two call.
 | `reconcile` | Gemma 4 31B | Gemini 3.1 Flash Lite | off | Composing one short question from a list |
 | `digest` | Gemini 3.1 Flash Lite | larger | on | Weekly, actually reasons over statistics, cost is negligible at that frequency |
 | `briefing` (P3.5) | Gemma 4 31B | Gemini 3.1 Flash Lite | off | Same shape as `reconcile`: composing one message from a list, not reasoning over it |
+| `proposal` (P5) | Gemma 4 31B | Gemini 3.1 Flash Lite | off | Wording one proposal whose content code has already chosen; refused unless it states the alternative |
 
 Thinking mode off for copywriting is deliberate. Reasoning tokens help with
 "weekdays but not the week of the 14th" and do nothing for a one-line nudge except
@@ -506,12 +507,13 @@ Eight notes from the implementation, each a place the spec left a choice open.
   sent to the model; the strategy is. G8 is a hard rule in the system prompt
   after `persona.md`, not only a line in it, and a message over 120 characters,
   empty, or identical to a recent one is refused rather than repaired.
-- **The dormancy question has no recorded context.** The message goes out as an
-  ordinary reminder, with Done / Snooze / Skip, and the reply is an ordinary
-  turn. Nothing yet tells the agent that this particular notification asked
-  "reschedule, shrink or drop?", so a bare "drop it" depends on the item being
-  last touched or named. A `context_ref` for it is the obvious follow-up and
-  belongs with the proactive triggers.
+- **The dormancy question moved (session 26).** Session 25 sent it as an
+  ordinary reminder with no recorded context. It is now the proactive loop's, sent
+  once per episode as a proposal with a `context_ref`, and the copywriter's
+  dormancy branch (`Choose` is unchanged, and so are its thresholds, which are now
+  `internal/stats`') writes the plainest reminder it can and asks nothing. One
+  owner, so a dormant item is not asked twice, once with a record and once
+  without.
 
 `persona.md` is read by `defaults.GetPersona` on every call - from the agent's
 system prompt, the check-in composer, the briefing composer and now the
@@ -625,3 +627,66 @@ unpredictable behaviour.
 Cap unprompted messages at three per day, tracked in `kv.proactive_count:{date}`.
 Personality is the feature most likely to charm for a fortnight and then get
 muted, and the failure mode is volume rather than tone.
+
+### Built in session 26 (`internal/proactive`)
+
+The rows above that say `propose_change` are one loop, the seventh, and these are
+the decisions it makes.
+
+- **Which loop, and when.** `internal/proactive`, every five minutes. The sweeper
+  was the obvious home and is hourly, has no transport, and is the loop that
+  cannot reach the model; this one has the briefing's shape. It sends only between
+  09:00 and 20:00 in the person's zone (`proactive.WindowStart` / `WindowEnd`,
+  start inclusive), which sits between the default briefing and check-in. A trigger
+  detected at 03:00 is latched and sent at 09:00. Nothing is sent during a global
+  pause.
+- **Definitions are `internal/stats`'.** Five consecutive misses is
+  `ItemSignals.ConsecutiveMisses`, the run the streak rules define: a skip, an
+  awaiting chain and an open chain are neutral, a completion ends it. Dormant is
+  `stats.IsDormant`: no completion in 14 days, at least 2 misses, no recent skip
+  note. "No resolution of any kind" was rejected as the definition because a sparse
+  schedule produces it. The two are mutually exclusive in the loop (five misses is
+  the first), and share one latch per item, so an item is asked once.
+- **Three snoozes against the cap.** The cap is checked when a snooze is
+  requested: a link at depth `snooze_cap` that is snoozed again resolves `missed`.
+  So at the default cap of 3, "three snoozes on one occurrence" is the chain
+  sitting at depth 3 - the last moment a proposal can save it from being assigned a
+  miss - and not the exhaustion itself. The threshold is `min(3, snooze_cap)`, and
+  an item with cap 0 never triggers. It is evaluated per chain over the last 48
+  hours and fires whether the chain later completes or misses, because it is about
+  the time.
+- **The alternative is code's.** A retime for a snooze (a fixed schedule's `at`,
+  or a windowed/fuzzy window start, to the time the chain was pushed to, rounded to
+  a quarter hour); a smaller ask for the others (half a fuzzy count, every other
+  day of a day list, Monday-Wednesday-Friday for a daily rule); a drop where
+  nothing can be made smaller. A proposed schedule is checked with
+  `schedule.Validate`, so it is one the ordinary `update_item` would accept.
+- **A proposal persists as `kv.proposals` plus a `conversations` row with
+  `context_ref = proposal:{id}`.** The record holds the exact tool call a "yes"
+  would be. The agent's context block lists every open proposal, its item and that
+  call; `behaviouralRules` says to make it, once, only on a plain agreement. It is
+  on offer for one reply that runs a tool (`PassProposals` at the end of the turn)
+  and for 24 hours at most, and an apology or rephrase does not spend it. Nothing
+  in the system applies a proposal: the only route is an ordinary `update_item` or
+  `delete_item` on a user's message. The limit of that is the model's reading of
+  "yes"; the code bounds what a misreading can do to one turn, one item, and the
+  listed arguments.
+- **Composition is template-first.** The template states the alternative and
+  offers leaving things as they are. A model completion replaces it only if it
+  names the item and contains every `Mentions` group (`proactive.Accept`), so a
+  message cannot offer something other than what a "yes" does.
+- **Latches.** One per episode, `detected` then `asked`. Reset by the condition
+  clearing (a completion ends a miss run), by the item going away, and by time: an
+  asked episode still true after 30 days is a new one. A reply does not reset it,
+  and a pause neither creates nor clears one.
+- **The cap.** Three per local day, and only the proactive loop's sends count. The
+  check-in and the briefing are scheduled by the person and a reply to something
+  they said is not unprompted; if the first two counted, three would leave one. An
+  agent-initiated `propose_change` is the second kind and is uncapped. Over the
+  cap a trigger is held, not dropped: it stays `detected` and goes out on the first
+  in-window pass of a day with budget, counted once per day as capped. One message
+  per pass, five minutes apart.
+- **A known gap.** The prompt says to call `list_items` when a proposal is
+  declined or acknowledged and there is nothing to do, because every reply must be
+  a tool call and there is no no-op tool. "No thanks" therefore answers with the
+  item list. A harmless acknowledgement tool is the follow-up.

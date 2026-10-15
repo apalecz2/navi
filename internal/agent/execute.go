@@ -214,6 +214,7 @@ func handleUpdateItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	if err := t.store.SetLastTouchedItem(ctx, updated.ID); err != nil {
 		return Result{}, err
 	}
+	t.acceptProposals(ctx, updated.ID, now)
 	return Result{Item: &updated, NextOccurrences: next, Inferred: inferred, Applied: applied}, nil
 }
 
@@ -267,6 +268,7 @@ func (t *Tools) updateSingle(ctx context.Context, item domain.Item, args UpdateI
 		return Result{}, err
 	}
 	_ = occ // read back for symmetry with the other scopes; not part of Result this session
+	t.acceptProposals(ctx, item.ID, now)
 	return Result{Item: &updated, NextOccurrences: next}, nil
 }
 
@@ -307,6 +309,7 @@ func handleDeleteItem(ctx context.Context, t *Tools, raw json.RawMessage) (Resul
 	if err := t.store.SetLastTouchedItem(ctx, archived.ID); err != nil {
 		return Result{}, err
 	}
+	t.acceptProposals(ctx, archived.ID, now)
 	return Result{Item: &archived, Applied: applied}, nil
 }
 

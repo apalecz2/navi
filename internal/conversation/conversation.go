@@ -58,6 +58,13 @@ type Store interface {
 	// ListAwaitingReconciliation rather than a second recognition mechanism -
 	// the briefing loop's EvaluateResponse reads the same slot.
 	BriefingAwaiting(ctx context.Context) (date string, sentAt time.Time, ok bool, err error)
+
+	// The proposal equivalent: which unprompted suggestions can still be agreed
+	// to, and closing the ones a turn has shown and gone past. A proposal is on
+	// offer for exactly one turn that executes a tool (see Handle), so nothing a
+	// model later mistakes for a "yes" can find it.
+	OpenProposals(ctx context.Context, now time.Time) ([]domain.Proposal, error)
+	PassProposals(ctx context.Context, ids []string, now time.Time) error
 }
 
 // Sender is the outbound half this package needs - Send only, satisfied
